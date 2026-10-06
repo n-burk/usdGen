@@ -6,6 +6,7 @@
 #include "fencePool.h"
 
 #include <algorithm>
+#include <atomic>
 #include <climits>
 #include <cmath>
 #include <cstddef>
@@ -35,15 +36,44 @@ constexpr uint32_t kLocalSize = 256;
 constexpr uint32_t kEvalLocalSize = 128;
 constexpr uint32_t kMaxEvalStack = 16;
 constexpr uint64_t kFenceTimeoutNs = 10000000000ull;
+// Total device bytes (R words plus the CV proof copy) below which a
+// cached evaluation engages. 1M CVs at n=400 need 3.2GB of R plus a
+// 12MB proof, so the gap-range bench shape engages; anything larger
+// keeps today's direct kernel with no added work. (CUDA's twin cap is
+// 1GB for its n=100 bench shape.)
+constexpr size_t kRbfVkEvalCacheMaxBytes = size_t(4) << 30;
+// The verify shader counts words in int32, so the cached path admits
+// at most INT32_MAX/3 CVs; larger counts run directly.
+constexpr uint32_t kRbfVkEvalCacheMaxCount = uint32_t(INT32_MAX) / 3u;
 
-// Shared 64-byte solve UBO: identical declaration in all seven solve/eval
-// shaders (each reads its subset at these offsets).
+std::atomic<bool> g_disableRbfVkEvalCache{false};
+
+// Shared 64-byte solve UBO: identical declaration in the seven
+// bind/solve/eval shaders (each reads its subset at these offsets);
+// the R-cache shaders use RbfVkVerifyUbo/RbfVkCachedUbo below.
 struct SolveUbo {
     int32_t n = 0, m = 0, count = 0, reserved = 0;
     double cx = 0, cy = 0, cz = 0, invScale = 1, scale = 1, lambda = 0;
 };
 static_assert(sizeof(SolveUbo) == 64);
 static_assert(offsetof(SolveUbo, cx) == 16);
+
+// R-cache UBOs (see the .comp ABI notes). VerifyUbo: words, fill
+// groups X/Y. CachedUbo: n, m, active count, P, then the eval tail;
+// the fill is a full evaluation over the same count, so one 64-byte
+// write feeds both the fill and the cached sets. It reuses the
+// binding's solve UBO slot (rewritten per evaluation like the direct
+// path already does).
+struct RbfVkVerifyUbo {
+    int32_t words = 0, fillX = 0, fillY = 0, reserved = 0;
+};
+static_assert(sizeof(RbfVkVerifyUbo) == 16);
+struct RbfVkCachedUbo {
+    int32_t nmcs[4] = {0, 0, 0, 0};
+    double cx = 0, cy = 0, cz = 0, invScale = 1, scale = 1, pad = 0;
+};
+static_assert(sizeof(RbfVkCachedUbo) == 64);
+static_assert(offsetof(RbfVkCachedUbo, cx) == 16);
 
 uint32_t Groups(uint32_t n) { return (n + kLocalSize - 1) / kLocalSize; }
 uint32_t EvalGroups(uint32_t n) { return (n + kEvalLocalSize - 1) / kEvalLocalSize; }
@@ -181,19 +211,23 @@ struct RbfVkBinding::Native {
     VkShaderModule extentShader = VK_NULL_HANDLE, gramShader = VK_NULL_HANDLE,
         buildMatrixShader = VK_NULL_HANDLE, luShader = VK_NULL_HANDLE,
         rhsShader = VK_NULL_HANDLE, triSolveShader = VK_NULL_HANDLE,
-        evaluateShader = VK_NULL_HANDLE;
+        evaluateShader = VK_NULL_HANDLE, verifyShader = VK_NULL_HANDLE,
+        fillShader = VK_NULL_HANDLE, cachedShader = VK_NULL_HANDLE;
     VkDescriptorSetLayout extentLayout = VK_NULL_HANDLE, gramLayout = VK_NULL_HANDLE,
         buildMatrixLayout = VK_NULL_HANDLE, luLayout = VK_NULL_HANDLE,
         rhsLayout = VK_NULL_HANDLE, triSolveLayout = VK_NULL_HANDLE,
-        evaluateLayout = VK_NULL_HANDLE;
+        evaluateLayout = VK_NULL_HANDLE, verifyLayout = VK_NULL_HANDLE,
+        fillLayout = VK_NULL_HANDLE;
     VkPipelineLayout extentPipelineLayout = VK_NULL_HANDLE, gramPipelineLayout = VK_NULL_HANDLE,
         buildMatrixPipelineLayout = VK_NULL_HANDLE, luPipelineLayout = VK_NULL_HANDLE,
         rhsPipelineLayout = VK_NULL_HANDLE, triSolvePipelineLayout = VK_NULL_HANDLE,
-        evaluatePipelineLayout = VK_NULL_HANDLE;
+        evaluatePipelineLayout = VK_NULL_HANDLE, verifyPipelineLayout = VK_NULL_HANDLE,
+        fillPipelineLayout = VK_NULL_HANDLE;
     VkPipeline extentPipeline = VK_NULL_HANDLE, gramPipeline = VK_NULL_HANDLE,
         buildMatrixPipeline = VK_NULL_HANDLE, luPipeline = VK_NULL_HANDLE,
         rhsPipeline = VK_NULL_HANDLE, triSolvePipeline = VK_NULL_HANDLE,
-        evaluatePipeline = VK_NULL_HANDLE;
+        evaluatePipeline = VK_NULL_HANDLE, verifyPipeline = VK_NULL_HANDLE,
+        fillPipeline = VK_NULL_HANDLE, cachedPipeline = VK_NULL_HANDLE;
     std::shared_ptr<ChargedBuffer> restBuf, posedBuf, matrixBuf, rhsBuf, coefBuf,
         gramBuf, extentBuf, flagBuf, infoBuf, permBuf, uboBuf, normBuf, coefStagingBuf;
     VkDescriptorPool solvePool = VK_NULL_HANDLE, evalPool = VK_NULL_HANDLE;
@@ -384,17 +418,21 @@ struct RbfVkBinding::Native {
         if (solvePool) vkDestroyDescriptorPool(d, solvePool, nullptr);
         if (evalPool) vkDestroyDescriptorPool(d, evalPool, nullptr);
         VkPipeline pipes[] = {extentPipeline, gramPipeline, buildMatrixPipeline,
-            luPipeline, rhsPipeline, triSolvePipeline, evaluatePipeline};
+            luPipeline, rhsPipeline, triSolvePipeline, evaluatePipeline,
+            verifyPipeline, fillPipeline, cachedPipeline};
         for (VkPipeline p : pipes) if (p) vkDestroyPipeline(d, p, nullptr);
         VkPipelineLayout pls[] = {extentPipelineLayout, gramPipelineLayout,
             buildMatrixPipelineLayout, luPipelineLayout, rhsPipelineLayout,
-            triSolvePipelineLayout, evaluatePipelineLayout};
+            triSolvePipelineLayout, evaluatePipelineLayout, verifyPipelineLayout,
+            fillPipelineLayout};
         for (VkPipelineLayout p : pls) if (p) vkDestroyPipelineLayout(d, p, nullptr);
         VkDescriptorSetLayout dss[] = {extentLayout, gramLayout, buildMatrixLayout,
-            luLayout, rhsLayout, triSolveLayout, evaluateLayout};
+            luLayout, rhsLayout, triSolveLayout, evaluateLayout, verifyLayout,
+            fillLayout};
         for (VkDescriptorSetLayout s : dss) if (s) vkDestroyDescriptorSetLayout(d, s, nullptr);
         VkShaderModule sms[] = {extentShader, gramShader, buildMatrixShader,
-            luShader, rhsShader, triSolveShader, evaluateShader};
+            luShader, rhsShader, triSolveShader, evaluateShader,
+            verifyShader, fillShader, cachedShader};
         for (VkShaderModule s : sms) if (s) vkDestroyShaderModule(d, s, nullptr);
     }
 };
@@ -537,6 +575,65 @@ std::shared_ptr<RbfVkBinding> RbfVkBinding::Create(
         if (r == VK_SUCCESS) r = mkPipeline(n->triSolveShader, n->triSolvePipelineLayout, &n->triSolvePipeline);
         if (r == VK_SUCCESS) r = mkPipeline(n->evaluateShader, n->evaluatePipelineLayout, &n->evaluatePipeline);
         if (r != VK_SUCCESS) { finish(r); return {}; }
+        // Optional R-cache programs (all three or none, like the deform
+        // pipeline: a partial set is a wiring bug). Without them the
+        // binding evaluates directly exactly as before.
+        bool const wantEvalCache = !spirv.verify.empty() || !spirv.fill.empty() ||
+            !spirv.evaluateCached.empty();
+        if (wantEvalCache && (!valid(spirv.verify) || !valid(spirv.fill) ||
+                              !valid(spirv.evaluateCached))) {
+            finish(VK_ERROR_INITIALIZATION_FAILED);
+            return {};
+        }
+        if (wantEvalCache) {
+            r = mkModule(spirv.verify, &n->verifyShader);
+            if (r == VK_SUCCESS) r = mkModule(spirv.fill, &n->fillShader);
+            if (r == VK_SUCCESS) r = mkModule(spirv.evaluateCached, &n->cachedShader);
+            // Non-dense numbering (verify: storage 0,1,2,4 + UBO 3;
+            // fill: storage 0,1,2,3,5,6 + UBO 4), spelled explicitly.
+            auto mkExplicitLayout = [&](std::vector<uint32_t> const& storage,
+                                        uint32_t uboBinding,
+                                        VkDescriptorSetLayout* out) {
+                std::vector<VkDescriptorSetLayoutBinding> bindings;
+                for (uint32_t i : storage) {
+                    VkDescriptorSetLayoutBinding b{};
+                    b.binding = i;
+                    b.descriptorCount = 1;
+                    b.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    b.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+                    bindings.push_back(b);
+                }
+                VkDescriptorSetLayoutBinding u{};
+                u.binding = uboBinding;
+                u.descriptorCount = 1;
+                u.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                u.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+                bindings.push_back(u);
+                VkDescriptorSetLayoutCreateInfo ds{};
+                ds.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+                ds.bindingCount = uint32_t(bindings.size());
+                ds.pBindings = bindings.data();
+                return vkCreateDescriptorSetLayout(d, &ds, nullptr, out);
+            };
+            if (r == VK_SUCCESS)
+                r = mkExplicitLayout({0, 1, 2, 4}, 3, &n->verifyLayout);
+            if (r == VK_SUCCESS)
+                r = mkExplicitLayout({0, 1, 2, 3, 5, 6}, 4, &n->fillLayout);
+            if (r == VK_SUCCESS)
+                r = mkPipelineLayout(n->verifyLayout, &n->verifyPipelineLayout);
+            if (r == VK_SUCCESS)
+                r = mkPipelineLayout(n->fillLayout, &n->fillPipelineLayout);
+            if (r == VK_SUCCESS)
+                r = mkPipeline(n->verifyShader, n->verifyPipelineLayout, &n->verifyPipeline);
+            if (r == VK_SUCCESS)
+                r = mkPipeline(n->fillShader, n->fillPipelineLayout, &n->fillPipeline);
+            // The cached shader reuses the evaluate descriptor-set layout
+            // (binding 2 carries R instead of the samples) but needs its
+            // own pipeline for its own module.
+            if (r == VK_SUCCESS)
+                r = mkPipeline(n->cachedShader, n->evaluatePipelineLayout, &n->cachedPipeline);
+            if (r != VK_SUCCESS) { finish(r); return {}; }
+        }
 
         VkDescriptorPoolSize solveSizes[2] = {
             {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 18},
@@ -549,14 +646,18 @@ std::shared_ptr<RbfVkBinding> RbfVkBinding::Create(
         solveDp.pPoolSizes = solveSizes;
         r = vkCreateDescriptorPool(d, &solveDp, nullptr, &n->solvePool);
         if (r != VK_SUCCESS) { finish(r); return {}; }
+        // A cached evaluation transiently holds 3 sets (verify + fill +
+        // cached: 4 + 6 + 5 storage, 3 UBO) above any stacked direct
+        // sets, freed before it returns; the headroom covers a full
+        // direct stack plus one transient cached call.
         VkDescriptorPoolSize evalSizes[2] = {
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 * kMaxEvalStack},
-            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kMaxEvalStack},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 * kMaxEvalStack + 15},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kMaxEvalStack + 3},
         };
         VkDescriptorPoolCreateInfo evalDp{};
         evalDp.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         evalDp.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-        evalDp.maxSets = kMaxEvalStack;
+        evalDp.maxSets = kMaxEvalStack + 3;
         evalDp.poolSizeCount = 2;
         evalDp.pPoolSizes = evalSizes;
         r = vkCreateDescriptorPool(d, &evalDp, nullptr, &n->evalPool);
@@ -669,6 +770,24 @@ void RbfVkFactorCache::Store(DeviceContext* context, int n, double smoothing,
 
 void RbfVkBinding::SetFactorCache(std::shared_ptr<RbfVkFactorCache> cache) {
     factorCache_ = std::move(cache);
+}
+
+void RbfVkBinding::SetEvalCache(std::shared_ptr<RbfVkEvalCache> cache) {
+    evalCache_ = std::move(cache);
+}
+
+uint64_t RbfVkEvalCache::hitsForTesting() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return hits_;
+}
+
+uint64_t RbfVkEvalCache::missesForTesting() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return misses_;
+}
+
+void TestDisableRbfVkEvalCache(bool disable) noexcept {
+    g_disableRbfVkEvalCache.store(disable, std::memory_order_release);
 }
 
 RbfVkStatus RbfVkBinding::BeginBind(float const* rest, int n, double smoothing,
@@ -1170,6 +1289,370 @@ RbfVkStatus RbfVkBinding::Solve(float const* posed, int posedCount) {
     return r == VK_SUCCESS ? status : RbfVkStatus::DeviceError;
 }
 
+bool RbfVkBinding::EvaluateCached(std::shared_ptr<const ChargedBuffer> cvs,
+                                     std::shared_ptr<ChargedBuffer> out,
+                                     uint32_t count, BeforeSubmit beforeSubmit,
+                                     VkPhysicalDeviceProperties const& physical,
+                                     RbfVkStatus* status) {
+    auto& native = *native_;
+    auto d = native.context->device();
+    std::shared_ptr<RbfVkEvalCache> cache = evalCache_;
+    int const n = sampleCount_;
+    int const m = order_;
+    // Entry checks mirror rbf.cu's cacheable: a set cache, an enabled
+    // seam, cache programs, and a shape under the cap. The count*12
+    // storage-range check already passed in Evaluate; n >= 4 admission
+    // makes R the larger buffer, so one range check covers both.
+    size_t const rBytes = size_t(count) * size_t(n) * sizeof(double);
+    size_t const proofBytes = size_t(count) * 3u * sizeof(uint32_t);
+    if (!cache || g_disableRbfVkEvalCache.load(std::memory_order_relaxed) ||
+        !native.verifyPipeline || !native.fillPipeline || !native.cachedPipeline ||
+        count > kRbfVkEvalCacheMaxCount || rBytes == 0 ||
+        rBytes + proofBytes > kRbfVkEvalCacheMaxBytes ||
+        rBytes > physical.limits.maxStorageBufferRange)
+        return false;
+    uint32_t groups = EvalGroups(count);
+    uint32_t groupsX = std::min(groups, physical.limits.maxComputeWorkGroupCount[0]);
+    uint32_t groupsY = (groups + groupsX - 1) / groupsX;
+    // The direct path rejects here too, so falling back preserves the
+    // InvalidArgument result exactly.
+    if (groupsY > physical.limits.maxComputeWorkGroupCount[1]) return false;
+
+    // The whole cached phase (decide, submit, wait, bookkeeping) runs
+    // under the cache mutex, like the deform proof phase, so a force
+    // commit is atomic with its fill and shared-cache users serialize.
+    std::unique_lock<std::mutex> cacheLock(cache->mutex_);
+    if (!cache->context_) cache->context_ = native.context.get();
+    // A single-context cache: foreign-context users run directly.
+    if (cache->context_ != native.context.get()) return false;
+    // Host key: cachedRest mirrors restBuf (updated and cleared
+    // together in BeginBind/AllocateBuffers), and the extent-derived
+    // center/scale are deterministic in the rest bytes; both compare
+    // bitwise, so smoothing (a matrix-diagonal term R never sees)
+    // needs no key. Shrinking reuses the entry (the shaders bound by
+    // the active count); growing reshapes to the exact count.
+    size_t const restFloats = size_t(n) * 3u;
+    bool const restMatch = cache->armed_ && cache->entryN_ == n && cache->entryP_ >= count &&
+        cache->entryRest_.size() == restFloats &&
+        std::memcmp(cache->entryRest_.data(), native.cachedRest.data(),
+                    restFloats * sizeof(float)) == 0 &&
+        std::memcmp(cache->entryCenter_, center_, sizeof(center_)) == 0 &&
+        std::memcmp(&cache->entryScale_, &scale_, sizeof(scale_)) == 0;
+    bool const force = !restMatch;
+    uint32_t const P = restMatch ? cache->entryP_ : count;
+    // The rest commit stages before the submit (an allocation failure
+    // throws here, before anything observable) and lands after the
+    // submit proves, so a rejected submit retries the force.
+    std::vector<float> restCommit;
+    try {
+        restCommit.assign(native.cachedRest.begin(), native.cachedRest.end());
+    } catch (std::bad_alloc const&) {
+        return false;
+    }
+    auto mkCacheBuf = [&](VkDeviceSize bytes, VkBufferUsageFlags usage,
+                          VkMemoryPropertyFlags props,
+                          UsdGenExecutionResourceKind kind,
+                          std::shared_ptr<ChargedBuffer>* out) {
+        VkBufferCreateInfo bi{};
+        bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bi.size = bytes;
+        bi.usage = usage;
+        bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        VkResult br = VK_SUCCESS;
+        *out = ChargedBuffer::Create(native.context, bi, props, kind, &br);
+        return *out != nullptr;
+    };
+    VkMemoryPropertyFlags const host =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    if (force) {
+        // Reshape into locals: a pool or device failure keeps the old
+        // entry intact and runs this evaluation directly.
+        std::shared_ptr<ChargedBuffer> rCache, proof;
+        if (!mkCacheBuf(VkDeviceSize(P) * VkDeviceSize(n) * 8u,
+                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                        UsdGenExecutionResourceKind::Cache, &rCache) ||
+            !mkCacheBuf(VkDeviceSize(P) * 12u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                        UsdGenExecutionResourceKind::Cache, &proof))
+            return false;
+        cache->rCache_ = std::move(rCache);
+        cache->proof_ = std::move(proof);
+    }
+    auto mkArgs = [&](std::shared_ptr<ChargedBuffer>* slot) {
+        return *slot || mkCacheBuf(12u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                             VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+                                         host, UsdGenExecutionResourceKind::Scratch, slot);
+    };
+    if (!mkArgs(&cache->fillArgs_) || !mkArgs(&cache->cachedArgs_)) return false;
+    if (!cache->verifyUbo_ &&
+        !mkCacheBuf(sizeof(RbfVkVerifyUbo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host,
+                    UsdGenExecutionResourceKind::Scratch, &cache->verifyUbo_))
+        return false;
+
+    // UBO contents plus the indirect args pre-writes. The fill and the
+    // cached dispatch share one grid over the count; exactly one runs:
+    // a speculative evaluation pre-writes a no-op fill plus a live
+    // cached dispatch (a verify match changes nothing), while a force
+    // pre-writes a live fill plus a no-op cached dispatch (the fill
+    // already wrote the direct outputs and the flag, so a miss skips
+    // the cached dispatch). A verify mismatch rewrites both triples
+    // the forced way. One 64-byte UBO write feeds both the fill and
+    // the cached sets through the binding's solve slot (rewritten per
+    // evaluation like the direct path); the entry-wait in Evaluate
+    // proved the previous submit, so no in-flight evaluate references
+    // it.
+    RbfVkVerifyUbo v;
+    v.words = int32_t(3u * count);
+    v.fillX = int32_t(groupsX);
+    v.fillY = int32_t(groupsY);
+    RbfVkCachedUbo c;
+    c.nmcs[0] = n;
+    c.nmcs[1] = m;
+    c.nmcs[2] = int32_t(count);
+    c.nmcs[3] = int32_t(P);
+    c.cx = center_[0];
+    c.cy = center_[1];
+    c.cz = center_[2];
+    c.invScale = 1.0 / scale_;
+    c.scale = scale_;
+    uint32_t fillArgs[3] = {force ? groupsX : 0u, force ? groupsY : 1u, 1u};
+    uint32_t cachedArgs[3] = {force ? 0u : groupsX, force ? 1u : groupsY, 1u};
+    struct Fill { std::shared_ptr<ChargedBuffer> const* slot; void const* data; uint32_t bytes; };
+    Fill const fills[] = {
+        {&cache->verifyUbo_, &v, sizeof(v)},
+        {&native.uboBuf, &c, sizeof(c)},
+        {&cache->fillArgs_, &fillArgs, sizeof(fillArgs)},
+        {&cache->cachedArgs_, &cachedArgs, sizeof(cachedArgs)},
+    };
+    for (auto const& fill : fills)
+        if (WriteBytes(d, **fill.slot, fill.bytes, fill.data) != VK_SUCCESS) return false;
+
+    auto allocSet = [&](VkDescriptorSetLayout layout, VkDescriptorSet* set) {
+        VkDescriptorSetAllocateInfo da{};
+        da.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        da.descriptorPool = native.evalPool;
+        da.descriptorSetCount = 1;
+        da.pSetLayouts = &layout;
+        return vkAllocateDescriptorSets(d, &da, set);
+    };
+    VkDescriptorSet verifySet = VK_NULL_HANDLE, fillSet = VK_NULL_HANDLE,
+                    cachedSet = VK_NULL_HANDLE;
+    if (allocSet(native.verifyLayout, &verifySet) != VK_SUCCESS ||
+        allocSet(native.fillLayout, &fillSet) != VK_SUCCESS ||
+        allocSet(native.evaluateLayout, &cachedSet) != VK_SUCCESS) {
+        if (verifySet) vkFreeDescriptorSets(d, native.evalPool, 1, &verifySet);
+        if (fillSet) vkFreeDescriptorSets(d, native.evalPool, 1, &fillSet);
+        return false;
+    }
+    auto releaseSets = [&]() {
+        vkFreeDescriptorSets(d, native.evalPool, 1, &verifySet);
+        vkFreeDescriptorSets(d, native.evalPool, 1, &fillSet);
+        vkFreeDescriptorSets(d, native.evalPool, 1, &cachedSet);
+    };
+    auto writeLayoutSet = [&](VkDescriptorSet set,
+                              std::vector<std::pair<uint32_t, VkDescriptorBufferInfo>> const& infos,
+                              uint32_t uboBinding) {
+        std::vector<VkWriteDescriptorSet> writes;
+        std::vector<VkDescriptorBufferInfo> held;
+        for (auto const& [binding, info] : infos) {
+            held.push_back(info);
+            VkWriteDescriptorSet w{};
+            w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w.dstSet = set;
+            w.dstBinding = binding;
+            w.descriptorCount = 1;
+            w.descriptorType = (binding == uboBinding) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                                                      : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes.push_back(w);
+        }
+        for (size_t i = 0; i < writes.size(); ++i) writes[i].pBufferInfo = &held[i];
+        vkUpdateDescriptorSets(d, uint32_t(writes.size()), writes.data(), 0, nullptr);
+    };
+    VkDeviceSize const cvBytes = VkDeviceSize(count) * 12u;
+    writeLayoutSet(verifySet,
+                   {{0, {cvs->buffer(), 0, cvBytes}},
+                    {1, {cache->proof_->buffer(), 0, cache->proof_->sizeBytes()}},
+                    {2, {cache->fillArgs_->buffer(), 0, 12}},
+                    {3, {cache->verifyUbo_->buffer(), 0, sizeof(RbfVkVerifyUbo)}},
+                    {4, {cache->cachedArgs_->buffer(), 0, 12}}},
+                   3);
+    writeLayoutSet(fillSet,
+                   {{0, {cvs->buffer(), 0, cvBytes}},
+                    {1, {out->buffer(), 0, cvBytes}},
+                    {2, {native.normBuf->buffer(), 0, VkDeviceSize(n) * 24u}},
+                    {3, {native.coefBuf->buffer(), 0, VkDeviceSize(m) * 24u}},
+                    {4, {native.uboBuf->buffer(), 0, 64}},
+                    {5, {native.flagBuf->buffer(), 0, 4}},
+                    {6, {cache->rCache_->buffer(), 0, cache->rCache_->sizeBytes()}}},
+                   4);
+    writeLayoutSet(cachedSet,
+                   {{0, {cvs->buffer(), 0, cvBytes}},
+                    {1, {out->buffer(), 0, cvBytes}},
+                    {2, {cache->rCache_->buffer(), 0, cache->rCache_->sizeBytes()}},
+                    {3, {native.coefBuf->buffer(), 0, VkDeviceSize(m) * 24u}},
+                    {4, {native.uboBuf->buffer(), 0, 64}},
+                    {5, {native.flagBuf->buffer(), 0, 4}}},
+                   4);
+
+    VkCommandBufferAllocateInfo ca{};
+    ca.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ca.commandPool = native.evalCommands;
+    ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ca.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    if (vkAllocateCommandBuffers(d, &ca, &cmd) != VK_SUCCESS) {
+        releaseSets();
+        return false;
+    }
+    VkCommandBufferBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    VkResult r = vkBeginCommandBuffer(cmd, &begin);
+    if (r == VK_SUCCESS) {
+        // Same prologue as the direct submit: the shared flag resets
+        // only when no evaluation is pending, and the host-solved
+        // coefficients copy into device-local coef ahead of the read.
+        if (!evalPending_)
+            vkCmdFillBuffer(cmd, native.flagBuf->buffer(), 0, 4, 0u);
+        VkMemoryBarrier stageVisible{};
+        stageVisible.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        stageVisible.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+        stageVisible.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_HOST_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &stageVisible, 0, nullptr, 0, nullptr);
+        VkBufferCopy coefCopy{0, 0, VkDeviceSize(order_) * 24u};
+        vkCmdCopyBuffer(cmd, native.coefStagingBuf->buffer(), native.coefBuf->buffer(), 1, &coefCopy);
+        VkMemoryBarrier coefReady{};
+        coefReady.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        coefReady.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        coefReady.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &coefReady, 0, nullptr, 0, nullptr);
+        BeforeBarrier(cmd);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, native.verifyPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+            native.verifyPipelineLayout, 0, 1, &verifySet, 0, nullptr);
+        // Capped dispatch: the grid-stride verify loop covers any word
+        // count under maxX groups.
+        uint32_t const verifyGroups =
+            std::min((3u * count + 255u) / 256u, physical.limits.maxComputeWorkGroupCount[0]);
+        vkCmdDispatch(cmd, verifyGroups, 1, 1);
+        VkMemoryBarrier verifyToFill{};
+        verifyToFill.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        verifyToFill.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        verifyToFill.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 1, &verifyToFill, 0, nullptr, 0, nullptr);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, native.fillPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+            native.fillPipelineLayout, 0, 1, &fillSet, 0, nullptr);
+        vkCmdDispatchIndirect(cmd, cache->fillArgs_->buffer(), 0);
+        VkMemoryBarrier fillToCached{};
+        fillToCached.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        fillToCached.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        fillToCached.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &fillToCached, 0, nullptr, 0, nullptr);
+        // Indirect: a miss cleared these counts (the fill already wrote
+        // the outputs), a hit left the pre-write live.
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, native.cachedPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+            native.evaluatePipelineLayout, 0, 1, &cachedSet, 0, nullptr);
+        vkCmdDispatchIndirect(cmd, cache->cachedArgs_->buffer(), 0);
+        AfterBarrier(cmd);
+        r = vkEndCommandBuffer(cmd);
+    }
+    if (r != VK_SUCCESS) {
+        vkFreeCommandBuffers(d, native.evalCommands, 1, &cmd);
+        releaseSets();
+        return false;
+    }
+    VkFence fence = native.fencePool.Acquire(d, &r);
+    if (!fence) {
+        vkFreeCommandBuffers(d, native.evalCommands, 1, &cmd);
+        releaseSets();
+        return false;
+    }
+    // Allocate retention records before submission; no host allocation can
+    // fail after work becomes pending and leave its owners untracked.
+    try {
+        native.evalFences.reserve(native.evalFences.size() + 1);
+        native.evalOwners.reserve(native.evalOwners.size() + 7);
+    } catch (std::bad_alloc const&) {
+        native.fencePool.Release(d, fence);
+        vkFreeCommandBuffers(d, native.evalCommands, 1, &cmd);
+        releaseSets();
+        return false;
+    }
+    if (beforeSubmit) {
+        try { if (!beforeSubmit()) r = VK_ERROR_OUT_OF_DEVICE_MEMORY; }
+        catch (...) { r = VK_ERROR_UNKNOWN; }
+        if (r != VK_SUCCESS) {
+            native.lastResult = r;
+            native.fencePool.Release(d, fence);
+            vkFreeCommandBuffers(d, native.evalCommands, 1, &cmd);
+            releaseSets();
+            *status = fail(RbfVkStatus::DeviceError, "RBF evaluation submission rejected");
+            return true;
+        }
+    }
+    native.evalFences.push_back(fence);
+    native.evalOwners.push_back(std::move(cvs));
+    native.evalOwners.push_back(std::move(out));
+    // The entry buffers join the submit lifetime: the cache may be
+    // destroyed while this evaluation is pending.
+    native.evalOwners.push_back(cache->rCache_);
+    native.evalOwners.push_back(cache->proof_);
+    native.evalOwners.push_back(cache->fillArgs_);
+    native.evalOwners.push_back(cache->cachedArgs_);
+    native.evalOwners.push_back(cache->verifyUbo_);
+    evalPending_ = true;
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &cmd;
+    r = vkQueueSubmit(native.context->computeQueue(), 1, &submit, fence);
+    native.lastResult = r;
+    if (r != VK_SUCCESS) {
+        releaseSets();
+        *status = fail(RbfVkStatus::DeviceError, "RBF evaluation launch failed");
+        return true;
+    }
+    // Synchronous proof phase (the deform discipline): the fence proves
+    // the submit while the cache lock serializes shared users. The
+    // pending protocol is unchanged — the fence is simply already
+    // signaled when Finish/PollEvaluate consume it.
+    r = vkWaitForFences(d, 1, &fence, VK_TRUE, kFenceTimeoutNs);
+    releaseSets();
+    if (r != VK_SUCCESS) {
+        native.lastResult = r;
+        *status = fail(RbfVkStatus::DeviceError, "RBF evaluation completion query failed");
+        return true;
+    }
+    // True outcome from the fill-args readback: groupsX >= 1 always,
+    // so a zero x count means the fill stayed a no-op (a hit). The
+    // work already ran, so a failed readback still returns Ok (counted
+    // a miss with the entry disarmed, forcing the next refill).
+    uint32_t argsBack[3] = {0, 0, 0};
+    if (ReadBytes(d, *cache->fillArgs_, sizeof(argsBack), &argsBack) != VK_SUCCESS) {
+        cache->armed_ = false;
+        ++cache->misses_;
+    } else {
+        if (argsBack[0] == 0)
+            ++cache->hits_;
+        else
+            ++cache->misses_;
+        cache->entryN_ = n;
+        cache->entryP_ = P;
+        std::memcpy(cache->entryCenter_, center_, sizeof(center_));
+        std::memcpy(&cache->entryScale_, &scale_, sizeof(scale_));
+        cache->entryRest_ = std::move(restCommit);
+        cache->armed_ = true;
+    }
+    *status = RbfVkStatus::Ok;
+    return true;
+}
+
 RbfVkStatus RbfVkBinding::Evaluate(std::shared_ptr<const ChargedBuffer> cvs,
                                    std::shared_ptr<ChargedBuffer> out,
                                    uint32_t count, BeforeSubmit beforeSubmit) {
@@ -1203,6 +1686,14 @@ RbfVkStatus RbfVkBinding::Evaluate(std::shared_ptr<const ChargedBuffer> cvs,
             native.evalFences.data(), VK_TRUE, kFenceTimeoutNs);
         if (r != VK_SUCCESS)
             return fail(RbfVkStatus::DeviceError, "RBF evaluation state setup failed");
+    }
+    // Cached path: repeated evaluations over unchanged CVs/rest run
+    // through the cached radii; anything uncacheable (or a failed
+    // setup step) falls through to the direct shader below.
+    {
+        RbfVkStatus cachedStatus = RbfVkStatus::Ok;
+        if (EvaluateCached(cvs, out, count, beforeSubmit, physical, &cachedStatus))
+            return cachedStatus;
     }
     SolveUbo ubo;
     ubo.n = sampleCount_;

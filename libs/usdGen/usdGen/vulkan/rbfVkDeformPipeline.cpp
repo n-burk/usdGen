@@ -57,6 +57,9 @@ struct RbfVkDeformPipeline::Native {
     // Rest is static across poses: fresh per-candidate bindings share one
     // factor cache so only the first pose pays the LU submit.
     std::shared_ptr<RbfVkFactorCache> factorCache = std::make_shared<RbfVkFactorCache>();
+    // Same for the pose-invariant RBF radii: the CVs and rest are
+    // static across poses, so only the first pose pays the sqrt fill.
+    std::shared_ptr<RbfVkEvalCache> evalCache = std::make_shared<RbfVkEvalCache>();
     VkShaderModule applyShader = VK_NULL_HANDLE;
     VkDescriptorSetLayout applyLayout = VK_NULL_HANDLE;
     VkPipelineLayout applyPipelineLayout = VK_NULL_HANDLE;
@@ -397,6 +400,7 @@ std::unique_ptr<RbfVkDeformPipeline::Candidate> RbfVkDeformPipeline::Begin(
     auto binding = RbfVkBinding::Create(context, native_->bindingSpirv, &bindingResult);
     if (!binding) { finish(bindingResult); return {}; }
     binding->SetFactorCache(native_->factorCache);
+    binding->SetEvalCache(native_->evalCache);
 
     try {
         auto s = std::make_shared<Candidate::State>();

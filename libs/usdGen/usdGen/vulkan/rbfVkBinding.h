@@ -17,6 +17,11 @@
 // fullAffineRank, as in Bind), buildMatrix -> rbfVkBuildMatrix.comp,
 // cusolverDnDgetrf -> rbfVkLu.comp, rhsKernel/zeroTail -> rbfVkRhs.comp,
 // cusolverDnDgetrs -> rbfVkTriSolve.comp, evalKernel -> rbfVkEvaluate.comp.
+// The CUDA direct-evaluate R cache (rFillKernel + evalCachedKernel +
+// verifyKernel) maps to rbfVkFill.comp + rbfVkEvaluateCached.comp +
+// rbfVkVerify.comp under RbfVkEvalCache, with the deform pipeline's
+// single-submit verify/snapshot/conditional-fill protocol (no host
+// round-trip between verify and fill).
 // Scalar diagnostics (extent, gram, info, flags) are read back after each
 // fenced submit, mirroring the CUDA stream-synchronized queries.
 //
@@ -102,7 +107,58 @@ struct RbfVkBindingSpirv {
     std::vector<uint32_t> rhs;
     std::vector<uint32_t> triSolve;
     std::vector<uint32_t> evaluate;
+    // Optional R-cache programs (all three or none): without them the
+    // binding evaluates directly exactly as before. With them and an
+    // eval cache set, repeated evaluations over unchanged CVs/rest run
+    // through the cached radii instead of the fp64 sqrt loop.
+    std::vector<uint32_t> verify;
+    std::vector<uint32_t> fill;
+    std::vector<uint32_t> evaluateCached;
 };
+
+// Pose-invariant R cache shared across RbfVkBindings on one device. R
+// depends only on the CVs, the rest samples, and the rest-derived
+// center/scale, all verified bitwise (CVs on the device, rest/n on the
+// host), so a hit evaluates through the cache and a miss refills it
+// first; either way the bytes match the direct shader bit for bit. The
+// whole cached submit (decide, submit, wait, bookkeeping) runs under
+// one mutex, so concurrent evaluations sharing a cache serialize like
+// the deform pipeline's proof phase. Single-entry (one shape at a
+// time); over the cap, or when a reshape does not fit the pool, the
+// binding evaluates directly with no added work. Thread-safe.
+class RbfVkEvalCache {
+public:
+    RbfVkEvalCache() = default;
+    RbfVkEvalCache(RbfVkEvalCache const&) = delete;
+    RbfVkEvalCache& operator=(RbfVkEvalCache const&) = delete;
+
+    // True outcomes from the indirect-args readback (a speculative
+    // evaluation the device refilled counts a miss). For tests.
+    uint64_t hitsForTesting() const;
+    uint64_t missesForTesting() const;
+
+private:
+    friend class RbfVkBinding;
+    mutable std::mutex mutex_;
+    DeviceContext* context_ = nullptr;
+    int entryN_ = 0;
+    uint32_t entryP_ = 0;
+    double entryCenter_[3] = {};
+    double entryScale_ = 1.0;
+    std::vector<float> entryRest_;
+    bool armed_ = false;
+    std::shared_ptr<ChargedBuffer> rCache_;
+    std::shared_ptr<ChargedBuffer> proof_;
+    std::shared_ptr<ChargedBuffer> fillArgs_;
+    std::shared_ptr<ChargedBuffer> cachedArgs_;
+    std::shared_ptr<ChargedBuffer> verifyUbo_;
+    uint64_t hits_ = 0;
+    uint64_t misses_ = 0;
+};
+
+// Global test seam (mirrors CUDA's TestDisableCudaRbfEvalCache): while
+// set, every RbfVkBinding evaluates directly even with a cache set.
+void TestDisableRbfVkEvalCache(bool disable) noexcept;
 
 class RbfVkBinding final : public std::enable_shared_from_this<RbfVkBinding> {
 public:
@@ -168,13 +224,30 @@ public:
     // Optional factor cache (null clears). The cache must outlive the
     // binding's binds; entries are device-specific and immutable.
     void SetFactorCache(std::shared_ptr<RbfVkFactorCache> cache);
+    // Optional R cache (null clears). The cache must outlive the
+    // binding's evaluations; cached evaluates retain the entry buffers
+    // for the submit lifetime either way.
+    void SetEvalCache(std::shared_ptr<RbfVkEvalCache> cache);
 
 private:
     struct Native;
     explicit RbfVkBinding(std::shared_ptr<Native> native);
     RbfVkStatus fail(RbfVkStatus status, char const* what);
+    // Cached-path Evaluate: runs the verify/fill/cached submit and
+    // returns true with *status set, or returns false to run the direct
+    // shader with no added work. The caller has validated and waited
+    // for stacked work; the cached submit waits for its own fence (the
+    // deform proof-phase discipline, serializing shared-cache users)
+    // but keeps the async protocol (evalPending_/Finish/PollEvaluate
+    // behave as if the submit were still in flight).
+    bool EvaluateCached(std::shared_ptr<const ChargedBuffer> cvs,
+                        std::shared_ptr<ChargedBuffer> out, uint32_t count,
+                        BeforeSubmit beforeSubmit,
+                        VkPhysicalDeviceProperties const& physical,
+                        RbfVkStatus* status);
     std::shared_ptr<Native> native_;
     std::shared_ptr<RbfVkFactorCache> factorCache_;
+    std::shared_ptr<RbfVkEvalCache> evalCache_;
     int sampleCount_ = 0, order_ = 0;
     bool solved_ = false;
     bool evalPending_ = false;

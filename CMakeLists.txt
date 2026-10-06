@@ -1124,6 +1124,9 @@ if(USDGEN_ENABLE_VULKAN_RUNTIME OR (USDGEN_BUILD_TESTS AND USDGEN_BUILD_VULKAN_T
     _usdgen_compile_vulkan_shader(rbfvk_trisolve rbfVkTriSolve)
     _usdgen_compile_vulkan_shader(rbfvk_evaluate rbfVkEvaluate)
     _usdgen_compile_vulkan_shader(rbfvk_apply rbfVkApply)
+    _usdgen_compile_vulkan_shader(rbfvk_verify rbfVkVerify)
+    _usdgen_compile_vulkan_shader(rbfvk_fill rbfVkFill)
+    _usdgen_compile_vulkan_shader(rbfvk_evaluate_cached rbfVkEvaluateCached)
     _usdgen_compile_vulkan_shader(picktile_pick picktileVkPick)
     _usdgen_compile_vulkan_shader(picktile_footprint picktileVkFootprint)
     _usdgen_compile_vulkan_shader(picktile_tiles picktileVkTiles)
@@ -1613,14 +1616,14 @@ if(USDGEN_BUILD_VULKAN_TESTS)
         LABELS "T1;parity;cuda;vulkan;operators;deform;surface" RESOURCE_LOCK usdgen_gpu
         TIMEOUT 120 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
     add_executable(testUsdGenVulkanRbfVkParity tests/testUsdGenVulkanRbfVkParity.cpp
-        "${_usdgen_vulkan_rbfvk_extent_spv}" "${_usdgen_vulkan_rbfvk_gram_spv}" "${_usdgen_vulkan_rbfvk_build_matrix_spv}" "${_usdgen_vulkan_rbfvk_lu_spv}" "${_usdgen_vulkan_rbfvk_rhs_spv}" "${_usdgen_vulkan_rbfvk_trisolve_spv}" "${_usdgen_vulkan_rbfvk_evaluate_spv}" "${_usdgen_vulkan_rbfvk_apply_spv}")
+        "${_usdgen_vulkan_rbfvk_extent_spv}" "${_usdgen_vulkan_rbfvk_gram_spv}" "${_usdgen_vulkan_rbfvk_build_matrix_spv}" "${_usdgen_vulkan_rbfvk_lu_spv}" "${_usdgen_vulkan_rbfvk_rhs_spv}" "${_usdgen_vulkan_rbfvk_trisolve_spv}" "${_usdgen_vulkan_rbfvk_evaluate_spv}" "${_usdgen_vulkan_rbfvk_apply_spv}" "${_usdgen_vulkan_rbfvk_verify_spv}" "${_usdgen_vulkan_rbfvk_fill_spv}" "${_usdgen_vulkan_rbfvk_evaluate_cached_spv}")
     target_link_libraries(testUsdGenVulkanRbfVkParity PRIVATE usdGenVulkanNative usdGenMath)
     if(USDGEN_ENABLE_CUDA)
         target_link_libraries(testUsdGenVulkanRbfVkParity PRIVATE usdGenGpu)
         target_compile_definitions(testUsdGenVulkanRbfVkParity PRIVATE USDGEN_ENABLE_CUDA)
     endif()
     add_test(NAME testUsdGenVulkanRbfVkParity COMMAND testUsdGenVulkanRbfVkParity
-        "${_usdgen_vulkan_rbfvk_extent_spv}" "${_usdgen_vulkan_rbfvk_gram_spv}" "${_usdgen_vulkan_rbfvk_build_matrix_spv}" "${_usdgen_vulkan_rbfvk_lu_spv}" "${_usdgen_vulkan_rbfvk_rhs_spv}" "${_usdgen_vulkan_rbfvk_trisolve_spv}" "${_usdgen_vulkan_rbfvk_evaluate_spv}" "${_usdgen_vulkan_rbfvk_apply_spv}")
+        "${_usdgen_vulkan_rbfvk_extent_spv}" "${_usdgen_vulkan_rbfvk_gram_spv}" "${_usdgen_vulkan_rbfvk_build_matrix_spv}" "${_usdgen_vulkan_rbfvk_lu_spv}" "${_usdgen_vulkan_rbfvk_rhs_spv}" "${_usdgen_vulkan_rbfvk_trisolve_spv}" "${_usdgen_vulkan_rbfvk_evaluate_spv}" "${_usdgen_vulkan_rbfvk_apply_spv}" "${_usdgen_vulkan_rbfvk_verify_spv}" "${_usdgen_vulkan_rbfvk_fill_spv}" "${_usdgen_vulkan_rbfvk_evaluate_cached_spv}")
     set_tests_properties(testUsdGenVulkanRbfVkParity PROPERTIES
         LABELS "T1;parity;cuda;vulkan;operators;rbf;deform" RESOURCE_LOCK usdgen_gpu
         TIMEOUT 780 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")

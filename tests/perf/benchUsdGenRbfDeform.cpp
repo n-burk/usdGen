@@ -406,6 +406,9 @@ int VulkanBindLeg(std::string const &spvDir)
     spirv.rhs = LoadSpv(spvDir + "/rbfVkRhs.spv");
     spirv.triSolve = LoadSpv(spvDir + "/rbfVkTriSolve.spv");
     spirv.evaluate = LoadSpv(spvDir + "/rbfVkEvaluate.spv");
+    spirv.verify = LoadSpv(spvDir + "/rbfVkVerify.spv");
+    spirv.fill = LoadSpv(spvDir + "/rbfVkFill.spv");
+    spirv.evaluateCached = LoadSpv(spvDir + "/rbfVkEvaluateCached.spv");
     if (spirv.extent.empty() || spirv.evaluate.empty()) {
         std::printf("Vulkan bind leg: spirv not found in %s\n", spvDir.c_str());
         return 1;
@@ -427,7 +430,11 @@ int VulkanBindLeg(std::string const &spvDir)
     ci.physicalIndex = native->physicalIndex;
     ci.resourceDeviceId = 8021;
     ci.nativeLifetime = native;
-    ci.resources = {size_t{256} << 20, size_t{4} << 20};
+    // The R cache needs R (count*n doubles) plus a 12MB CV proof: 3.2GB
+    // at the n=400/1M bench shape. Production pools are heap-sized, so
+    // the old 256MB cap (which predates the cache) would only forbid an
+    // engagement production takes.
+    ci.resources = {size_t{4} << 30, 0};
     ci.shaderFloat64Enabled = true;
     auto context = vulkan::DeviceContext::Create(ci);
     if (!context) {
@@ -444,6 +451,10 @@ int VulkanBindLeg(std::string const &spvDir)
     // so the shared factor cache adopts the LU after the first bind.
     auto factorCache = std::make_shared<vulkan::RbfVkFactorCache>();
     binding->SetFactorCache(factorCache);
+    // Same for the pose-invariant radii: the CVs are static across the
+    // repeated evaluations, so only the first pays the sqrt fill.
+    auto evalCache = std::make_shared<vulkan::RbfVkEvalCache>();
+    binding->SetEvalCache(evalCache);
     int const n = 400;
     uint32_t const cvs = 1000000;
     std::vector<float> rest(size_t(n) * 3), posed(size_t(n) * 3);
