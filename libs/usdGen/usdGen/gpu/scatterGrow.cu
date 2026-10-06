@@ -449,6 +449,54 @@ ScatterGrowStatus CudaScatterGrow::ValidateRoots(
     // ties), so later math faults are moot.
     size_t const mLim = std::min(fBad, dBad);
     size_t mBad = mLim;
+    // Bounded-math fast path (verdict-identical): the overflow leg below
+    // can only fault through target or output overflow, and both are
+    // provably finite when the controls and the position range are
+    // small. NormalizeHost maps any finite input to components <=
+    // 1.00001 (its length is the input's own, so each quotient is ~1;
+    // tiny/NaN/huge lengths take the finite fallback branches), and each
+    // RotateAroundBHost of such vectors stays <= 9x its input (bounded
+    // dot/cross/cos/sin terms), so the grown direction is <= 82 for any
+    // validated lift/azimuth. The target is length * a [lo,hi] lerp of a
+    // [0,1) draw, finite when tBound = length*max(lo,hi) <= FLT_MAX/8;
+    // the output is pos + dir*distance with |dir| <= 128 (margin over
+    // 82), finite when Pmax + 128*tBound <= FLT_MAX/4. Rounding moves
+    // every bound by ~1e-7 relative against 4-8x margins. NaN positions
+    // are fmax-invisible yet still break the finite leg first (mLim <=
+    // fBad), so the skipped domain stays all-finite; an Inf Pmax fails
+    // the comparison and takes the slow path. A taken fast path means
+    // mBad == mLim exactly as a clean slow run finds.
+    double const tBound = c.length * std::max(c.randomLo, c.randomHi);
+    constexpr double kTargetLim =
+        double(std::numeric_limits<float>::max()) / 8.0;
+    size_t mRun = mLim;
+    if (tBound <= kTargetLim) {
+        // Max |position| over all roots (a superset of [0, mLim), so a
+        // conservative bound): four fmax lanes over the strided roots.
+        // std::fmax ignores NaN lanes, so faults still break the bound
+        // check below toward the slow path instead of poisoning Pmax.
+        float m0 = 0.0f, m1 = 0.0f, m2 = 0.0f, m3 = 0.0f;
+        size_t i = 0;
+        size_t const n4 = n & ~size_t(3);
+        auto lane = [](float m, float3 p) {
+            m = std::fmax(m, std::fabs(p.x));
+            m = std::fmax(m, std::fabs(p.y));
+            m = std::fmax(m, std::fabs(p.z));
+            return m;
+        };
+        for (; i < n4; i += 4) {
+            m0 = lane(m0, r->positions[i + 0]);
+            m1 = lane(m1, r->positions[i + 1]);
+            m2 = lane(m2, r->positions[i + 2]);
+            m3 = lane(m3, r->positions[i + 3]);
+        }
+        for (; i < n; ++i) m0 = lane(m0, r->positions[i]);
+        double const posMax =
+            double(std::fmax(std::fmax(m0, m1), std::fmax(m2, m3)));
+        constexpr double kOutLim =
+            double(std::numeric_limits<float>::max()) / 4.0;
+        if (posMax + 128.0 * tBound <= kOutLim) mRun = 0;
+    }
     // Hoisted draw seed folds (bit-identical integer CSE): c.seed is
     // loop-invariant, so each salt's Hash64Host(seed32, salt) runs once.
     uint64_t const seed32 = uint64_t(uint32_t(c.seed));
@@ -460,7 +508,7 @@ ScatterGrowStatus CudaScatterGrow::ValidateRoots(
     // degrees==0 early-out treats identically (c.azimuth is validated
     // finite, so no NaN/Inf lane can differ).
     bool const noAzimuthRandom = c.azimuthRandom == 0.0f;
-    for(size_t i=0;i<mLim;++i) {
+    for(size_t i=0;i<mRun;++i) {
         // Catch deterministic target and output overflow before reserving or
         // submitting any work.  The device repeats this check and reports a
         // native status as well, since float contraction can differ at the

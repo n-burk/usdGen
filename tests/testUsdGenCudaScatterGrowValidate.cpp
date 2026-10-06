@@ -392,6 +392,77 @@ int main()
                   tRef == tGot);
         }
     }
+    // Adversarial magnitudes for the bounded-math fast path: degenerate
+    // frames, subnormals, boundary tBound/Pmax values, and literal
+    // directions must agree with the reference exactly (unique ids and
+    // clean UV isolate the math-leg verdicts).
+    {
+        std::mt19937_64 rng(0xad9ad9ad9ad9ad9ull);
+        auto pick = [&](std::initializer_list<float> vs) {
+            return *(vs.begin() + size_t(rng() % vs.size()));
+        };
+        auto pickd = [&](std::initializer_list<double> vs) {
+            return *(vs.begin() + size_t(rng() % vs.size()));
+        };
+        float const fmax = std::numeric_limits<float>::max();
+        int sawOk = 0, sawNonFinite = 0;
+        for (int trial = 0; trial < 5000; ++trial) {
+            size_t const n = size_t(rng() % 9);
+            auto r = std::make_shared<ScatterGrowRoots>();
+            for (size_t i = 0; i < n; ++i) {
+                float const px = pick({0.0f, -0.0f, 1.0f, fmax / 4.0f,
+                                       fmax / 2.0f, fmax, 1e30f, 1e-30f,
+                                       std::numeric_limits<float>::denorm_min(),
+                                       std::numeric_limits<float>::infinity(),
+                                       std::nanf("")});
+                float const py = pick({0.0f, -0.0f, 1.0f, -1.0f});
+                r->positions.push_back(make_float3(px, py, 0.0f));
+                r->stableIds.push_back(i);
+                r->rootPrim.push_back(0);
+                r->rootUV.push_back(make_float2(0.0f, 0.0f));
+                float const f = pick({0.0f, 1.0f, 1e-30f, 1e30f, fmax,
+                                      std::numeric_limits<float>::denorm_min()});
+                int const which = int(rng() % 4);
+                float3 t = make_float3(1.0f, 0.0f, 0.0f);
+                float3 b = make_float3(0.0f, 1.0f, 0.0f);
+                float3 nn = make_float3(0.0f, 0.0f, 1.0f);
+                if (which == 1) t = make_float3(f, 0.0f, 0.0f);
+                if (which == 2) b = make_float3(0.0f, f, 0.0f);
+                if (which == 3) nn = make_float3(0.0f, 0.0f, f);
+                r->rootT.push_back(t);
+                r->rootB.push_back(b);
+                r->rootN.push_back(nn);
+            }
+            auto c = Controls();
+            c.cvCount = uint32_t(2 + rng() % 63);
+            c.length = pickd({1.0, double(fmax) / 1024.0, double(fmax) / 8.0,
+                              double(fmax), 1e30});
+            c.randomLo = pick({0.0f, 1.0f});
+            c.randomHi = pick({1.0f, 2.0f});
+            c.lift = pick({0.0f, 45.0f, -90.0f, 90.0f});
+            c.azimuth = pick({0.0f, 180.0f, -360.0f, 360.0f});
+            c.azimuthRandom = pick({0.0f, 1.0f});
+            int const dir = int(rng() % 3);
+            c.direction = dir == 0 ? ScatterGrowDirection::RootNormal
+                : dir == 1         ? ScatterGrowDirection::RootTangent
+                                   : ScatterGrowDirection::Literal;
+            float const lf = pick({0.0f, 1.0f, 1e30f, fmax});
+            c.literalDirection = make_float3(lf, 0.0f, 0.0f);
+            size_t tRef = 0, tGot = 0;
+            ScatterGrowStatus const want = ReferenceValidate(r, c, &tRef);
+            ScatterGrowStatus const got =
+                CudaScatterGrow::ValidateRoots(r, c, &tGot);
+            if (want != got || (want == ScatterGrowStatus::Ok && tRef != tGot)) {
+                std::fprintf(stderr,
+                             "ADVERSARIAL mismatch trial %d n=%zu: want %d got %d\n",
+                             trial, n, int(want), int(got));
+                return 1;
+            }
+            sawOk += want == ScatterGrowStatus::Ok;
+            sawNonFinite += want == ScatterGrowStatus::NonFiniteInput;
+        }
+        CHECK(sawOk > 100 && sawNonFinite > 100);
+    }
     std::printf("testUsdGenCudaScatterGrowValidate: PASS\n");
     return 0;
 }
