@@ -121,6 +121,14 @@ void HashVector(Fnv *fnv, std::vector<T> const &v)
         fnv->Add(v.data(), v.size() * sizeof(T));
 }
 
+// Order-sensitive rep fold (XOR zeroes out on even rep counts when every rep
+// is identical, as it must be).
+void Fold(uint64_t *acc, uint64_t v)
+{
+    *acc ^= v + 0x9E3779B97F4A7C15ull + (*acc << 6) + (*acc >> 2);
+    *acc *= 1099511628211ull;
+}
+
 void Report(Options const &opts, char const *stage, std::vector<double> const &ms,
             uint64_t checksum, char const *extra = "")
 {
@@ -273,7 +281,7 @@ int RunScatterCapture(Options const &opts, UsdGenGraphDesc const &desc)
         }
         ms.push_back(
             std::chrono::duration<double, std::milli>(t1 - t0).count());
-        sum ^= HashCurves(cap->Buffer());
+        Fold(&sum, HashCurves(cap->Buffer()));
         ncurves = cap->Buffer().totalCurves;
     }
     char extra[64];
@@ -294,19 +302,17 @@ int RunScatterDigest(Options const &opts, UsdGenGraphDesc const &desc)
     ctx.seed = uint32_t(node.seed);
     std::vector<double> ms;
     ms.reserve(size_t(opts.reps));
-    UsdGenEpoch acc{0, 0};
+    uint64_t sum = 0;
     for (int r = 0; r < opts.reps; ++r) {
         auto const t0 = std::chrono::steady_clock::now();
         UsdGenEpoch const e = op.CaptureDigest(ctx);
         auto const t1 = std::chrono::steady_clock::now();
         ms.push_back(
             std::chrono::duration<double, std::milli>(t1 - t0).count());
-        acc[0] ^= e[0];
-        acc[1] ^= e[1];
+        Fold(&sum, e[0]);
+        Fold(&sum, e[1]);
     }
-    Fnv f;
-    f.Add(acc.data(), sizeof(acc[0]) * 2);
-    Report(opts, "scatter_digest", ms, f.h);
+    Report(opts, "scatter_digest", ms, sum);
     return 0;
 }
 
@@ -399,7 +405,7 @@ int RunBake(Options const &opts, char const *stage, char const *primitive,
         }
         ms.push_back(
             std::chrono::duration<double, std::milli>(t1 - t0).count());
-        sum ^= HashBake(result);
+        Fold(&sum, HashBake(result));
     }
     Report(opts, stage, ms, sum);
     return 0;
@@ -488,7 +494,7 @@ int RunDraw(Options const &opts, UsdGenCurveBuffer const &curves,
         HashArray(&f, qv);
         HashArray(&f, sv);
         HashArray(&f, cv);
-        sum ^= f.h;
+        Fold(&sum, f.h);
     }
     Report(opts, "instancer_draw", ms, sum);
     return 0;
@@ -545,7 +551,7 @@ int RunAttrCook(Options const &opts, UsdGenCurveBuffer const &roots,
         HashVector(&f, result.keep);
         HashVector(&f, result.prototype);
         f.Add(&result.digest, sizeof(result.digest));
-        sum ^= f.h;
+        Fold(&sum, f.h);
         kept = result.kept;
     }
     char extra[64];
@@ -601,7 +607,7 @@ int RunCuda(Options const &opts, UsdGenGraphDesc const &desc)
         Fnv f;
         HashVector(&f, out->positions);
         HashVector(&f, out->stableIds);
-        inSum ^= f.h;
+        Fold(&inSum, f.h);
         nroots = out->positions.size();
         if (r == 0)
             roots = out;
@@ -678,7 +684,7 @@ int RunCuda(Options const &opts, UsdGenGraphDesc const &desc)
         }
         Fnv f;
         HashVector(&f, pts);
-        sum ^= f.h;
+        Fold(&sum, f.h);
     }
     cudaStreamDestroy(stream);
     std::snprintf(extra, sizeof(extra), "roots=%zu cv=%d", nroots,
@@ -740,7 +746,7 @@ int RunVkHost(Options const &opts, UsdGenCurveBuffer const &roots)
             std::chrono::duration<double, std::milli>(t1 - t0).count());
         Fnv f;
         HashVector(&f, targets);
-        tgtSum ^= f.h;
+        Fold(&tgtSum, f.h);
     }
     char extra[64];
     std::snprintf(extra, sizeof(extra), "roots=%zu", n);
@@ -764,7 +770,7 @@ int RunVkHost(Options const &opts, UsdGenCurveBuffer const &roots)
         Fnv f;
         HashVector(&f, out.points);
         HashVector(&f, out.widths);
-        cpuSum ^= f.h;
+        Fold(&cpuSum, f.h);
     }
     Report(opts, "vk_build_cpu", cpuMs, cpuSum, extra);
     return 0;
@@ -1044,7 +1050,7 @@ int RunVkDispatch(Options const &opts, UsdGenCurveBuffer const &roots)
             std::chrono::duration<double, std::milli>(t1 - t0).count());
         Fnv f;
         HashVector(&f, pts);
-        sum ^= f.h;
+        Fold(&sum, f.h);
     }
     char extra[64];
     std::snprintf(extra, sizeof(extra), "roots=%u", curves);
