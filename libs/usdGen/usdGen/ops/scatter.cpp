@@ -556,14 +556,24 @@ bool UsdGenScatterOp::Capture(
     buf.rootUV = VtVec2fArray(N);
     buf.rootT = VtVec3fArray(N); buf.rootN = VtVec3fArray(N); buf.rootB = VtVec3fArray(N);
     buf.hairT = VtFloatArray(N, 0.0f);
-    for (size_t i = 0; i < N; ++i) {
-        size_t const s = perm[i];
-        buf.px[i] = ax[s]; buf.py[i] = ay[s]; buf.pz[i] = az[s];
-        buf.curveId[i] = aids[s];
-        buf.rootPrim[i] = aPrim[s];
-        buf.rootUV[i] = aUv[s];
-        buf.rootT[i] = aT[s]; buf.rootN[i] = aN[s]; buf.rootB[i] = aB[s];
-    }
+    // Per-plane gather (bit-identical): the permuted read stream jumps over
+    // the whole emission range, so gathering every plane in one loop keeps
+    // ~68MB of random-read working set live and thrashes the LLC. One plane
+    // per pass shrinks the random window to a single 4-12MB array (the
+    // sequential perm re-read stays cache-hot); writes stay sequential in
+    // both forms. Same bytes in the same slots.
+    auto gather = [perm, N](auto *dst, auto const *src) {
+        for (size_t i = 0; i < N; ++i) dst[i] = src[perm[i]];
+    };
+    gather(buf.px.data(), ax.data());
+    gather(buf.py.data(), ay.data());
+    gather(buf.pz.data(), az.data());
+    gather(buf.curveId.data(), aids.data());
+    gather(buf.rootPrim.data(), aPrim.data());
+    gather(buf.rootUV.data(), aUv.data());
+    gather(buf.rootT.data(), aT.data());
+    gather(buf.rootN.data(), aN.data());
+    gather(buf.rootB.data(), aB.data());
     return true;
 }
 
