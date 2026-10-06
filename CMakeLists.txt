@@ -3077,6 +3077,11 @@ add_executable(testUsdGenDigest tests/testUsdGenDigest.cpp)
 target_link_libraries(testUsdGenDigest PRIVATE usdGen)
 add_test(NAME testUsdGenDigest COMMAND testUsdGenDigest)
 set_tests_properties(testUsdGenDigest PROPERTIES LABELS "T0;digest" TIMEOUT 120)
+# Morton key contract: magic-mask interleave proven against the loop form.
+add_executable(testUsdGenMorton tests/testUsdGenMorton.cpp)
+target_link_libraries(testUsdGenMorton PRIVATE usdGenMath)
+add_test(NAME testUsdGenMorton COMMAND testUsdGenMorton)
+set_tests_properties(testUsdGenMorton PROPERTIES LABELS "T0;morton" TIMEOUT 120)
 # Painted attribute maps: the .ptx bake and the async bake-to-stage worker.
 # Engine-only (threads + filesystem, no USD/Hydra), like the map it bakes.
 add_executable(testUsdGenAttributeBake tests/testUsdGenAttributeBake.cpp)
