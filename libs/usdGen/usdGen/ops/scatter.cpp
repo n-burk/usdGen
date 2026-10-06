@@ -53,27 +53,6 @@ GfVec3f Normalize3(GfVec3f const &v)
     return l > 1e-12f ? v / l : GfVec3f(0.0f, 1.0f, 0.0f);
 }
 
-// Pooled per-thread capture scratch (bit-identical): Capture mallocs ~300MB
-// of emission/sort temporaries per call and frees them on return; pooling
-// across calls on the thread turns every rep after the first into pure
-// reuse. Growth-only (reserve/resize never shrink); every slot is cleared
-// or overwritten before its read, so pooled contents never leak across
-// calls. thread_local keeps concurrent captures on distinct scratch;
-// Capture never reenters itself, so one set per thread suffices. Peak RSS
-// is unchanged (the first call maps the same peak); the pool holds it.
-struct ScatterScratch {
-    std::vector<float> ax, ay, az;
-    std::vector<uint64_t> aids;
-    std::vector<int> aPrim;
-    std::vector<GfVec2f> aUv;
-    std::vector<GfVec3f> aT, aN, aB;
-    std::vector<float> triSpill;
-    std::vector<uint64_t> morton, tmpKeys;
-    std::vector<uint32_t> order, tmpIdx;
-    std::vector<uint32_t> counts;
-};
-thread_local ScatterScratch t_scatterScratch;
-
 inline uint64_t double_as_bits(double d)
 {
     uint64_t u;
@@ -274,15 +253,11 @@ bool UsdGenScatterOp::Capture(
     uint64_t const hSeedBary2 = UsdGenHash64(seed32, kSaltScatterBary + 2u);
 
     // Per-face area-weighted emission (plan/04 :634-635).
-    ScatterScratch &s = t_scatterScratch;
-    std::vector<float> &ax = s.ax, &ay = s.ay, &az = s.az;
-    std::vector<uint64_t> &aids = s.aids;
-    std::vector<int> &aPrim = s.aPrim;
-    std::vector<GfVec2f> &aUv = s.aUv;
-    std::vector<GfVec3f> &aT = s.aT, &aN = s.aN, &aB = s.aB;
-    ax.clear(); ay.clear(); az.clear();
-    aids.clear(); aPrim.clear();
-    aUv.clear(); aT.clear(); aN.clear(); aB.clear();
+    std::vector<float> ax, ay, az;
+    std::vector<uint64_t> aids;
+    std::vector<int> aPrim;
+    std::vector<GfVec2f> aUv;
+    std::vector<GfVec3f> aT, aN, aB;
     ax.reserve(faceCount * 4); ay.reserve(faceCount * 4); az.reserve(faceCount * 4);
     aids.reserve(faceCount * 4); aPrim.reserve(faceCount * 4);
     aUv.reserve(faceCount * 4); aT.reserve(faceCount * 4);
@@ -292,8 +267,7 @@ bool UsdGenScatterOp::Capture(
     // the subdivision path. Same values, same order, no per-face vector
     // traffic on the hot path.
     float triStack[64];
-    std::vector<float> &triSpill = s.triSpill;
-    triSpill.clear();
+    std::vector<float> triSpill;
     triSpill.reserve(16);
     size_t runBase = 0;
     for (size_t fi = 0; fi < faceCount; ++fi) {
@@ -494,13 +468,11 @@ bool UsdGenScatterOp::Capture(
     // linear cost. The even pass count lands the result back in the
     // morton/order pair.
     const size_t N = aids.size();
-    std::vector<uint64_t> &morton = s.morton;
-    morton.resize(N);
+    std::vector<uint64_t> morton(N);
     // Indices and digit populations are 32-bit: the emission loop caps the
     // root total at uint32 cardinality, so every index and every population
     // is below 2^32. Halves the permutation traffic of the sort.
-    std::vector<uint32_t> &order = s.order;
-    order.resize(N);
+    std::vector<uint32_t> order(N);
     uint64_t orKeys = 0, andKeys = ~uint64_t(0);
     for (size_t i = 0; i < N; ++i) {
         uint64_t const key = UsdGenMortonKey3(ax[i], ay[i], az[i], 64.0f);
@@ -512,13 +484,12 @@ bool UsdGenScatterOp::Capture(
     uint32_t const *perm = order.data();
     // Scratch pair at function scope: an odd surviving-pass count leaves the
     // permutation in tmpIdx, which the gather below still reads.
-    std::vector<uint64_t> &tmpKeys = s.tmpKeys;
-    std::vector<uint32_t> &tmpIdx = s.tmpIdx;
+    std::vector<uint64_t> tmpKeys;
+    std::vector<uint32_t> tmpIdx;
     if (N > 1) {
-        tmpKeys.resize(N);
-        tmpIdx.resize(N);
-        std::vector<uint32_t> &counts = s.counts;
-        counts.resize(65536);
+        tmpKeys.assign(N, 0);
+        tmpIdx.assign(N, 0);
+        std::vector<uint32_t> counts(65536);
         uint64_t *keys = morton.data();
         uint32_t *idx = order.data();
         uint64_t *keysOut = tmpKeys.data();
