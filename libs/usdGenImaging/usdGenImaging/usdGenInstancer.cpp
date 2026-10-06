@@ -75,7 +75,9 @@ _ConvertQuats(GfQuath *dst, GfQuatf const *src, size_t n)
     uint16_t *h = reinterpret_cast<uint16_t *>(dst);
     GfHalf *hh = reinterpret_cast<GfHalf *>(dst);
     uint32x4_t const e255 = vdupq_n_u32(255);
-    for (size_t j = 0; j < m; j += 4) {
+    // Per-4 convert (bit-identical lane handling): the wide loop's cold
+    // fallback and the tail share it verbatim.
+    auto convert4 = [&](size_t j) {
         float32x4_t v = vld1q_f32(f + j);
         uint32x4_t u = vreinterpretq_u32_f32(v);
         uint32x4_t e = vshrq_n_u32(vshlq_n_u32(u, 1), 24);
@@ -87,7 +89,47 @@ _ConvertQuats(GfQuath *dst, GfQuatf const *src, size_t n)
         } else {
             vst1_u16(h + j, vreinterpret_u16_f16(vcvt_f16_f32(v)));
         }
+    };
+    // Wide loop (bit-identical): one exp-255 test over 16 lanes (the
+    // four per-4 masks ORed, then a single horizontal max) replaces
+    // four per-4 tests. A firing test redoes the 16 per 4, so every
+    // lane converts exactly as the per-4 loop converts it; masking
+    // the per-4 equality results (not the exponents) keeps the test
+    // exact with no false-positive fallback.
+    auto exponents = [](float32x4_t v) {
+        return vshrq_n_u32(
+            vshlq_n_u32(vreinterpretq_u32_f32(v), 1), 24);
+    };
+    size_t j = 0;
+    size_t const m16 = m & ~size_t(15);
+    for (; j < m16; j += 16) {
+        float32x4_t const v0 = vld1q_f32(f + j + 0);
+        float32x4_t const v1 = vld1q_f32(f + j + 4);
+        float32x4_t const v2 = vld1q_f32(f + j + 8);
+        float32x4_t const v3 = vld1q_f32(f + j + 12);
+        uint32x4_t const any255 = vorrq_u32(
+            vorrq_u32(vceqq_u32(exponents(v0), e255),
+                      vceqq_u32(exponents(v1), e255)),
+            vorrq_u32(vceqq_u32(exponents(v2), e255),
+                      vceqq_u32(exponents(v3), e255)));
+        if (vmaxvq_u32(any255) != 0) {
+            convert4(j + 0);
+            convert4(j + 4);
+            convert4(j + 8);
+            convert4(j + 12);
+        } else {
+            vst1_u16(h + j + 0,
+                     vreinterpret_u16_f16(vcvt_f16_f32(v0)));
+            vst1_u16(h + j + 4,
+                     vreinterpret_u16_f16(vcvt_f16_f32(v1)));
+            vst1_u16(h + j + 8,
+                     vreinterpret_u16_f16(vcvt_f16_f32(v2)));
+            vst1_u16(h + j + 12,
+                     vreinterpret_u16_f16(vcvt_f16_f32(v3)));
+        }
     }
+    for (; j < m; j += 4)
+        convert4(j);
     if (clean != fpcr)
         __asm__ volatile("msr fpcr, %0" :: "r"(fpcr));
     return;
