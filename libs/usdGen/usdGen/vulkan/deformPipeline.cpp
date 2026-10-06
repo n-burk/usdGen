@@ -57,11 +57,13 @@ constexpr uint32_t kApplyStorage = 9;
 // shader with a base offset. P is sized from the pool budget at funding
 // time (AffordableCachePrefix), not fixed: the 512MiB bench budget funds
 // ~613k CVs at n=100 (~468MiB of R plus a ~7MiB proof next to the ~36MiB
-// of pose scratch and inputs), while production budgets (~100GiB usable)
-// fund any groom fully, moving the whole pose off the fp64-sqrt suffix
-// (~13.1ns/CV) onto the streaming prefix (~3.2ns/CV). Each CV moved saves
-// ~9.9ns. Budgets below the floor run the direct shader with no added
-// work (pure arithmetic: no vkAllocateMemory probes on the miss path).
+// of pose scratch and inputs). Past the hetero balance point funding
+// more prefix wastes the host (HeteroBalanceCap holds the active prefix
+// while the funding stays full), so each CV moved onto the streaming
+// prefix (~3.2ns/CV) off the fp64-sqrt suffix (~13.1ns/CV) saves ~9.9ns
+// only up to the balance. Budgets below the floor run the direct shader
+// with no added work (pure arithmetic: no vkAllocateMemory probes on the
+// miss path).
 constexpr uint32_t kEvalCacheMinPrefixCVs = 4096;
 constexpr uint32_t kEvalCacheMaxPrefixCVs = 715827882; // INT32_MAX/3: 3*active fits the int32 verify word count
 constexpr size_t kEvalCacheFundingMargin = size_t{1} << 20;
@@ -104,6 +106,9 @@ constexpr double kHeteroSeedCachedNsPerCv = 3.2;
 constexpr double kHeteroEmaAlpha = 0.3;
 constexpr int kHeteroProbeBase = 64;
 constexpr int kHeteroProbeMax = 1024;
+// Balance-cap margin: the capped split must beat the full prefix by this
+// factor before the cap engages (mirrors the first-probe margin below).
+constexpr double kHeteroBalanceMargin = 0.9;
 std::atomic<int> forceHeteroSuffix{0};
 std::atomic<uint64_t> heteroRuns{0};
 
@@ -262,6 +267,8 @@ struct DeformPipeline::Native {
         int rowsAlloc = 0;                    // R rows allocated
         uint32_t rowsFunded = 0;              // R/proof capacity (CVs), sized from the budget
         uint32_t filled = 0;                  // valid R/proof prefix (CVs)
+        uint32_t capActive = 0;               // sticky balance cap (CVs), 0 = none
+        uint32_t capPoints = 0;               // point count the sticky cap was computed for
         int missStreak = 0;                   // consecutive refills
         int bypassLeft = 0;                   // direct poses left in backoff
         bool everFilled = false;
@@ -280,6 +287,7 @@ struct DeformPipeline::Native {
         double cpuNsPerCv = 0.0;   // host suffix throughput (EMA), 0 = uncalibrated
         double gpuNsPerCv = 0.0;   // device suffix throughput, 0 = seed
         double prefixProofNs = 0.0;// prefix-only proof fence wait (EMA)
+        uint32_t prefixProofCvs = 0; // active CVs that proof measured
         bool armed = false;        // hetero engaged
         bool everProbed = false;   // a hetero pose has run (estimates are live)
         int probeIn = 0;           // eligible GPU poses until the next probe
@@ -289,6 +297,10 @@ struct DeformPipeline::Native {
     // heteroMutex.
     static bool HeteroWants(HeteroPolicy& hp, uint32_t suffixCvs,
                             uint32_t prefixCvs);
+    // The hetero balance cap (see the definition below): the active prefix
+    // past which the host idles while the device runs, or UINT32_MAX for
+    // no cap. Caller holds heteroMutex.
+    static uint32_t HeteroBalanceCap(HeteroPolicy& hp, uint32_t points);
     // Idle submit fences: fence create/destroy costs ~0.7ms each on the
     // qualified driver, so per-pose submits check out of this pool instead
     // of creating. Candidates hold Native by shared_ptr, so the pool
@@ -813,6 +825,36 @@ bool DeformPipeline::Native::HeteroWants(HeteroPolicy& hp,
     return true;
 }
 
+uint32_t DeformPipeline::Native::HeteroBalanceCap(HeteroPolicy& hp,
+                                                  uint32_t points)
+{
+    // Past-balance funding wastes the host: the 2048MiB bench funds the
+    // whole 1M prefix and runs 3.99ms GPU-only while the 512MiB split
+    // overlaps the host suffix with the prefix proof at 2.90ms. Both legs
+    // are linear in the split, so the optimum is their crossing; the
+    // margin absorbs the linearized prefix rate (the proof EMA carries
+    // fixed submit/wait costs the per-CV rate spreads). Tiny poses and
+    // tiny suffixes never cap: the fixed overhead owns the comparison
+    // there and the minimum keeps hetero in its tested shapes.
+    if (hp.cpuNsPerCv <= 0.0 || points == 0) return UINT32_MAX;
+    double const prefixRate = (hp.prefixProofNs > 0.0 && hp.prefixProofCvs > 0)
+        ? hp.prefixProofNs / double(hp.prefixProofCvs)
+        : kHeteroSeedCachedNsPerCv;
+    if (!(prefixRate > 0.0)) return UINT32_MAX;
+    double const cpuRate = hp.cpuNsPerCv / double(kHeteroWorkers);
+    double const fullGpu = double(points) * prefixRate;
+    double const active = (double(points) * cpuRate + kHeteroFixedOverheadNs) /
+        (prefixRate + cpuRate);
+    if (!(active > 0.0) || active >= double(points)) return UINT32_MAX;
+    uint32_t const cap = uint32_t(active);
+    if (cap < kEvalCacheMinPrefixCVs) return UINT32_MAX;
+    if (points - cap < kEvalCacheMinPrefixCVs) return UINT32_MAX;
+    double const leg = std::max(double(cap) * prefixRate,
+        double(points - cap) * cpuRate + kHeteroFixedOverheadNs);
+    if (!(leg < fullGpu * kHeteroBalanceMargin)) return UINT32_MAX;
+    return cap;
+}
+
 std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
     BeginInfo info, VkResult* result, DeformSemantic* semantic, BeforeSubmit beforeSubmit) {
     auto finish = [&](VkResult r) { if (result) *result = r; };
@@ -966,8 +1008,9 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
     // Tentative hetero decision (finalized after the cache decision): the
     // warped memory type funds with the scratch, so the policy answers
     // from the funded-prefix estimate. Steady poses estimate exactly
-    // (cacheActive equals min(points, rowsFunded) absent regrow); pose 0
-    // has no prefix. Lock order cache -> hetero, never nested otherwise.
+    // (cacheActive equals min(points, rowsFunded) absent regrow and the
+    // balance cap below); pose 0 has no prefix. Lock order cache ->
+    // hetero, never nested otherwise.
     bool const heteroStatic = native_->cachedPipeline != VK_NULL_HANDLE &&
         !disableEvalCache.load(std::memory_order_relaxed) &&
         info.points &&
@@ -979,9 +1022,17 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
             std::lock_guard<std::mutex> clock(native_->cacheMutex);
             tentPrefix = native_->evalCache.rowsFunded;
         }
-        uint32_t const tentSuffix = points > tentPrefix ? points - tentPrefix : 0;
         std::lock_guard<std::mutex> hlock(native_->heteroMutex);
         auto& hp = native_->hetero;
+        // Balance-aware estimate: the final decision caps a past-balance
+        // prefix, so the suffix here — and the warped typing plus the
+        // calibration below — must see the capped split, not the funded
+        // one. Uncapped budgets estimate exactly as before.
+        if (heteroStatic) {
+            uint32_t const tentCap = Native::HeteroBalanceCap(hp, points);
+            if (tentCap < tentPrefix) tentPrefix = tentCap;
+        }
+        uint32_t const tentSuffix = points > tentPrefix ? points - tentPrefix : 0;
         if (heteroStatic && tentSuffix > 0 && hp.cpuNsPerCv <= 0.0) {
             hp.cpuNsPerCv = CalibrateHeteroCpu(samplesNorm.data(), rstate.coef,
                 n, m, rstate.center, invScale, rstate.scale);
@@ -1428,6 +1479,44 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                         cache.rest.size() == info.restSamples.size() &&
                         std::memcmp(cache.rest.data(), info.restSamples.data(),
                                    restBytes) == 0;
+                    // Hetero balance cap: past the balance point the extra
+                    // prefix costs more device time than the host suffix it
+                    // removes, so an engaging hetero pose runs the capped
+                    // split. Funding stays full: a disengaging pose uncaps
+                    // for free (forceFill below refills the regrown range),
+                    // and forceFill sees the active it fills. The warped
+                    // guard keeps a concurrent policy flip correct: a pose
+                    // the tentative call typed device-local runs the full
+                    // prefix on the device, never a capped prefix the host
+                    // cannot map. The cap is sticky across steady poses: the
+                    // live estimates drift, and a drifting cap would regrow
+                    // the active prefix past the filled rows every pose. A
+                    // model rejection clears it only once hetero agrees the
+                    // GPU wins, so margin noise never flickers the split.
+                    if (heteroStatic) {
+                        std::lock_guard<std::mutex> hlock(native_->heteroMutex);
+                        auto& hp = native_->hetero;
+                        uint32_t const freshCap =
+                            Native::HeteroBalanceCap(hp, points);
+                        bool const keysChanged = !restMatch || n != cache.n ||
+                            cache.filled == 0 || points != cache.capPoints;
+                        if (keysChanged || cache.capActive == 0) {
+                            if (freshCap != UINT32_MAX) {
+                                cache.capActive = freshCap;
+                                cache.capPoints = points;
+                            } else if (cache.capActive == 0 ||
+                                       points <= cache.capActive ||
+                                       !Native::HeteroWants(hp,
+                                           points - cache.capActive,
+                                           cache.capActive)) {
+                                cache.capActive = 0;
+                            }
+                        }
+                        uint32_t const cap = cache.capActive;
+                        if (cap != 0 && cap < cacheActive && s->warpedHostVisible &&
+                            Native::HeteroWants(hp, points - cap, cap))
+                            cacheActive = cap;
+                    }
                     forceFill = !cache.everFilled || !restMatch ||
                         n != cache.n || cacheActive > cache.filled;
                     useCache = true;
@@ -1514,8 +1603,12 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
             }
         }
 
-        // Descriptor pool + sets.
-        bool const hasSuffix = useCache && points > fundedPrefix && !useHetero;
+        // Descriptor pool + sets. The suffix dispatch keys off the active
+        // prefix, not the funded one: they agree absent the balance cap,
+        // and a capped pose that lands here GPU (a concurrent policy flip
+        // between the cap and the hetero decision) must still evaluate
+        // its suffix on the device.
+        bool const hasSuffix = useCache && points > cacheActive && !useHetero;
         VkDescriptorPoolSize sizes[2] = {
             {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, useCache
                  ? kVerifyFillStorage + kVerifyFillStorage + kEvalStorage +
@@ -1964,8 +2057,10 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                         hp.cpuNsPerCv = ema(hp.cpuNsPerCv, heteroCpuNs *
                             double(kHeteroWorkers) / double(suffixCvs));
                     hp.everProbed = true;
-                    if (hit)
+                    if (hit) {
                         hp.prefixProofNs = ema(hp.prefixProofNs, proofNs);
+                        hp.prefixProofCvs = cacheActive;
+                    }
                     double const cpuEst = double(suffixCvs) * hp.cpuNsPerCv /
                             double(kHeteroWorkers) +
                         kHeteroFixedOverheadNs;

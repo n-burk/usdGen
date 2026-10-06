@@ -1205,6 +1205,10 @@ int main(int argc, char** argv) {
             };
             uint64_t h0 = DeformEvalCacheHitsForTesting();
             uint64_t m0 = DeformEvalCacheMissesForTesting();
+            // Forced GPU: this case pins exact cache accounting, and the
+            // hetero balance cap (plus engagement) is timing-dependent.
+            // Hetero-vs-GPU bitwise equivalence is cases 20-22's job.
+            TestForceDeformHeteroSuffix(-1);
             uint32_t const curves = 60000, perCurve = 10, points = curves * perCurve;
             int const n = 8;
             std::vector<float> pts(size_t(points) * 3);
@@ -1260,6 +1264,7 @@ int main(int argc, char** argv) {
             CHECK(runSuffixDirect(mkBig(), &directOut));
             CHECK(bitEq(fillOut, directOut));
             CHECK(bitEq(hitOut, directOut));
+            TestForceDeformHeteroSuffix(0);
             std::puts("Case 17 (600k suffix bitwise direct): PASS");
         }
 
@@ -2021,6 +2026,100 @@ int main(int argc, char** argv) {
             std::printf("(auto hetero runs over 3 poses: %llu)\n",
                 (unsigned long long)(DeformHeteroSuffixRunsForTesting() - r0));
             std::puts("Case 25 (auto policy correct): PASS");
+        }
+
+        // Case 26: the hetero balance cap. A budget that funds the whole
+        // 600k prefix would run GPU-only; the cap holds the active prefix
+        // at the host/device balance point so forced hetero still runs the
+        // suffix (fill + hit), bitwise the forced-GPU full prefix.
+        {
+            DeviceContext::CreateInfo capCi;
+            capCi.instance = native->instance;
+            capCi.physicalDevice = native->physical;
+            capCi.device = native->device;
+            capCi.computeQueue = native->queue;
+            capCi.computeQueueFamily = native->family;
+            capCi.physicalIndex = native->physicalIndex;
+            capCi.resourceDeviceId = 8039;
+            capCi.nativeLifetime = native;
+            capCi.resources = {size_t{128} << 20, 0};
+            capCi.shaderFloat64Enabled = true;
+            auto capContext = DeviceContext::Create(capCi);
+            CHECK(capContext);
+            VkResult cstatus = VK_SUCCESS;
+            auto capPipe = DeformPipeline::Create(capContext, evalSpv, applySpv,
+                &cstatus, cacheSpv);
+            CHECK(capPipe && cstatus == VK_SUCCESS);
+            auto runForced = [&](int force, DeformPipeline::BeginInfo info,
+                                 std::vector<float>* out) {
+                TestForceDeformHeteroSuffix(force);
+                DeformSemantic sem = DeformSemantic::Ok;
+                auto c = capPipe->Begin(std::move(info), &cstatus, &sem);
+                bool ok = c && cstatus == VK_SUCCESS && Prove(native) &&
+                    c->Poll(&sem) == VK_SUCCESS && sem == DeformSemantic::Ok &&
+                    c->succeeded() && ReadOutput(native, capContext, c, out);
+                TestForceDeformHeteroSuffix(0);
+                return ok;
+            };
+            uint32_t const curves = 60000, perCurve = 10, points = curves * perCurve;
+            int const n = 8;
+            std::vector<float> pts(size_t(points) * 3);
+            uint64_t state = 0x12345678u;
+            auto next = [&]() {
+                state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+                return float((state >> 11) & 0xffffff) / float(0xffffff) * 2.0f - 1.0f;
+            };
+            for (auto& v : pts) v = next();
+            std::vector<uint32_t> off(curves + 1);
+            for (uint32_t i = 0; i <= curves; ++i) off[i] = i * perCurve;
+            std::vector<float> tgt(size_t(curves) * 3);
+            for (uint32_t i = 0; i < curves; ++i)
+                for (int a = 0; a < 3; ++a)
+                    tgt[size_t(i) * 3 + size_t(a)] = pts[size_t(i) * perCurve * 3 + size_t(a)];
+            std::vector<float> rest8{
+                0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f,
+                0.5f, 0.5f, 0.5f, 2.0f, 0.0f, 0.0f,
+                0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 2.0f,
+            };
+            std::vector<float> posed8 = rest8;
+            for (size_t i = 0; i < posed8.size(); i += 3) posed8[i] += 0.25f;
+            auto ptsBuf = Upload(capContext, pts.data(), pts.size() * sizeof(float));
+            auto offBuf = UploadVulkanDeviceBytes(native, capContext, off.data(),
+                off.size() * sizeof(uint32_t));
+            auto tgtBuf = Upload(capContext, tgt.data(), tgt.size() * sizeof(float));
+            CHECK(ptsBuf && offBuf && tgtBuf);
+            auto mkCap = [&]() {
+                DeformPipeline::BeginInfo info;
+                info.points = ptsBuf;
+                info.curveOffsets = offBuf;
+                info.rootTargets = tgtBuf;
+                info.curveCount = curves;
+                info.pointCount = points;
+                info.restSamples = rest8;
+                info.posedSamples = posed8;
+                info.sampleCount = n;
+                info.smoothing = 0.0;
+                info.mask = {1.0f, 1, nullptr, 0};
+                info.enabled = {1, 1, nullptr, 0};
+                info.lockRoots = {0, 1, nullptr, 0};
+                info.groomEnvelope = 1.0f;
+                return info;
+            };
+            uint64_t r0 = DeformHeteroSuffixRunsForTesting();
+            std::vector<float> hetFill, hetHit, gpuHit;
+            CHECK(runForced(1, mkCap(), &hetFill));
+            CHECK(runForced(1, mkCap(), &hetHit));
+            // Full funding (the cap's precondition) with a host suffix both
+            // poses: without the cap the funded prefix covers every point
+            // and the counter stays flat.
+            CHECK(DeformEvalCacheFundedPrefixForTesting() == points);
+            CHECK(DeformHeteroSuffixRunsForTesting() - r0 == 2);
+            CHECK(runForced(-1, mkCap(), &gpuHit));
+            CHECK(DeformHeteroSuffixRunsForTesting() - r0 == 2);
+            CHECK(bitEq(hetFill, gpuHit));
+            CHECK(bitEq(hetHit, gpuHit));
+            std::puts("Case 26 (balance cap caps full funding): PASS");
         }
     }
 
