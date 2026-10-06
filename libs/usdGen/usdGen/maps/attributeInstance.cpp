@@ -56,6 +56,15 @@ bool UsdGenAttributeCookInstances(UsdGenAttributeInstanceInput const &input,
                         size_t(channels) +
                     size_t(channel)];
     };
+    // Unchecked fetch for proven-in-range indices (same address math as
+    // texel): the bilinear path below establishes s/t in [0, res - 1]
+    // before calling, so the results match texel exactly.
+    auto texelRaw = [&](int face, int s, int t) -> float {
+        return texels[((size_t(face) * size_t(res) + size_t(t)) * size_t(res) +
+                        size_t(s)) *
+                        size_t(channels) +
+                    size_t(channel)];
+    };
     for (size_t i = 0; i < count; ++i) {
         UsdGenAttributeInstanceRoot const &root = input.roots[i];
         float value = input.defaultValue;
@@ -74,16 +83,27 @@ bool UsdGenAttributeCookInstances(UsdGenAttributeInstanceInput const &input,
                     static_cast<int>(std::floor(double(v) * (res - 1) + 0.5)));
                 value = texel(root.face, s, t);
             } else {
+                // Redundant-clamp removal (bit-identical): u/v were clamped
+                // to [0, 1] above, so x/y land in [0, res - 1] (rounding is
+                // monotonic and 1.0 * k is exact), s0/t0 land in [0, res - 1]
+                // (floor is exact), and x - s0 / y - t0 are Sterbenz-exact
+                // fractions in [0, 1) whose [0, 1] clamp is the identity.
+                // Only the +1 corners can reach res (iff u/v == 1.0 exactly),
+                // so two predictable top clamps replace eight min/max pairs.
                 double const x = double(u) * (res - 1);
                 double const y = double(v) * (res - 1);
                 int const s0 = static_cast<int>(std::floor(x));
                 int const t0 = static_cast<int>(std::floor(y));
-                double const fx = std::min(1.0, std::max(0.0, x - s0));
-                double const fy = std::min(1.0, std::max(0.0, y - t0));
-                double const v00 = texel(root.face, s0, t0);
-                double const v10 = texel(root.face, s0 + 1, t0);
-                double const v01 = texel(root.face, s0, t0 + 1);
-                double const v11 = texel(root.face, s0 + 1, t0 + 1);
+                double const fx = x - s0;
+                double const fy = y - t0;
+                int s1 = s0 + 1;
+                if (s1 >= res) s1 = res - 1;
+                int t1 = t0 + 1;
+                if (t1 >= res) t1 = res - 1;
+                double const v00 = texelRaw(root.face, s0, t0);
+                double const v10 = texelRaw(root.face, s1, t0);
+                double const v01 = texelRaw(root.face, s0, t1);
+                double const v11 = texelRaw(root.face, s1, t1);
                 value = static_cast<float>((v00 * (1.0 - fx) + v10 * fx) *
                                                (1.0 - fy) +
                                            (v01 * (1.0 - fx) + v11 * fx) * fy);
