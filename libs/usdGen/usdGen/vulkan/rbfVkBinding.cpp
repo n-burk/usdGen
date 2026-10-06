@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstddef>
@@ -36,6 +37,31 @@ constexpr uint32_t kLocalSize = 256;
 constexpr uint32_t kEvalLocalSize = 128;
 constexpr uint32_t kMaxEvalStack = 16;
 constexpr uint64_t kFenceTimeoutNs = 10000000000ull;
+
+// Fence wait without the wakeup lottery (see deformPipeline.cpp's
+// SpinWaitForFence): the synchronous proof-phase wait observes the
+// signal within one vkGetFenceStatus instead of paying the futex
+// wakeup lottery, with the same timeout and error propagation as the
+// blocking wait it replaces.
+VkResult SpinWaitForFence(VkDevice device, VkFence fence)
+{
+    auto const deadline =
+        std::chrono::steady_clock::now() + std::chrono::nanoseconds(kFenceTimeoutNs);
+    for (unsigned spin = 0;; ++spin) {
+        VkResult const r = vkGetFenceStatus(device, fence);
+        if (r != VK_NOT_READY) return r;
+        // The clock is sampled sparingly (a vDSO read per poll would
+        // double the spin's cost against a contested driver lock).
+        if ((spin & 255) == 0 && std::chrono::steady_clock::now() >= deadline)
+            return VK_TIMEOUT;
+#if defined(__aarch64__)
+        __asm__ volatile("yield" ::: "memory");
+#elif defined(__x86_64__) || defined(_M_X64)
+        __asm__ volatile("pause" ::: "memory");
+#endif
+    }
+}
+
 // Total device bytes (R words plus the CV proof copy) below which a
 // cached evaluation engages. 1M CVs at n=400 need 3.2GB of R plus a
 // 12MB proof, so the gap-range bench shape engages; anything larger
@@ -1622,7 +1648,7 @@ bool RbfVkBinding::EvaluateCached(std::shared_ptr<const ChargedBuffer> cvs,
     // the submit while the cache lock serializes shared users. The
     // pending protocol is unchanged — the fence is simply already
     // signaled when Finish/PollEvaluate consume it.
-    r = vkWaitForFences(d, 1, &fence, VK_TRUE, kFenceTimeoutNs);
+    r = SpinWaitForFence(d, fence);
     releaseSets();
     if (r != VK_SUCCESS) {
         native.lastResult = r;
