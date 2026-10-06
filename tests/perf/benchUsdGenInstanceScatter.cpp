@@ -437,26 +437,36 @@ int RunDraw(Options const &opts, UsdGenCurveBuffer const &curves,
                 baked.instancerPath, baked.prototypePaths[0]);
         // Read every published value back, as a Hydra consumer would: this
         // forces retained-source materialization into the timed region.
-        Fnv f;
+        // Checksumming stays outside the timer.
+        VtVec3fArray tv, sv, cv;
+        VtQuathArray qv;
         HdContainerDataSourceHandle const pv = Child(ds, "primvars");
         if (pv) {
-            for (HdDataSourceBaseHandle const &v :
-                 {Child(pv, "hydra:instanceTranslations"),
-                  Child(pv, "hydra:instanceRotations"),
-                  Child(pv, "hydra:instanceScales"),
-                  Child(pv, "displayColor")}) {
+            HdDataSourceBaseHandle const hs[4] = {
+                Child(pv, "hydra:instanceTranslations"),
+                Child(pv, "hydra:instanceRotations"),
+                Child(pv, "hydra:instanceScales"),
+                Child(pv, "displayColor")};
+            for (int k = 0; k < 4; ++k) {
                 HdContainerDataSourceHandle const prim =
-                    HdContainerDataSource::Cast(v);
+                    HdContainerDataSource::Cast(hs[k]);
                 if (!prim)
                     continue;
                 if (HdSampledDataSourceHandle s =
                         HdSampledDataSource::Cast(
                             prim->Get(TfToken("primvarValue")))) {
                     VtValue const val = s->GetValue(0.0);
-                    if (val.IsHolding<VtVec3fArray>())
-                        HashArray(&f, val.UncheckedGet<VtVec3fArray>());
-                    else if (val.IsHolding<VtQuathArray>())
-                        HashArray(&f, val.UncheckedGet<VtQuathArray>());
+                    if (val.IsHolding<VtVec3fArray>()) {
+                        VtVec3fArray const &a =
+                            val.UncheckedGet<VtVec3fArray>();
+                        if (k == 0)
+                            tv = a;
+                        else if (k == 2)
+                            sv = a;
+                        else if (k == 3)
+                            cv = a;
+                    } else if (val.IsHolding<VtQuathArray>())
+                        qv = val.UncheckedGet<VtQuathArray>();
                 }
             }
         }
@@ -468,6 +478,11 @@ int RunDraw(Options const &opts, UsdGenCurveBuffer const &curves,
         }
         ms.push_back(
             std::chrono::duration<double, std::milli>(t1 - t0).count());
+        Fnv f;
+        HashArray(&f, tv);
+        HashArray(&f, qv);
+        HashArray(&f, sv);
+        HashArray(&f, cv);
         sum ^= f.h;
     }
     Report(opts, "instancer_draw", ms, sum);
