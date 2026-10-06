@@ -2,6 +2,8 @@
 // See attributeInstance.h for the contract and its distance from Pomade.
 #include "usdGen/maps/attributeInstance.h"
 
+#include "usdGen/digest.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -60,29 +62,40 @@ bool UsdGenAttributeCookInstances(UsdGenAttributeInstanceInput const &input,
 
     // FNV-1a over the map digest, the parameters and every assignment.
     uint64_t hash = 14695981039346656037ull;
-    auto mix = [&](uint64_t word) {
-        for (int i = 0; i < 8; ++i) {
-            hash ^= static_cast<uint64_t>(word & 0xff);
-            hash *= 1099511628211ull;
-            word >>= 8;
-        }
-    };
-    mix(input.map->Digest());
-    mix(uint64_t(input.channel));
-    mix(uint64_t(input.numPrototypes));
-    mix(uint64_t(count));
+    UsdGenDigestMixWord(hash, input.map->Digest());
+    UsdGenDigestMixWord(hash, uint64_t(input.channel));
+    UsdGenDigestMixWord(hash, uint64_t(input.numPrototypes));
+    UsdGenDigestMixWord(hash, uint64_t(count));
     uint32_t bits = 0;
     std::memcpy(&bits, &input.threshold, sizeof(bits));
-    mix(bits);
+    UsdGenDigestMixWord(hash, bits);
     std::memcpy(&bits, &input.defaultValue, sizeof(bits));
-    mix(bits);
-    for (size_t i = 0; i < count; ++i) {
-        std::memcpy(&bits, &cooked.values[i], sizeof(bits));
-        mix(bits);
-        mix(uint64_t(cooked.keep[i]));
-        mix(uint64_t(uint32_t(cooked.prototype[i])));
+    UsdGenDigestMixWord(hash, bits);
+    // Per-root assignments through 4 FNV lanes over strided roots (see
+    // digest.h): the same words feed each lane in root order, so every
+    // assignment stays digest-sensitive while the four chains overlap.
+    // Tail roots join lane 0. Lane seeds domain-separate the header hash.
+    uint64_t lane[4] = {hash, hash ^ 0x9E3779B97F4A7C15ull,
+                        hash ^ 0xBF58476D1CE4E5B9ull,
+                        hash ^ 0x94D049BB133111EBull};
+    auto feed = [&](uint64_t &h, size_t i) {
+        uint32_t vbits = 0;
+        std::memcpy(&vbits, &cooked.values[i], sizeof(vbits));
+        UsdGenDigestMixWord(h, vbits);
+        UsdGenDigestMixWord(h, uint64_t(cooked.keep[i]));
+        UsdGenDigestMixWord(h, uint64_t(uint32_t(cooked.prototype[i])));
+    };
+    size_t i = 0;
+    size_t const n4 = count & ~size_t(3);
+    for (; i < n4; i += 4) {
+        feed(lane[0], i + 0);
+        feed(lane[1], i + 1);
+        feed(lane[2], i + 2);
+        feed(lane[3], i + 3);
     }
-    cooked.digest = hash;
+    for (; i < count; ++i)
+        feed(lane[0], i);
+    cooked.digest = UsdGenDigestCombine4(lane[0], lane[1], lane[2], lane[3]);
 
     *result = std::move(cooked);
     return true;
