@@ -1,6 +1,7 @@
 #include "scatterGrow.h"
 #include "cudaCompat.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <mutex>
@@ -70,6 +71,130 @@ float3 NormalizeHost(float3 v) {
     float const length = std::sqrt(l2);
     if (!(length > 1.0e-12f) || !Finite(length)) return make_float3(0, 1, 0);
     return make_float3(v.x/length, v.y/length, v.z/length);
+}
+// Minimum second-occurrence index of any duplicated stable id (n when the
+// ids are unique): the duplicate leg of the minima-combine validator.
+// LSD radix over the 32-bit fold id^(id>>32) with a 32-bit satellite
+// index is stable, so equal folds land in ascending original-index
+// order. Groups of size 1 cannot duplicate; larger groups resolve
+// against the full 64-bit ids (fold collisions are not duplicates), so
+// the result is exact for any input. Skipping constant digits is exact
+// (a constant-digit counting pass is the identity permutation) and
+// keeps the surviving passes least- to most-significant. Two passes
+// over 8-byte items beat the fused loop's 36MB random set probes and
+// the 4-pass 12-byte full-id sort alike. n <= UINT32_MAX (indices are
+// 32-bit); the caller routes larger inputs to SetFirstDup.
+size_t RadixFirstDup(uint64_t const* ids, size_t n) {
+    if (n <= 1) return n;
+    std::vector<uint32_t> keys(n), tmpKeys(n);
+    std::vector<uint32_t> idx(n), tmpIdx(n);
+    std::vector<uint32_t> counts(65536);
+    uint32_t orKeys = 0, andKeys = ~uint32_t(0);
+    for (size_t i = 0; i < n; ++i) {
+        uint64_t const id = ids[i];
+        uint32_t const key = uint32_t(id) ^ uint32_t(id >> 32);
+        keys[i] = key;
+        idx[i] = uint32_t(i);
+        orKeys |= key;
+        andKeys &= key;
+    }
+    uint32_t* k = keys.data();
+    uint32_t* ix = idx.data();
+    uint32_t* kOut = tmpKeys.data();
+    uint32_t* ixOut = tmpIdx.data();
+    uint32_t const vary = orKeys ^ andKeys;
+    for (int pass = 0; pass < 2; ++pass) {
+        int const shift = pass * 16;
+        if (((vary >> shift) & 0xffffu) == 0) continue;
+        std::fill(counts.begin(), counts.end(), uint32_t(0));
+        for (size_t i = 0; i < n; ++i) ++counts[(k[i] >> shift) & 0xffffu];
+        uint32_t sum = 0;
+        for (size_t c = 0; c < 65536; ++c) {
+            uint32_t const t = counts[c];
+            counts[c] = sum;
+            sum += t;
+        }
+        for (size_t i = 0; i < n; ++i) {
+            size_t const d = (k[i] >> shift) & 0xffffu;
+            uint32_t const p = counts[d]++;
+            kOut[p] = k[i];
+            ixOut[p] = ix[i];
+        }
+        std::swap(k, kOut);
+        std::swap(ix, ixOut);
+    }
+    size_t dBad = n;
+    size_t run = 0;
+    // Scratch for resolving oversized fold groups (pathological shared
+    // folds): sort the group's members by full id, then the adjacent
+    // scan below is exact. Sorted once per group, reused across groups.
+    std::vector<uint32_t> big;
+    for (size_t i = 1; i <= n; ++i) {
+        if (i < n && k[i] == k[run]) continue;
+        size_t const g = i - run;
+        if (g > 1) {
+            // Members run..i-1 share a fold in ascending-index order.
+            // Full-id loads below run in ascending index order, so they
+            // stream rather than scatter.
+            if (g > 64) {
+                big.assign(ix + run, ix + i);
+                std::sort(big.begin(), big.end(), [&](uint32_t a, uint32_t b) {
+                    return ids[a] != ids[b] ? ids[a] < ids[b] : a < b;
+                });
+                // Sorted by (full id, index): within an equal-id run the
+                // indices ascend, so run[1] is that id's 2nd occurrence.
+                for (size_t j = 1; j < g; ++j) {
+                    if (ids[big[j]] != ids[big[j - 1]]) continue;
+                    if (j > 1 && ids[big[j - 1]] == ids[big[j - 2]]) continue;
+                    if (size_t(big[j]) < dBad) {
+                        dBad = size_t(big[j]);
+                        if (dBad == 1) return 1;
+                    }
+                }
+            } else {
+                for (size_t j = run + 1; j < i; ++j) {
+                    // Member j is a true second occurrence exactly when
+                    // one earlier member shares its full id.
+                    int matches = 0;
+                    for (size_t q = run; q < j; ++q) {
+                        if (ids[ix[j]] == ids[ix[q]] && ++matches > 1) break;
+                    }
+                    if (matches == 1 && size_t(ix[j]) < dBad) {
+                        dBad = size_t(ix[j]);
+                        if (dBad == 1) return 1;
+                    }
+                }
+            }
+        }
+        run = i;
+    }
+    return dBad;
+}
+// Set-based first-duplicate leg for n > UINT32_MAX (no 32-bit index
+// radix): insertion order is index order, so the first repeat found is
+// the minimum second-occurrence index. Same open-addressed set the
+// fused loop used.
+size_t SetFirstDup(uint64_t const* ids, size_t n) {
+    size_t setCap = 16;
+    while (setCap <= n) setCap *= 2;
+    setCap *= 2;
+    std::vector<uint64_t> setKeys(setCap);
+    std::vector<unsigned char> setUsed(setCap, 0);
+    size_t const setMask = setCap - 1;
+    for (size_t i = 0; i < n; ++i) {
+        uint64_t const id = ids[i];
+        size_t slot = size_t(Hash64Host(id, 0x9E3779B9u) & uint64_t(setMask));
+        while (true) {
+            if (!setUsed[slot]) {
+                setUsed[slot] = 1;
+                setKeys[slot] = id;
+                break;
+            }
+            if (setKeys[slot] == id) return i;
+            slot = (slot + 1) & setMask;
+        }
+    }
+    return n;
 }
 float3 RotateAroundBHost(float3 direction, float3 axis, float degrees) {
     if (degrees == 0.0f) return direction;
@@ -286,34 +411,29 @@ ScatterGrowStatus CudaScatterGrow::ValidateRoots(
     auto requirementStatus = GetScatterGrowRequirements(n, c.cvCount, &requirements);
     if (requirementStatus != ScatterGrowStatus::Ok) return requirementStatus;
     *total = requirements.pointCount;
-    // Duplicate stable ids through a small open-addressed set: the same
-    // insertion order and the same first-dup-in-index-order report as the
-    // unordered_set, without its per-node allocation. Capacity is a power
-    // of two past 2n (load <= 0.5); the SplitMix avalanche keeps
-    // sequential untrusted ids from clustering.
-    size_t setCap = 16;
-    while (setCap <= n) setCap *= 2;
-    setCap *= 2;
-    std::vector<uint64_t> setKeys(setCap);
-    std::vector<unsigned char> setUsed(setCap, 0);
-    size_t const setMask = setCap - 1;
+    // Minima-combine validator: the fused loop returned the first fault
+    // in index order (finite-inputs, then duplicate, then overflow math
+    // within an index), which is the minimum of three first-fault
+    // indices with that tie-break. Each leg is cache-streaming; the old
+    // fused loop probed a 36MB dup set at random under a 56MB stream.
+    // Finite-inputs leg: first failing index, verbatim condition.
+    size_t fBad = n;
     for(size_t i=0;i<n;++i) {
         if(!Finite(r->positions[i])||!Finite(r->rootUV[i])||!Finite(r->rootT[i])||
-           !Finite(r->rootB[i])||!Finite(r->rootN[i]))
-            return ScatterGrowStatus::NonFiniteInput;
-        uint64_t const id = r->stableIds[i];
-        size_t slot = size_t(Hash64Host(id, 0x9E3779B9u) & uint64_t(setMask));
-        while (true) {
-            if (!setUsed[slot]) {
-                setUsed[slot] = 1;
-                setKeys[slot] = id;
-                break;
-            }
-            if (setKeys[slot] == id)
-                return ScatterGrowStatus::DuplicateStableId;
-            slot = (slot + 1) & setMask;
-        }
-
+           !Finite(r->rootB[i])||!Finite(r->rootN[i])) { fBad = i; break; }
+    }
+    // Duplicate leg: minimum second-occurrence index (radix; the set
+    // form only past 32-bit index range).
+    size_t const dBad = n > uint64_t(std::numeric_limits<uint32_t>::max())
+        ? SetFirstDup(r->stableIds.data(), n)
+        : RadixFirstDup(r->stableIds.data(), n);
+    // Overflow-math leg, verbatim per-index ops over [0, min(fBad,dBad)):
+    // past that bound an earlier-or-tied fault of higher-or-equal
+    // precedence already wins (finite ties beat dup ties beat math
+    // ties), so later math faults are moot.
+    size_t const mLim = std::min(fBad, dBad);
+    size_t mBad = mLim;
+    for(size_t i=0;i<mLim;++i) {
         // Catch deterministic target and output overflow before reserving or
         // submitting any work.  The device repeats this check and reports a
         // native status as well, since float contraction can differ at the
@@ -324,12 +444,12 @@ ScatterGrowStatus CudaScatterGrow::ValidateRoots(
         float const azimuth = c.azimuth + c.azimuthRandom * 360.0f *
             (DrawGrowHost(c.seed, r->stableIds[i], 0x4772417Au) - 0.5f);
         direction = RotateAroundBHost(direction, r->rootN[i], azimuth);
-        if (!Finite(direction)) return ScatterGrowStatus::NonFiniteInput;
+        if (!Finite(direction)) { mBad = i; break; }
         double const targetDouble = c.length *
             (c.randomLo + double(DrawGrowHost(c.seed, r->stableIds[i])) *
              (c.randomHi - c.randomLo));
         float const target = static_cast<float>(targetDouble);
-        if (!Finite(target)) return ScatterGrowStatus::NonFiniteInput;
+        if (!Finite(target)) { mBad = i; break; }
         // Only the last iteration (t = 1) can report NonFiniteInput, so
         // the loop over j runs once, spelled verbatim: distance_j =
         // target * t_j with t_j in [0,1] can neither overflow (its
@@ -347,10 +467,17 @@ ScatterGrowStatus CudaScatterGrow::ValidateRoots(
                 r->positions[i].y + direction.y * distance,
                 r->positions[i].z + direction.z * distance);
             if (!Finite(distance) || !Finite(output))
-                return ScatterGrowStatus::NonFiniteInput;
+                { mBad = i; break; }
         }
     }
-    return ScatterGrowStatus::Ok;
+    // Precedence combine: a math fault strictly inside the bound is the
+    // global first fault; otherwise the finite/dup minima decide with
+    // finite-inputs winning ties, exactly the fused loop's order.
+    if (mBad < mLim) return ScatterGrowStatus::NonFiniteInput;
+    if (fBad <= dBad)
+        return fBad < n ? ScatterGrowStatus::NonFiniteInput
+                        : ScatterGrowStatus::Ok;
+    return ScatterGrowStatus::DuplicateStableId;
 }
 void CudaScatterGrow::discardPending() noexcept {
     pending_=Storage{};

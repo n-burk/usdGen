@@ -183,6 +183,45 @@ int main()
         CHECK(CudaScatterGrow::ValidateRoots(r, Controls(), &total) ==
               ScatterGrowStatus::DuplicateStableId);
     }
+    // Fold collision without a true duplicate: distinct ids sharing the
+    // radix leg's 32-bit fold must not report DuplicateStableId.
+    {
+        auto r = Roots(4);
+        r->stableIds[1] = (uint64_t(1) << 32) | 0u;  // fold 1, != ids[0]
+        size_t tRef = 0, tGot = 0;
+        CHECK(ReferenceValidate(r, Controls(), &tRef) ==
+                  ScatterGrowStatus::Ok &&
+              CudaScatterGrow::ValidateRoots(r, Controls(), &tGot) ==
+                  ScatterGrowStatus::Ok &&
+              tRef == tGot);
+    }
+    // Oversized fold group (>64 members): 100 distinct ids on one fold
+    // with a true dup pair hidden inside; the group-resolve path must
+    // still agree with the linear reference.
+    {
+        auto r = Roots(200);
+        for (size_t i = 0; i < 100; ++i)
+            r->stableIds[i] = (uint64_t(i) << 32) | uint64_t(i);  // fold 0
+        r->stableIds[50] = r->stableIds[7];
+        size_t tRef = 0, tGot = 0;
+        CHECK(ReferenceValidate(r, Controls(), &tRef) ==
+                  ScatterGrowStatus::DuplicateStableId &&
+              CudaScatterGrow::ValidateRoots(r, Controls(), &tGot) ==
+                  ScatterGrowStatus::DuplicateStableId);
+    }
+    // ... same group without the dup: all folds collide, all ids
+    // distinct, so the input is valid.
+    {
+        auto r = Roots(200);
+        for (size_t i = 0; i < 200; ++i)
+            r->stableIds[i] = (uint64_t(i) << 32) | uint64_t(i);  // fold 0
+        size_t tRef = 0, tGot = 0;
+        CHECK(ReferenceValidate(r, Controls(), &tRef) ==
+                  ScatterGrowStatus::Ok &&
+              CudaScatterGrow::ValidateRoots(r, Controls(), &tGot) ==
+                  ScatterGrowStatus::Ok &&
+              tRef == tGot && tGot == 200 * 8);
+    }
     // Check order is index order: an earlier NonFinite beats a later dup.
     {
         auto r = Roots(100);
