@@ -240,11 +240,17 @@ _QuatFromFrameRows(GfVec3d const &xAxis, GfVec3d const &yAxis,
     double const m[3][3] = {{xAxis[0], xAxis[1], xAxis[2]},
                             {yAxis[0], yAxis[1], yAxis[2]},
                             {zAxis[0], zAxis[1], zAxis[2]}};
-    int i;
-    if (m[0][0] > m[1][1])
-        i = (m[0][0] > m[2][2] ? 0 : 2);
-    else
-        i = (m[1][1] > m[2][2] ? 1 : 2);
+    // Branchless max-diagonal select (bit-identical): the same three
+    // `>` comparisons feed integer logic yielding the same i for every
+    // input, including NaN (all three comparisons are false, i = 2,
+    // exactly as the branches give). Removes two data-dependent
+    // branches the predictor misses on near-50/50 frame diagonals.
+    int const c01 = m[0][0] > m[1][1] ? 1 : 0;
+    int const c02 = m[0][0] > m[2][2] ? 1 : 0;
+    int const c12 = m[1][1] > m[2][2] ? 1 : 0;
+    // i = 0 iff c01 & c02, 1 iff ~c01 & c12, else 2: single-cycle int
+    // ops, no multiplies.
+    int const i = 2 - ((c01 & c02) << 1) - ((c01 ^ 1) & c12);
     double im[3];
     double r;
     if (m[0][0] + m[1][1] + m[2][2] > m[i][i]) {
