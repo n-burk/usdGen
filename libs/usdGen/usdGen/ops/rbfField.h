@@ -26,6 +26,11 @@ PXR_NAMESPACE_USING_DIRECTIVE
 namespace usdGen {
 namespace rbf {
 
+// Test-only DisplaceBatch path seam. While forced, DisplaceBatch runs the
+// scalar blocks even where the NEON block is available, so a test can
+// compare the two paths bitwise on the same field.
+void TestForceScalarDisplace(bool force) noexcept;
+
 class CubicField
 {
 public:
@@ -50,11 +55,13 @@ public:
     /// A run of queries: ds[t] is bitwise Displacement(qs[t]) for every t.
     ///
     /// The single-query loop above is bound by its three serial FMA chains
-    /// and the kernel row's round trip through the stack; blocking eight
-    /// queries over one sample pass keeps every query's operations in the
-    /// same order (so the bits match) while the samples load once and the
-    /// accumulators overlap. Defined out of line; tails fall back to
-    /// Displacement, and an unbound field fills zeros.
+    /// and the kernel row's round trip through the stack; blocking queries
+    /// over one sample pass keeps every query's operations in the same
+    /// order (so the bits match) while the samples load once and the
+    /// accumulators overlap. On AArch64 a fused 4-wide NEON block holds
+    /// the accumulators in registers (scalar blocks elsewhere). Defined
+    /// out of line; tails fall back to Displacement, and an unbound field
+    /// fills zeros.
     void DisplaceBatch(GfVec3d const *qs, GfVec3d *ds, size_t count) const;
 
     bool Bound() const { return _order != 0; }

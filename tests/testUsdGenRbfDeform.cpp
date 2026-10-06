@@ -200,6 +200,49 @@ void CheckBatchBitwise()
           "an unbound field batches zeros");
 }
 
+// The NEON block agrees with the scalar blocks bitwise, through block
+// boundaries (4k, 4k+1..3 tails, unaligned starts) and sample counts on
+// both sides of the single-query path's 256-sample stack row. Off AArch64
+// both paths are the scalar blocks and the test passes trivially.
+void CheckBatchPathsAgree()
+{
+    for (size_t samples : {size_t(12), size_t(100), size_t(300)}) {
+        std::vector<GfVec3d> const rest = Cloud(samples, 7 + samples);
+        std::vector<GfVec3d> moved(rest.size());
+        for (size_t i = 0; i < rest.size(); ++i)
+            moved[i] = rest[i] + GfVec3d(0.2 * std::sin(3.0 * rest[i][1]),
+                                         0.1 * rest[i][0] * rest[i][2],
+                                         -0.15 * std::cos(2.0 * rest[i][0]));
+        rbf::CubicField field;
+        std::string error;
+        if (!field.Bind(rest, &error) || !field.Solve(moved, &error)) {
+            Check(false, "path-agreement fixture binds (" + std::to_string(samples) +
+                             " samples)");
+            continue;
+        }
+        // One extra query lets every count also run one triple over,
+        // flipping the 16-byte alignment the vld3/vst3 pair sees.
+        std::vector<GfVec3d> const queries = Cloud(302, 1001);
+        size_t worst = 0;
+        for (size_t count = 0; count <= 300; ++count) {
+            for (size_t off = 0; off <= 1; ++off) {
+                std::vector<GfVec3d> neon(count), scalar(count);
+                rbf::TestForceScalarDisplace(false);
+                field.DisplaceBatch(queries.data() + off, neon.data(), count);
+                rbf::TestForceScalarDisplace(true);
+                field.DisplaceBatch(queries.data() + off, scalar.data(), count);
+                rbf::TestForceScalarDisplace(false);
+                if (count && !worst &&
+                    std::memcmp(neon.data(), scalar.data(), count * sizeof(GfVec3d)) != 0)
+                    worst = count * 2 + off;
+            }
+        }
+        Check(worst == 0, "NEON and scalar DisplaceBatch agree bitwise (" +
+                               std::to_string(samples) + " samples" +
+                               (worst ? ", first diff at " + std::to_string(worst) : "") + ")");
+    }
+}
+
 // --- the example, through the engine ---------------------------------------------
 
 struct Cooked {
@@ -1131,6 +1174,7 @@ int main()
     usdGenRegisterM1Operators();
     CheckField();
     CheckBatchBitwise();
+    CheckBatchPathsAgree();
     CheckDeformChosenDigest();
     CheckDeformEvaluateViewShapes();
     CheckCurveWrapField();

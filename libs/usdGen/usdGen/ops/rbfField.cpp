@@ -3,10 +3,15 @@
 #include "pxr/base/gf/vec3i.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <unordered_set>
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+#include <arm_neon.h>
+#endif
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -251,7 +256,122 @@ void DisplaceBlocked(GfVec3d const &centre, double invScale, double scale,
         ds[t] = GfVec3d(o[t][0] * scale, o[t][1] * scale, o[t][2] * scale);
 }
 
+#if defined(__aarch64__) || defined(_M_ARM64)
+// Fused 4-query NEON block: the same per-lane operations as DisplaceBlocked
+// (same FMA contraction association, correctly-rounded vector sqrt), but
+// the kernel evaluation and the accumulation fuse into one sample pass
+// with the normalised queries and accumulators held in vector registers.
+// The auto-vectorized template above spills the queries to the stack and
+// reloads them twice per sample; at 0.62ns/pair it runs 2.2x off the
+// 0.28ns vector-sqrt roof, and the fused loop closes most of the
+// schedulable gap (0.48ns/pair, on the FP-pipe wall for this op mix).
+// vld3/vst3 move the AoS triples for free.
+void DisplaceBlockedNeon4(GfVec3d const &centre, double invScale, double scale,
+                          double const *restX, double const *restY, double const *restZ,
+                          double const *cx, double const *cy, double const *cz,
+                          size_t n, GfVec3d const *qs, GfVec3d *ds)
+{
+    float64x2_t const c0 = vdupq_n_f64(centre[0]);
+    float64x2_t const c1 = vdupq_n_f64(centre[1]);
+    float64x2_t const c2 = vdupq_n_f64(centre[2]);
+    float64x2_t const invS = vdupq_n_f64(invScale);
+    float64x2x3_t const q01 = vld3q_f64(&qs[0][0]);
+    float64x2x3_t const q23 = vld3q_f64(&qs[2][0]);
+    // Plain locals, not arrays: the queries and accumulators must stay in
+    // vector registers across the sample pass (arrays spill to the stack
+    // and reload twice per sample).
+    float64x2_t const px0 = vmulq_f64(vsubq_f64(q01.val[0], c0), invS);
+    float64x2_t const px1 = vmulq_f64(vsubq_f64(q23.val[0], c0), invS);
+    float64x2_t const py0 = vmulq_f64(vsubq_f64(q01.val[1], c1), invS);
+    float64x2_t const py1 = vmulq_f64(vsubq_f64(q23.val[1], c1), invS);
+    float64x2_t const pz0 = vmulq_f64(vsubq_f64(q01.val[2], c2), invS);
+    float64x2_t const pz1 = vmulq_f64(vsubq_f64(q23.val[2], c2), invS);
+    // One axis per scope: the twelve affine broadcasts must not all be
+    // live at once, or the allocator spills the queries it just loaded.
+    float64x2_t ox0, ox1, oy0, oy1, oz0, oz1;
+    {
+        float64x2_t const a0 = vdupq_n_f64(cx[n]);
+        float64x2_t const a1 = vdupq_n_f64(cx[n + 1]);
+        float64x2_t const a2 = vdupq_n_f64(cx[n + 2]);
+        float64x2_t const a3 = vdupq_n_f64(cx[n + 3]);
+        ox0 = vfmaq_f64(vfmaq_f64(vfmaq_f64(a0, a1, px0), a2, py0), a3, pz0);
+        ox1 = vfmaq_f64(vfmaq_f64(vfmaq_f64(a0, a1, px1), a2, py1), a3, pz1);
+    }
+    {
+        float64x2_t const a0 = vdupq_n_f64(cy[n]);
+        float64x2_t const a1 = vdupq_n_f64(cy[n + 1]);
+        float64x2_t const a2 = vdupq_n_f64(cy[n + 2]);
+        float64x2_t const a3 = vdupq_n_f64(cy[n + 3]);
+        oy0 = vfmaq_f64(vfmaq_f64(vfmaq_f64(a0, a1, px0), a2, py0), a3, pz0);
+        oy1 = vfmaq_f64(vfmaq_f64(vfmaq_f64(a0, a1, px1), a2, py1), a3, pz1);
+    }
+    {
+        float64x2_t const a0 = vdupq_n_f64(cz[n]);
+        float64x2_t const a1 = vdupq_n_f64(cz[n + 1]);
+        float64x2_t const a2 = vdupq_n_f64(cz[n + 2]);
+        float64x2_t const a3 = vdupq_n_f64(cz[n + 3]);
+        oz0 = vfmaq_f64(vfmaq_f64(vfmaq_f64(a0, a1, px0), a2, py0), a3, pz0);
+        oz1 = vfmaq_f64(vfmaq_f64(vfmaq_f64(a0, a1, px1), a2, py1), a3, pz1);
+    }
+    for (size_t i = 0; i < n; ++i) {
+        // Broadcast loads keep one live register per sample value (the
+        // compiler serves the coefficient lanes from scalar loads into
+        // indexed FMA).
+        float64x2_t const sx = vld1q_dup_f64(&restX[i]);
+        float64x2_t const sy = vld1q_dup_f64(&restY[i]);
+        float64x2_t const sz = vld1q_dup_f64(&restZ[i]);
+        float64x2_t const qx = vld1q_dup_f64(&cx[i]);
+        float64x2_t const qy = vld1q_dup_f64(&cy[i]);
+        float64x2_t const qz = vld1q_dup_f64(&cz[i]);
+        // Seed with dy*dy: the scalar blocks' codegen evaluates the sum
+        // as fma(dz,dz,fma(dx,dx,dy*dy)), and the seed choice is
+        // observable (exact-product-plus-rounded-addend commutes only in
+        // the product, not across the addend).
+        // Both pairs' differences first so each broadcast dies early.
+        float64x2_t const dx0 = vsubq_f64(px0, sx);
+        float64x2_t const dx1 = vsubq_f64(px1, sx);
+        float64x2_t const dy0 = vsubq_f64(py0, sy);
+        float64x2_t const dy1 = vsubq_f64(py1, sy);
+        float64x2_t const dz0 = vsubq_f64(pz0, sz);
+        float64x2_t const dz1 = vsubq_f64(pz1, sz);
+        float64x2_t s0 = vfmaq_f64(vmulq_f64(dy0, dy0), dx0, dx0);
+        s0 = vfmaq_f64(s0, dz0, dz0);
+        float64x2_t s1 = vfmaq_f64(vmulq_f64(dy1, dy1), dx1, dx1);
+        s1 = vfmaq_f64(s1, dz1, dz1);
+        float64x2_t const rr0 = vsqrtq_f64(s0);
+        float64x2_t const rr1 = vsqrtq_f64(s1);
+        float64x2_t const kk0 = vmulq_f64(vmulq_f64(rr0, rr0), rr0);
+        float64x2_t const kk1 = vmulq_f64(vmulq_f64(rr1, rr1), rr1);
+        ox0 = vfmaq_f64(ox0, qx, kk0);
+        oy0 = vfmaq_f64(oy0, qy, kk0);
+        oz0 = vfmaq_f64(oz0, qz, kk0);
+        ox1 = vfmaq_f64(ox1, qx, kk1);
+        oy1 = vfmaq_f64(oy1, qy, kk1);
+        oz1 = vfmaq_f64(oz1, qz, kk1);
+    }
+    float64x2_t const sc = vdupq_n_f64(scale);
+    float64x2x3_t d01, d23;
+    d01.val[0] = vmulq_f64(ox0, sc);
+    d01.val[1] = vmulq_f64(oy0, sc);
+    d01.val[2] = vmulq_f64(oz0, sc);
+    d23.val[0] = vmulq_f64(ox1, sc);
+    d23.val[1] = vmulq_f64(oy1, sc);
+    d23.val[2] = vmulq_f64(oz1, sc);
+    vst3q_f64(&ds[0][0], d01);
+    vst3q_f64(&ds[2][0], d23);
+}
+#endif
+
 }  // namespace
+
+namespace {
+std::atomic<bool> g_forceScalarDisplace{false};
+}  // namespace
+
+void TestForceScalarDisplace(bool force) noexcept
+{
+    g_forceScalarDisplace.store(force, std::memory_order_relaxed);
+}
 
 void CubicField::DisplaceBatch(GfVec3d const *qs, GfVec3d *ds, size_t count) const
 {
@@ -265,6 +385,19 @@ void CubicField::DisplaceBatch(GfVec3d const *qs, GfVec3d *ds, size_t count) con
     double const *cy = &_coefficients[m];
     double const *cz = &_coefficients[2 * m];
     double const *rx = _restX.data(), *ry = _restY.data(), *rz = _restZ.data();
+#if defined(__aarch64__) || defined(_M_ARM64)
+    if (!g_forceScalarDisplace.load(std::memory_order_relaxed)) {
+        while (count >= 4) {
+            DisplaceBlockedNeon4(_centre, _invScale, _scale, rx, ry, rz,
+                                 cx, cy, cz, n, qs, ds);
+            qs += 4;
+            ds += 4;
+            count -= 4;
+        }
+        for (size_t t = 0; t < count; ++t) ds[t] = Displacement(qs[t]);
+        return;
+    }
+#endif
     while (count >= 8) {
         DisplaceBlocked<8>(_centre, _invScale, _scale, rx, ry, rz,
                            cx, cy, cz, n, qs, ds);
