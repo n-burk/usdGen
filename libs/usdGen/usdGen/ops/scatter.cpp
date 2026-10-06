@@ -384,12 +384,21 @@ bool UsdGenScatterOp::Capture(
             if (std::abs(float(GfDot(e0, Nrest))) > 0.9f * float(e0.GetLength()))
                 e0 = pc - p0;  // e0 too normal-parallel; try the other edge
             T = e0 - Nrest * GfDot(e0, Nrest);
-            if (T.GetLength() < 1e-9f) {
+            // Fuse the degenerate-length check with the normalize: T's
+            // GetLengthSq is (T*T) and GetLength is its sqrt, so one
+            // sqrt feeds both the 1e-9f check and the division. The hot
+            // path (len >= 1e-9f) takes Normalize3's division branch
+            // (len is far above its 1e-12f floor) with the identical
+            // divisor; the cold path runs the original spelling verbatim.
+            float tLen = GfSqrt(T * T);
+            if (tLen < 1e-9f) {
                 T = std::abs(Nrest[0]) > 0.9f ? GfVec3f(0.0f, 1.0f, 0.0f)
                                              : GfVec3f(1.0f, 0.0f, 0.0f);
                 T = T - Nrest * GfDot(T, Nrest);
+                T = Normalize3(T);
+            } else {
+                T = T / tLen;
             }
-            T = Normalize3(T);
             }
             GfVec3f B = Normalize3(GfCross(N, T));
             if (flip) { T = -T; B = -B; }  // rest frame handedness (02 §2.6)
