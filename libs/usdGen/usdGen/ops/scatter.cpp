@@ -469,39 +469,62 @@ bool UsdGenScatterOp::Capture(
     // morton/order pair.
     const size_t N = aids.size();
     std::vector<uint64_t> morton(N);
-    std::vector<size_t> order(N);
+    // Indices and digit populations are 32-bit: the emission loop caps the
+    // root total at uint32 cardinality, so every index and every population
+    // is below 2^32. Halves the permutation traffic of the sort.
+    std::vector<uint32_t> order(N);
+    uint64_t orKeys = 0, andKeys = ~uint64_t(0);
     for (size_t i = 0; i < N; ++i) {
-        morton[i] = UsdGenMortonKey3(ax[i], ay[i], az[i], 64.0f);
-        order[i] = i;
+        uint64_t const key = UsdGenMortonKey3(ax[i], ay[i], az[i], 64.0f);
+        morton[i] = key;
+        order[i] = uint32_t(i);
+        orKeys |= key;
+        andKeys &= key;
     }
+    uint32_t const *perm = order.data();
+    // Scratch pair at function scope: an odd surviving-pass count leaves the
+    // permutation in tmpIdx, which the gather below still reads.
+    std::vector<uint64_t> tmpKeys;
+    std::vector<uint32_t> tmpIdx;
     if (N > 1) {
-        std::vector<uint64_t> tmpKeys(N);
-        std::vector<size_t> tmpIdx(N);
-        std::vector<size_t> counts(65536);
+        tmpKeys.assign(N, 0);
+        tmpIdx.assign(N, 0);
+        std::vector<uint32_t> counts(65536);
         uint64_t *keys = morton.data();
-        size_t *idx = order.data();
+        uint32_t *idx = order.data();
         uint64_t *keysOut = tmpKeys.data();
-        size_t *idxOut = tmpIdx.data();
+        uint32_t *idxOut = tmpIdx.data();
+        // A counting pass whose digit is constant across all keys is the
+        // identity permutation (every element scatters to its own slot, in
+        // input order), so only varying digits run. orKeys ^ andKeys marks
+        // exactly the bit positions where some key pair differs; the
+        // surviving passes still run least- to most-significant, so the
+        // final order is exactly the 4-pass order. The permutation lands in
+        // whichever index array the last surviving pass wrote.
+        uint64_t const vary = orKeys ^ andKeys;
         for (int pass = 0; pass < 4; ++pass) {
-            std::fill(counts.begin(), counts.end(), size_t(0));
             int const shift = pass * 16;
+            if (((vary >> shift) & 0xffffu) == 0)
+                continue;
+            std::fill(counts.begin(), counts.end(), uint32_t(0));
             for (size_t i = 0; i < N; ++i)
                 ++counts[(keys[i] >> shift) & 0xffffu];
-            size_t sum = 0;
+            uint32_t sum = 0;
             for (size_t c = 0; c < 65536; ++c) {
-                size_t const t = counts[c];
+                uint32_t const t = counts[c];
                 counts[c] = sum;
                 sum += t;
             }
             for (size_t i = 0; i < N; ++i) {
                 size_t const d = (keys[i] >> shift) & 0xffffu;
-                size_t const p = counts[d]++;
+                uint32_t const p = counts[d]++;
                 keysOut[p] = keys[i];
                 idxOut[p] = idx[i];
             }
             std::swap(keys, keysOut);
             std::swap(idx, idxOut);
         }
+        perm = idx;
     }
 
     buf.totalCurves = uint32_t(N);
@@ -513,7 +536,7 @@ bool UsdGenScatterOp::Capture(
     buf.rootT = VtVec3fArray(N); buf.rootN = VtVec3fArray(N); buf.rootB = VtVec3fArray(N);
     buf.hairT = VtFloatArray(N, 0.0f);
     for (size_t i = 0; i < N; ++i) {
-        size_t const s = order[i];
+        size_t const s = perm[i];
         buf.px[i] = ax[s]; buf.py[i] = ay[s]; buf.pz[i] = az[s];
         buf.curveId[i] = aids[s];
         buf.rootPrim[i] = aPrim[s];
