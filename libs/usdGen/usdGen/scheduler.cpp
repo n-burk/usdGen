@@ -50,6 +50,10 @@ namespace usdGen {
 
 namespace {
 
+// The one op whose Evaluate records per-chunk extents (see the gate in
+// Run): a file static, interned at load, compared by pointer below.
+TfToken const sDeformType{"UsdGenDeform"};
+
 int ResolveThreadLimit(int requested)
 {
     if (requested > 0) return requested;
@@ -399,6 +403,12 @@ struct NodeSweepPayload
     // Invoked after this chunk's writes have completed. Installed only on the
     // terminal node of an opt-in progressive CPU cook.
     std::function<void(size_t)> onChunkCompleted;
+    // Per-chunk extent slots for the recording points-writer (one entry per
+    // chunk of the gate-time partition), or null for every other node.
+    // SweepChunk hands slot [index] to the kernel; slots are disjoint per
+    // (node, chunk), so concurrent sweeps never share one.
+    UsdGenChunkExtent *extentBase = nullptr;
+    size_t extentCap = 0;
 };
 
 // A prepared node job owns the small vectors whose addresses are published in
@@ -475,6 +485,11 @@ void SweepChunk(size_t index, void *payload)
     view.desc = &cd;
     view.curveCount = cd.curveCount;
     view.cvCount = cd.cvCount;
+    // The recording writer's slot, when the gate armed one and the chunk
+    // still fits the gate-time partition (a mid-run repartition grows the
+    // partition past the scratch; the interleave size check falls back).
+    view.extentSlot = (pl.extentBase && index < pl.extentCap)
+        ? pl.extentBase + index : nullptr;
     view.inCvCount = upC ? upC->cvCount : 0;
     view.inFirstCv = static_cast<uint32_t>(upBase);
     view.inCvOffsets = (upC && upC->cvCount == 0 && !upBuf.cvOffsets.empty() &&
@@ -631,6 +646,9 @@ struct InterleavePayload
     UsdGenCurveBuffer const *term;
     std::vector<char> *touched;
     bool widthsFlag;
+    // Fused extents: per-chunk records from the recording sweep, consumed
+    // in chunk order. Null unless every validation check passed.
+    UsdGenChunkExtent const *extents = nullptr;
 };
 
 void InterleaveTile(size_t index, void *payload)
@@ -658,6 +676,30 @@ void InterleaveTile(size_t index, void *payload)
     bool const ragged = !term.cvOffsets.empty();
     for (uint32_t i = 0; i < tv.chunkCount; ++i) {
         UsdGenChunkDesc const &cd = pl.tn->chunks[tv.firstChunk + i];
+        if (pl.extents) {
+            // Fused path: the counts below are the point path's statements
+            // verbatim (same inputs, same sums); the extent unions the
+            // recorded per-chunk extents in chunk order, which reproduces
+            // the sequential pass bitwise for NaN-free points (the gate
+            // admits only deform-recorded runs, and deform outputs cannot
+            // carry NaN — see the contract on UsdGenChunkView::extentSlot).
+            if (ragged && cd.cvCount == 0) {
+                for (uint32_t c = 0; c < cd.liveCount; ++c) {
+                    size_t const g = size_t(cd.firstCurve) + c;
+                    if (g + 1 >= term.cvOffsets.size()) break;
+                    uint32_t const p0 = static_cast<uint32_t>(term.cvOffsets[g]);
+                    uint32_t const len =
+                        static_cast<uint32_t>(term.cvOffsets[g + 1]) - p0;
+                    ++liveCurves;
+                    liveCvs += len;
+                }
+            } else {
+                liveCurves += cd.liveCount;
+                liveCvs += uint64_t(cd.liveCount) * cd.cvCount;
+            }
+            extent.UnionWith(pl.extents[tv.firstChunk + i].extent);
+            continue;
+        }
         // Ragged path (03 §1.3): per-curve CV spans come from cvOffsets, not
         // liveCount*cvCount (cvCount == 0 on the ragged path). g indexes the
         // absolute curve so cvOffsets[g] is valid.
@@ -750,6 +792,46 @@ UsdGenRunResult UsdGenScheduler::Run(
 
     UsdGenRunResult result;
     if (graph.NodeCount() == 0) return result;
+
+    // Fused tile extents: when the deepest points-writer on the terminal
+    // chain is a deform, the deform sweep records each chunk's extent over
+    // the floats it stores and the interleave unions the slots instead of
+    // re-reading every point (deform capture success pins the outputs
+    // NaN-free, and NaN-free chunked union reproduces the sequential pass
+    // bitwise). Upstream writers do not matter: the deform consumes their
+    // outputs, so its stores are the terminal points. Anything else — a
+    // deeper non-deform writer, a partial sweep, unaliased planes, a
+    // mid-run repartition — falls back to the point pass, so the union
+    // only runs when every check against the current buffers passes. A
+    // deform that does not record pays one predictable branch per CV, so
+    // unselected graphs keep their old timing.
+    int extentWriter = -1;
+    size_t extentChunks = 0;
+    {
+        bool writerSeen = false;
+        UsdGenNodeId id = graph.TerminalNodeId();
+        for (int guard = 0;
+             id != kUsdGenInvalidNode && id < UsdGenNodeId(graph.NodeCount()) &&
+             guard <= graph.NodeCount();
+             ++guard) {
+            UsdGenCompiledNode const &n = graph.Node(id);
+            if (!writerSeen && n.op &&
+                (n.op->PlanesTouched() & UsdGenOp::kPlanePoints) != 0) {
+                writerSeen = true;
+                if (n.op->Type() == sDeformType) extentWriter = int(id);
+            }
+            id = n.input;
+        }
+        if (extentWriter < 0) {
+            extentWriter = -1;
+        } else {
+            extentChunks = graph.Node(graph.TerminalNodeId()).chunks.size();
+            if (extentChunks == 0) extentWriter = -1;
+        }
+    }
+    std::vector<UsdGenChunkExtent> extentScratch;
+    if (extentWriter >= 0) extentScratch.resize(extentChunks);
+    bool extentSwept = false;
 
     UsdGenDiagnostics aggregated;
     auto dispatcher = MakeWorkDispatcher();
@@ -1016,6 +1098,10 @@ UsdGenRunResult UsdGenScheduler::Run(
         pl.evalAll = job->evalAll;
         pl.planes = op.PlanesTouched();
         pl.didEval.assign(node.chunks.size(), 0);
+        if (pos == extentWriter && extentWriter >= 0) {
+            pl.extentBase = extentScratch.data();
+            pl.extentCap = extentChunks;
+        }
         job->shouldSweep = true;
         return true;
     };
@@ -1136,6 +1222,11 @@ UsdGenRunResult UsdGenScheduler::Run(
             for (size_t j = 0; j < jobs.size(); ++j) {
                 NodeExecution &job = *jobs[j];
                 UsdGenCompiledNode &node = graph.Node(frontier[j]);
+                if (int(frontier[j]) == extentWriter && job.shouldSweep) {
+                    extentSwept = true;
+                    for (uint8_t b : job.sweep.didEval)
+                        if (!b) extentSwept = false;
+                }
                 if (job.shouldSweep) {
                     bool wrote = job.reCaptured;
                     for (uint8_t b : job.sweep.didEval)
@@ -1188,6 +1279,36 @@ UsdGenRunResult UsdGenScheduler::Run(
 
     if (result.topologyChanged)
         std::fill(tileTouched.begin(), tileTouched.end(), 1);
+    // Validate the fused extent slots against the current buffers. Every
+    // condition re-checks the present moment: the sweep recorded spans as
+    // they were, so anything that moved since (a repartition, a plane
+    // detach, a differently-sized terminal partition) fails closed into
+    // the point pass.
+    UsdGenChunkExtent const *fusedExtents = nullptr;
+    if (extentWriter >= 0 && extentSwept) {
+        UsdGenCompiledNode const &wn = graph.Node(UsdGenNodeId(extentWriter));
+        auto sameBacking = [](auto const &a, auto const &b) {
+            return a.size() == b.size() && (a.empty() || a.cdata() == b.cdata());
+        };
+        bool ok = tn.chunks.size() == extentChunks &&
+                  wn.chunks.size() == extentChunks &&
+                  sameBacking(term.px, wn.buffer.px) &&
+                  sameBacking(term.py, wn.buffer.py) &&
+                  sameBacking(term.pz, wn.buffer.pz) &&
+                  sameBacking(term.cvOffsets, wn.buffer.cvOffsets);
+        for (size_t i = 0; ok && i < extentChunks; ++i) {
+            UsdGenChunkDesc const &tc = tn.chunks[i];
+            UsdGenChunkDesc const &wc = wn.chunks[i];
+            UsdGenChunkExtent const &s = extentScratch[i];
+            ok = tc.liveCount == tc.curveCount && wc.liveCount == wc.curveCount &&
+                 s.firstCurve == wc.firstCurve && s.curveCount == wc.curveCount &&
+                 s.liveCount == wc.liveCount && s.firstCv == wc.firstCv &&
+                 s.cvCount == wc.cvCount && wc.firstCurve == tc.firstCurve &&
+                 wc.curveCount == tc.curveCount && wc.liveCount == tc.liveCount &&
+                 wc.firstCv == tc.firstCv && wc.cvCount == tc.cvCount;
+        }
+        if (ok) fusedExtents = extentScratch.data();
+    }
     if (nTiles > 0) {
         TRACE_SCOPE("usdGen interleave tiles");
         InterleavePayload ip;
@@ -1197,6 +1318,7 @@ UsdGenRunResult UsdGenScheduler::Run(
         ip.touched = &tileTouched;
         ip.widthsFlag = termOp &&
             (termOp->PlanesTouched() & UsdGenOp::kPlaneWidths) != 0;
+        ip.extents = fusedExtents;
         dispatcher.ParallelFor(size_t(nTiles), InterleaveTile, &ip);
     }
 

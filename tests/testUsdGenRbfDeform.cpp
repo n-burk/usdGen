@@ -31,6 +31,7 @@
 #include "usdGenImaging/usdGenGraphDescBuilderStage.h"
 
 #include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/gf/range3f.h"
 #include "pxr/base/gf/rotation.h"
 #include "pxr/imaging/hd/dataSource.h"
 #include "pxr/imaging/hd/sceneIndexObserver.h"
@@ -1169,6 +1170,105 @@ void CheckPlaybackNotices()
 
 } // namespace
 
+void CheckFusedTileExtents()
+{
+    // The tile interleave fuses per-chunk extents recorded by the deform
+    // sweep (the deepest points-writer here is the terminal deform) instead
+    // of re-reading every point. Two commits on one graph: the recompiled
+    // pose sweeps the deform, and every dirtied tile must publish bitwise
+    // the sequential extent and counts over the terminal points.
+    UsdStageRefPtr const stage = UsdStage::Open(kScene);
+    if (!stage) { Check(false, "fused extents: cannot open the scene"); return; }
+    auto build = [&](double time) {
+        usdGenImaging::UsdGenGraphDescBuildOptions options;
+        options.time = time;
+        return usdGenImaging::BuildGraphDescFromStage(stage, kDescription, options);
+    };
+    UsdGenCompiler compiler;
+    UsdGenGraph graph;
+    UsdGenGraphDesc desc = build(1.0);
+    if (!compiler.Compile(desc, &graph).ok) {
+        Check(false, "fused extents: the rest pose compiles"); return;
+    }
+    UsdGenScheduler scheduler(4);
+    UsdGenEvalContext context;
+    context.time = 1.0;
+    uint64_t gen = 0;
+    if (scheduler.Run(graph, context, ++gen).diagnostics.HasErrors()) {
+        Check(false, "fused extents: the rest pose cooks"); return;
+    }
+    desc = build(20.0);
+    context.time = 20.0;
+    if (!compiler.Recompile(desc, &graph).ok) {
+        Check(false, "fused extents: the pose recompiles"); return;
+    }
+    UsdGenRunResult const run = scheduler.Run(graph, context, ++gen);
+    if (run.diagnostics.HasErrors()) {
+        Check(false, "fused extents: the pose cooks"); return;
+    }
+    bool swept = false;
+    for (auto const &st : run.nodeStats)
+        if (graph.Node(st.id).type == TfToken("UsdGenDeform") && st.chunksEvaluated > 0)
+            swept = true;
+    Check(swept, "fused extents: the pose sweeps the deform");
+    if (!swept) return;
+    UsdGenCompiledNode const &tn = graph.Node(graph.TerminalNodeId());
+    UsdGenCurveBuffer const &term = graph.Output();
+    bool const ragged = !term.cvOffsets.empty();
+    float const *tpx = term.px.empty() ? nullptr : term.px.cdata();
+    float const *tpy = term.py.empty() ? nullptr : term.py.cdata();
+    float const *tpz = term.pz.empty() ? nullptr : term.pz.cdata();
+    size_t const nPx = term.px.size();
+    size_t compared = 0, extentsOk = 0, countsOk = 0;
+    for (UsdGenTileView const &tv : graph.Tiles()) {
+        // Untouched tiles keep their previous extent; only a tile the
+        // interleave rewrote (pointsDirty) must match the reference.
+        if (!tv.pointsDirty) continue;
+        if (tn.chunks.size() < size_t(tv.firstChunk) + tv.chunkCount) continue;
+        GfRange3f ref;
+        uint64_t liveCurves = 0, liveCvs = 0;
+        for (uint32_t i = 0; i < tv.chunkCount; ++i) {
+            UsdGenChunkDesc const &cd = tn.chunks[tv.firstChunk + i];
+            if (ragged && cd.cvCount == 0) {
+                for (uint32_t c = 0; c < cd.liveCount; ++c) {
+                    size_t const g = size_t(cd.firstCurve) + c;
+                    if (g + 1 >= term.cvOffsets.size()) break;
+                    uint32_t const p0 = uint32_t(term.cvOffsets[g]);
+                    uint32_t const len = uint32_t(term.cvOffsets[g + 1]) - p0;
+                    ++liveCurves;
+                    liveCvs += len;
+                    if (!tpx || !tpy || !tpz) continue;
+                    for (uint32_t v = 0; v < len; ++v) {
+                        size_t const p = size_t(p0) + v;
+                        if (p >= nPx) break;
+                        ref.ExtendBy(GfVec3f(tpx[p], tpy[p], tpz[p]));
+                    }
+                }
+                continue;
+            }
+            liveCurves += cd.liveCount;
+            liveCvs += uint64_t(cd.liveCount) * cd.cvCount;
+            if (!tpx || !tpy || !tpz) continue;
+            for (uint32_t c = 0; c < cd.liveCount; ++c) {
+                size_t const o = size_t(cd.firstCv) + size_t(c) * cd.cvCount;
+                for (uint32_t v = 0; v < cd.cvCount; ++v) {
+                    size_t const p = o + v;
+                    if (p >= nPx) break;
+                    ref.ExtendBy(GfVec3f(tpx[p], tpy[p], tpz[p]));
+                }
+            }
+        }
+        ++compared;
+        extentsOk += std::memcmp(&tv.extent.GetMin(), &ref.GetMin(), sizeof(GfVec3f)) == 0 &&
+                std::memcmp(&tv.extent.GetMax(), &ref.GetMax(), sizeof(GfVec3f)) == 0;
+        countsOk += tv.totalLiveCurves == liveCurves && tv.totalLiveCvs == liveCvs;
+    }
+    Check(compared > 0, "fused extents: the pose dirties tiles");
+    Check(compared > 0 && extentsOk == compared && countsOk == compared,
+          "fused tile extents and counts are bitwise the sequential pass (" +
+              std::to_string(compared) + " tiles)");
+}
+
 int main()
 {
     usdGenRegisterM1Operators();
@@ -1177,6 +1277,7 @@ int main()
     CheckBatchPathsAgree();
     CheckDeformChosenDigest();
     CheckDeformEvaluateViewShapes();
+    CheckFusedTileExtents();
     CheckCurveWrapField();
     CheckExample();
     CheckSurfaceExample();

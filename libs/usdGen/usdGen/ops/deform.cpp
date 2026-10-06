@@ -685,6 +685,15 @@ void UsdGenDeformOp::Evaluate(UsdGenEvalContext const& ctx, UsdGenCapture const&
     auto const *cvOff = view->cvOffsets;
     bool const ragged = cvOff != nullptr;
     bool const ready = cap.result.size() == size_t(cap.upstreamCvs) * 3;
+    // Fused tile extents: extend over exactly the floats stored below, in
+    // store order, so the interleave can union per-chunk records instead
+    // of re-reading the points. The stored values are NaN-free whenever
+    // this runs (capture success pins the upstream and the result finite,
+    // and the lerp below closes over finite/Inf without producing NaN),
+    // which is what makes the chunked union bitwise exact. Null in every
+    // graph the gate does not select: one predictable branch per CV.
+    UsdGenChunkExtent *extSlot = view->extentSlot;
+    GfRange3f chunkExt;
     for (uint32_t c = 0; c < view->curveCount; ++c) {
         size_t const n = ragged ? size_t(cvOff[c + 1] - cvOff[c]) : size_t(view->cvCount);
         size_t const g = ragged ? size_t(cvOff[c] - cvOff[0]) : view->Cv(c, 0);
@@ -695,9 +704,13 @@ void UsdGenDeformOp::Evaluate(UsdGenEvalContext const& ctx, UsdGenCapture const&
             float const m = ready
                 ? std::clamp(float(maskField.Value(curve, cv)), 0.0f, 1.0f) : 0.0f;
             if (m == 0.0f || cv * 3 + 2 >= cap.result.size()) {
-                view->px[o] = view->inPx[o];
-                view->py[o] = view->inPy[o];
-                view->pz[o] = view->inPz[o];
+                float const e0 = view->inPx[o];
+                float const e1 = view->inPy[o];
+                float const e2 = view->inPz[o];
+                view->px[o] = e0;
+                view->py[o] = e1;
+                view->pz[o] = e2;
+                if (extSlot) chunkExt.ExtendBy(GfVec3f(e0, e1, e2));
                 continue;
             }
             float const *r = &cap.result[cv * 3];
@@ -706,15 +719,28 @@ void UsdGenDeformOp::Evaluate(UsdGenEvalContext const& ctx, UsdGenCapture const&
             // the stores are unchanged while the loop reads a third less.
             if (m == 1.0f) {
                 view->px[o] = r[0]; view->py[o] = r[1]; view->pz[o] = r[2];
+                if (extSlot) chunkExt.ExtendBy(GfVec3f(r[0], r[1], r[2]));
                 continue;
             }
             float const in0 = view->inPx[o];
             float const in1 = view->inPy[o];
             float const in2 = view->inPz[o];
-            view->px[o] = in0 + (r[0] - in0) * m;
-            view->py[o] = in1 + (r[1] - in1) * m;
-            view->pz[o] = in2 + (r[2] - in2) * m;
+            float const e0 = in0 + (r[0] - in0) * m;
+            float const e1 = in1 + (r[1] - in1) * m;
+            float const e2 = in2 + (r[2] - in2) * m;
+            view->px[o] = e0;
+            view->py[o] = e1;
+            view->pz[o] = e2;
+            if (extSlot) chunkExt.ExtendBy(GfVec3f(e0, e1, e2));
         }
+    }
+    if (extSlot && view->desc) {
+        extSlot->extent = chunkExt;
+        extSlot->firstCurve = view->desc->firstCurve;
+        extSlot->curveCount = view->desc->curveCount;
+        extSlot->liveCount = view->desc->liveCount;
+        extSlot->firstCv = view->desc->firstCv;
+        extSlot->cvCount = view->desc->cvCount;
     }
 }
 
