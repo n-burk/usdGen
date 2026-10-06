@@ -23,13 +23,17 @@
 //       primOrigin, purpose/visibility, exactly-one instancedBy path,
 //       MoonRay wire types: quath rotations, packed varyings, color role);
 //  (11) notice locators (Translations, never topology, for value edits).
+//  (12) inline rotation quat matches ExtractRotationQuat bit for bit.
 #include "usdGenImaging/usdGenInstancer.h"
 
 #include "usdGen/curveBuffer.h"
 
+#include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/gf/quatd.h"
 #include "pxr/base/gf/quath.h"
 #include "pxr/base/gf/quatf.h"
 #include "pxr/base/gf/vec2f.h"
+#include "pxr/base/gf/vec3d.h"
 #include "pxr/base/vt/value.h"
 #include "pxr/imaging/hd/instancedBySchema.h"
 #include "pxr/imaging/hd/instancerTopologySchema.h"
@@ -921,6 +925,121 @@ static void CheckNotices()
           "quiet bake emits no locators");
 }
 
+// --- (12) inline rotation quat -----------------------------------------
+// Bake's inline frame-to-quat conversion must match
+// GfMatrix4d::ExtractRotationQuat bit for bit: differential check over the
+// 24 axis-aligned frames (derivation is exact there) plus seeded random
+// orthonormal frames, comparing every baked rotation exactly. The set
+// covers both quat branches (identity takes the trace path, the 180-degree
+// frames take the diagonal path).
+
+static uint64_t QuatTestState = 0x123456789abcdefull;
+static uint64_t QuatTestNext()
+{
+    uint64_t z = (QuatTestState += 0x9E3779B97F4A7C15ull);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+static double QuatTestUnit()
+{
+    return double(QuatTestNext() >> 11) * 0x1.0p-53;
+}
+
+static void CheckInlineQuat()
+{
+    std::vector<GfVec3f> tFrames, bFrames, nFrames;
+    // All 24 axis-aligned orthonormal frames: y over the six signed axes,
+    // z over the four orthogonal to y, x = y cross z.
+    GfVec3d const axes[6] = {GfVec3d(1, 0, 0), GfVec3d(-1, 0, 0),
+                             GfVec3d(0, 1, 0), GfVec3d(0, -1, 0),
+                             GfVec3d(0, 0, 1), GfVec3d(0, 0, -1)};
+    for (int yi = 0; yi < 6; ++yi)
+        for (int zi = 0; zi < 6; ++zi) {
+            if (zi / 2 == yi / 2) continue;  // parallel to y
+            GfVec3d const y = axes[yi], z = axes[zi];
+            GfVec3d const x = GfCross(y, z);
+            tFrames.push_back(GfVec3f(x));
+            bFrames.push_back(GfVec3f(y));
+            nFrames.push_back(GfVec3f(z));
+        }
+    // Seeded random orthonormal frames via double Gram-Schmidt.
+    for (int k = 0; k < 2000; ++k) {
+        GfVec3d a(QuatTestUnit() * 2.0 - 1.0, QuatTestUnit() * 2.0 - 1.0,
+                  QuatTestUnit() * 2.0 - 1.0);
+        GfVec3d b(QuatTestUnit() * 2.0 - 1.0, QuatTestUnit() * 2.0 - 1.0,
+                  QuatTestUnit() * 2.0 - 1.0);
+        if (a.GetLength() < 0.2 || b.GetLength() < 0.2) {
+            --k;
+            continue;
+        }
+        GfVec3d const y = a / a.GetLength();
+        GfVec3d zb = b - y * GfDot(b, y);
+        if (zb.GetLength() < 0.2) {
+            --k;
+            continue;
+        }
+        GfVec3d const z = zb / zb.GetLength();
+        GfVec3d const x = GfCross(y, z);
+        tFrames.push_back(GfVec3f(x));
+        bFrames.push_back(GfVec3f(y));
+        nFrames.push_back(GfVec3f(z));
+    }
+    uint32_t const n = uint32_t(tFrames.size());
+    UsdGenCurveBuffer curves;
+    curves.totalCurves = n;
+    curves.totalCvs = n;
+    curves.px.assign(n, 0.0f);
+    curves.py.assign(n, 0.0f);
+    curves.pz.assign(n, 0.0f);
+    curves.curveId.resize(n);
+    for (uint32_t c = 0; c != n; ++c) curves.curveId[c] = uint64_t(c);
+    curves.rootT.assign(n, GfVec3f(0, 0, 0));
+    curves.rootB.assign(n, GfVec3f(0, 0, 0));
+    curves.rootN.assign(n, GfVec3f(0, 0, 0));
+    for (uint32_t c = 0; c != n; ++c) {
+        curves.rootT[c] = tFrames[c];
+        curves.rootB[c] = bFrames[c];
+        curves.rootN[c] = nFrames[c];
+    }
+    UsdGenInstanceCurves input;
+    input.curves = &curves;
+    UsdGenInstanceResult result;
+    Check(BakeOk(CardsParams(), input, &result),
+          "quat differential bake succeeds");
+    if (result.rotations.size() != n) {
+        Check(false, "quat differential has one rotation per curve");
+        return;
+    }
+    size_t exact = 0, elseBranch = 0, traceBranch = 0;
+    for (uint32_t c = 0; c != n; ++c) {
+        // Mirror of Bake's surfaceFrame derivation, then the USD routine.
+        GfVec3d yAxis = GfVec3d(curves.rootB[c]) /
+            GfVec3d(curves.rootB[c]).GetLength();
+        GfVec3d z = GfVec3d(curves.rootN[c]) -
+            yAxis * GfDot(GfVec3d(curves.rootN[c]), yAxis);
+        GfVec3d zAxis = z / z.GetLength();
+        GfVec3d xAxis = GfCross(yAxis, zAxis);
+        GfMatrix4d basis(1.0);
+        basis.SetRow(0, GfVec4d(xAxis[0], xAxis[1], xAxis[2], 0.0));
+        basis.SetRow(1, GfVec4d(yAxis[0], yAxis[1], yAxis[2], 0.0));
+        basis.SetRow(2, GfVec4d(zAxis[0], zAxis[1], zAxis[2], 0.0));
+        GfQuatf const expect = GfQuatf(basis.ExtractRotationQuat());
+        if (result.rotations[c] == expect) ++exact;
+        // Same branch condition as the quat routine: trace vs the
+        // largest diagonal.
+        double const d[3] = {xAxis[0], yAxis[1], zAxis[2]};
+        int bi = 0;
+        if (d[0] > d[1]) bi = (d[0] > d[2] ? 0 : 2);
+        else bi = (d[1] > d[2] ? 1 : 2);
+        if (d[0] + d[1] + d[2] > d[bi]) ++traceBranch;
+        else ++elseBranch;
+    }
+    Check(exact == n, "inline quat matches ExtractRotationQuat exactly");
+    Check(traceBranch > 0 && elseBranch > 0,
+          "quat differential covers both branches");
+}
+
 int main()
 {
     CheckPaths();
@@ -935,6 +1054,7 @@ int main()
     CheckVariationPrimvars();
     CheckDataSources();
     CheckNotices();
+    CheckInlineQuat();
     std::printf("testUsdGenInstance: %s\n", failures ? "FAILED" : "PASS");
     return failures ? 1 : 0;
 }

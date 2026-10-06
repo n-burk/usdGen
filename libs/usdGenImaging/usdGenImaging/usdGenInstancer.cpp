@@ -144,6 +144,52 @@ _Fail(std::string const &message, std::string *error)
 bool
 _Finite(float v) { return std::isfinite(v); }
 
+// -- inline rotation quat (canonical: pxr/base/gf/matrix4d.cpp --------
+// GfMatrix4d::ExtractRotationQuat, the Open Inventor SbRotation form) --
+// Bit-exact copy of the USD routine specialized to the Bake case: the 4x4
+// holds the orthonormal frame axes as rows 0-2 with _mtx[3][3] == 1.0,
+// so the matrix setup, the out-of-line call, and the GfQuatd round-trip
+// drop out while every comparison and every double op stays in the same
+// order (including `4 * q` with the int literal). The sequence has no
+// multiply-add patterns, so FP contraction cannot diverge between
+// translation units. Re-check against the USD source on USD upgrades.
+GfQuatf
+_QuatFromFrameRows(GfVec3d const &xAxis, GfVec3d const &yAxis,
+                   GfVec3d const &zAxis)
+{
+    double const m[3][3] = {{xAxis[0], xAxis[1], xAxis[2]},
+                            {yAxis[0], yAxis[1], yAxis[2]},
+                            {zAxis[0], zAxis[1], zAxis[2]}};
+    int i;
+    if (m[0][0] > m[1][1])
+        i = (m[0][0] > m[2][2] ? 0 : 2);
+    else
+        i = (m[1][1] > m[2][2] ? 1 : 2);
+    double im[3];
+    double r;
+    if (m[0][0] + m[1][1] + m[2][2] > m[i][i]) {
+        r = 0.5 * std::sqrt(m[0][0] + m[1][1] + m[2][2] + 1.0);
+        im[0] = (m[1][2] - m[2][1]) / (4.0 * r);
+        im[1] = (m[2][0] - m[0][2]) / (4.0 * r);
+        im[2] = (m[0][1] - m[1][0]) / (4.0 * r);
+    } else {
+        int const j = (i + 1) % 3;
+        int const k = (i + 2) % 3;
+        double const q =
+            0.5 * std::sqrt(m[i][i] - m[j][j] - m[k][k] + 1.0);
+        im[i] = q;
+        im[j] = (m[i][j] + m[j][i]) / (4 * q);
+        im[k] = (m[k][i] + m[i][k]) / (4 * q);
+        r = (m[j][k] - m[k][j]) / (4 * q);
+    }
+    if (r < -1.0) r = -1.0;  // GfClamp(r, -1.0, 1.0), gf/math.h
+    if (r > 1.0) r = 1.0;
+    // GfQuatf(GfQuatd) is a plain per-component conversion (quatf.cpp),
+    // no normalization: construct it directly from the doubles.
+    return GfQuatf(float(r),
+                   GfVec3f(float(im[0]), float(im[1]), float(im[2])));
+}
+
 // Curve spans: uniform (totalCvs divisible by totalCurves) or ragged
 // cvOffsets. Mirrors the engine's span validation (curveBuffer.h detail).
 bool
@@ -586,15 +632,10 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
             xAxis = x;
             zAxis = z;
         }
-        GfMatrix4d basis(1.0);
-        // Row-vector frame: GfMatrix4d rotates v as v*M, so the frame axes
-        // are ROWS (row i = image of basis vector i), matching the
-        // root-frame row convention every consumer uses. Columns would bake
-        // the transposed rotation.
-        basis.SetRow(0, GfVec4d(xAxis[0], xAxis[1], xAxis[2], 0.0));
-        basis.SetRow(1, GfVec4d(yAxis[0], yAxis[1], yAxis[2], 0.0));
-        basis.SetRow(2, GfVec4d(zAxis[0], zAxis[1], zAxis[2], 0.0));
-        out.rotations[c] = GfQuatf(basis.ExtractRotationQuat());
+        // Row-vector frame: the frame axes are ROWS (row i = image of
+        // basis vector i), matching the root-frame row convention every
+        // consumer uses. Columns would bake the transposed rotation.
+        out.rotations[c] = _QuatFromFrameRows(xAxis, yAxis, zAxis);
         out.scales[c] = GfVec3f(
             params.width * cardProfile * s, params.length * s, s);
     }
