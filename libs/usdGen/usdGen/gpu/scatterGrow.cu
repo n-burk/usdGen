@@ -255,13 +255,42 @@ __global__ void GrowKernel(float3 const* roots, uint64_t const* ids,
     float target = float(targetDouble);
     if (!FiniteDevice(target)) { atomicCAS(error, 0, kNonFinite); return; }
     uint32_t first = c * cvCount;
-    for (uint32_t i = 0; i < cvCount; ++i) {
-        float t = float(i) / float(cvCount - 1);
-        float d = target * t;
-        if (!FiniteDevice(d)) { atomicCAS(error, 0, kNonFinite); return; }
-        float3 p = make_float3(roots[c].x + dir.x*d, roots[c].y + dir.y*d, roots[c].z + dir.z*d);
-        if (!FiniteDevice(p)) { atomicCAS(error, 0, kNonFinite); return; }
-        points[first+i] = p; widths[first+i] = width; hairT[first+i] = t;
+    // cvCount divisible by 4 (validated 2..64): every curve's first point is
+    // 16-byte aligned (first = c*cvCount, cudaMalloc is 256-byte aligned),
+    // so four float3s pack into three float4 stores with identical bytes.
+    // One 16-byte stream replaces four strided 12-byte streams; the uniform
+    // branch keeps odd counts on the scalar spelling below.
+    if ((cvCount & 3u) == 0) {
+        float4* vpts = reinterpret_cast<float4*>(points + first);
+        float3 r = roots[c];
+        for (uint32_t i = 0; i < cvCount; i += 4) {
+            float t0 = float(i) / float(cvCount - 1);
+            float t1 = float(i + 1) / float(cvCount - 1);
+            float t2 = float(i + 2) / float(cvCount - 1);
+            float t3 = float(i + 3) / float(cvCount - 1);
+            float d0 = target * t0, d1 = target * t1, d2 = target * t2, d3 = target * t3;
+            if (!FiniteDevice(d0) || !FiniteDevice(d1) || !FiniteDevice(d2) || !FiniteDevice(d3)) { atomicCAS(error, 0, kNonFinite); return; }
+            float3 p0 = make_float3(r.x + dir.x*d0, r.y + dir.y*d0, r.z + dir.z*d0);
+            float3 p1 = make_float3(r.x + dir.x*d1, r.y + dir.y*d1, r.z + dir.z*d1);
+            float3 p2 = make_float3(r.x + dir.x*d2, r.y + dir.y*d2, r.z + dir.z*d2);
+            float3 p3 = make_float3(r.x + dir.x*d3, r.y + dir.y*d3, r.z + dir.z*d3);
+            if (!FiniteDevice(p0) || !FiniteDevice(p1) || !FiniteDevice(p2) || !FiniteDevice(p3)) { atomicCAS(error, 0, kNonFinite); return; }
+            vpts[0] = make_float4(p0.x, p0.y, p0.z, p1.x);
+            vpts[1] = make_float4(p1.y, p1.z, p2.x, p2.y);
+            vpts[2] = make_float4(p2.z, p3.x, p3.y, p3.z);
+            vpts += 3;
+            widths[first+i] = width; widths[first+i+1] = width; widths[first+i+2] = width; widths[first+i+3] = width;
+            hairT[first+i] = t0; hairT[first+i+1] = t1; hairT[first+i+2] = t2; hairT[first+i+3] = t3;
+        }
+    } else {
+        for (uint32_t i = 0; i < cvCount; ++i) {
+            float t = float(i) / float(cvCount - 1);
+            float d = target * t;
+            if (!FiniteDevice(d)) { atomicCAS(error, 0, kNonFinite); return; }
+            float3 p = make_float3(roots[c].x + dir.x*d, roots[c].y + dir.y*d, roots[c].z + dir.z*d);
+            if (!FiniteDevice(p)) { atomicCAS(error, 0, kNonFinite); return; }
+            points[first+i] = p; widths[first+i] = width; hairT[first+i] = t;
+        }
     }
     outIds[c] = ids[c]; rootPrim[c] = rootPrimIn[c]; rootUV[c] = rootUVIn[c];
     rootT[c] = rootTIn[c]; rootB[c] = rootBIn[c]; rootN[c] = rootNIn[c];
