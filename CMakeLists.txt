@@ -487,6 +487,18 @@ set_target_properties(usdGenImaging PROPERTIES
     # Produce the import library that downstream Windows consumers need.
     # This is ignored by non-Windows generators.
     WINDOWS_EXPORT_ALL_SYMBOLS ON)  # plugins need exported symbols
+# -fno-math-errno on the scatter compile (GNU/Clang only): libm errno
+# / fenv is never read anywhere in libs/ (grep clean), so IEEE results
+# are bit-identical while every builtin-expanded sqrt drops its
+# errno-check branch. Needs re-verifying if errno use appears.
+# Deliberately scatter-only: the same flag on usdGenInstancer.cpp also
+# wins cards/twist/notwist (-0.3..-0.7ms) but perturbs the
+# register-fragile tangent path (+0.7..+1.8ms); declined.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties(
+        libs/usdGen/usdGen/ops/scatter.cpp
+        PROPERTIES COMPILE_OPTIONS -fno-math-errno)
+endif()
 
 # M1: the usdGenShaders SdrDiscoveryPlugin compiles into usdGenImaging; its
 # resource dir is resolved at runtime by name (PlugRegistry lookup of
