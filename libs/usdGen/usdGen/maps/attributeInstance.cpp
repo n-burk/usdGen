@@ -83,8 +83,13 @@ bool UsdGenAttributeCookInstances(UsdGenAttributeInstanceInput const &input,
         float u = root.u, v = root.v;
         if (root.face >= 0 && root.face < numFaces && std::isfinite(u) &&
             std::isfinite(v)) {
-            u = std::min(1.0f, std::max(0.0f, u));
-            v = std::min(1.0f, std::max(0.0f, v));
+            // fminf/fmaxf (bit-identical): u/v just passed isfinite, and
+            // for finite inputs fmin/fmax match std::min/max on every
+            // value including signed zeros (fmax(+0,-0) = +0, the same
+            // +0.0f std::max(0.0f, -0.0f) yields). Single instructions
+            // replacing four NaN-conservative branches per root.
+            u = fminf(1.0f, fmaxf(0.0f, u));
+            v = fminf(1.0f, fmaxf(0.0f, v));
             if (res == 1) {
                 int const s = std::min(
                     res - 1,
@@ -129,7 +134,10 @@ bool UsdGenAttributeCookInstances(UsdGenAttributeInstanceInput const &input,
             cooked.prototype[i] = -1;
             continue;
         }
-        float const clamped = std::min(1.0f, std::max(0.0f, value));
+        // fminf/fmaxf (bit-identical): kept roots carry non-NaN values
+        // (NaN fails the >= threshold above), and for non-NaN inputs
+        // fmin/fmax match std::min/max exactly, infinities included.
+        float const clamped = fminf(1.0f, fmaxf(0.0f, value));
         int slot = static_cast<int>(clamped * input.numPrototypes);
         if (slot >= input.numPrototypes) slot = input.numPrototypes - 1;
         cooked.prototype[i] = slot;
