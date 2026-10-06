@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <set>
 
@@ -189,16 +190,31 @@ CudaScatterInputStatus PrepareCudaScatterInput(
         return Fail(CudaScatterInputStatus::CaptureFailed,
                     "Scatter Capture produced an invalid root topology", reason);
     auto prepared = std::make_shared<gpu::ScatterGrowRoots>();
-    prepared->positions.reserve(n); prepared->stableIds.reserve(n); prepared->rootPrim.reserve(n);
-    prepared->rootUV.reserve(n); prepared->rootT.reserve(n); prepared->rootB.reserve(n); prepared->rootN.reserve(n);
-    for (size_t i = 0; i < n; ++i) {
-        prepared->positions.push_back(make_float3(roots.px[i], roots.py[i], roots.pz[i]));
-        prepared->stableIds.push_back(roots.curveId[i]); prepared->rootPrim.push_back(roots.rootPrim[i]);
-        prepared->rootUV.push_back(make_float2(roots.rootUV[i][0], roots.rootUV[i][1]));
-        prepared->rootT.push_back(make_float3(roots.rootT[i][0], roots.rootT[i][1], roots.rootT[i][2]));
-        prepared->rootB.push_back(make_float3(roots.rootB[i][0], roots.rootB[i][1], roots.rootB[i][2]));
-        prepared->rootN.push_back(make_float3(roots.rootN[i][0], roots.rootN[i][1], roots.rootN[i][2]));
+    // Layout-identical planes copy whole instead of element-wise: GfVec2f
+    // (GfVec3f) is 2 (3) contiguous floats, the same bytes as float2
+    // (float3). Only positions transposes from the SoA point planes.
+    static_assert(sizeof(float2) == sizeof(GfVec2f), "float2/GfVec2f layout");
+    static_assert(sizeof(float3) == sizeof(GfVec3f), "float3/GfVec3f layout");
+    prepared->stableIds.assign(roots.curveId.cbegin(), roots.curveId.cend());
+    prepared->rootPrim.assign(roots.rootPrim.cbegin(), roots.rootPrim.cend());
+    prepared->rootUV.resize(n);
+    prepared->rootT.resize(n);
+    prepared->rootB.resize(n);
+    prepared->rootN.resize(n);
+    if (n) {
+        std::memcpy(prepared->rootUV.data(), roots.rootUV.cdata(),
+                    n * sizeof(float2));
+        std::memcpy(prepared->rootT.data(), roots.rootT.cdata(),
+                    n * sizeof(float3));
+        std::memcpy(prepared->rootB.data(), roots.rootB.cdata(),
+                    n * sizeof(float3));
+        std::memcpy(prepared->rootN.data(), roots.rootN.cdata(),
+                    n * sizeof(float3));
     }
+    prepared->positions.resize(n);
+    for (size_t i = 0; i < n; ++i)
+        prepared->positions[i] =
+            make_float3(roots.px[i], roots.py[i], roots.pz[i]);
     *out = std::move(prepared);
     return CudaScatterInputStatus::Ok;
 }
