@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <limits>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -129,6 +130,43 @@ template <class T> cudaError_t Allocate(DeviceBuffer<T>& dst, std::vector<T> con
 template <class T> cudaError_t Copy(DeviceBuffer<T>& dst, std::vector<T> const& src, cudaStream_t s) {
     return src.empty() ? cudaSuccess : cudaMemcpyAsync(dst.data(), src.data(), src.size()*sizeof(T), cudaMemcpyHostToDevice, s);
 }
+
+// Pinned error-relay pool: BeginFresh allocates one pinned int per grow
+// (~0.85ms cudaHostAlloc) and frees it at teardown. Proven-quiescent
+// relays are retained process-wide (a few dozen 4-byte slots) and
+// reissued, eliding the page-lock round-trip. Only proven paths return
+// relays (unproven work still abandons in the destructor); every
+// checkout re-reserves through the normal permit path, so accounting
+// reads exactly as if freed. Deliberately leaked: entries must never
+// run cudaFreeHost during process teardown.
+std::mutex& PinnedRelayMutex() {
+    static auto* m = new std::mutex;
+    return *m;
+}
+std::vector<int*>& PinnedRelays() {
+    static auto* v = new std::vector<int*>;
+    return *v;
+}
+constexpr size_t kPinnedRelayCap = 64;
+int* PopPinnedRelay() {
+    std::lock_guard<std::mutex> lock(PinnedRelayMutex());
+    auto& v = PinnedRelays();
+    if (v.empty()) return nullptr;
+    int* relay = v.back();
+    v.pop_back();
+    return relay;
+}
+void PushPinnedRelay(int* relay) {
+    {
+        std::lock_guard<std::mutex> lock(PinnedRelayMutex());
+        auto& v = PinnedRelays();
+        if (v.size() < kPinnedRelayCap) {
+            v.push_back(relay);
+            return;
+        }
+    }
+    cudaFreeHost(relay);
+}
 } // namespace
 
 ScatterGrowStatus GetScatterGrowRequirements(size_t curves, uint32_t cvs,
@@ -202,8 +240,10 @@ CudaScatterGrow::~CudaScatterGrow() {
     } else {
         if (ready_) cudaEventDestroy(ready_);
         if (hostError_) {
-            if (cudaFreeHost(hostError_) == cudaSuccess) hostErrorPermit_.Release();
-            else hostErrorPermit_.Abandon();
+            // Proven complete (see above): the relay is quiescent, so it
+            // rejoins the pool and the permit releases as on a free.
+            hostErrorPermit_.Release();
+            PushPinnedRelay(hostError_);
             hostError_ = nullptr;
         }
     }
@@ -317,8 +357,11 @@ void CudaScatterGrow::discardPending() noexcept {
     pendingInput_=Storage{};
     error_.reset(0);
     if (hostError_) {
-        if (cudaFreeHost(hostError_) == cudaSuccess) hostErrorPermit_.Release();
-        else hostErrorPermit_.Abandon();
+        // Pre-issue failure, or the post-proof error commit: no work is in
+        // flight on the relay, so it rejoins the pool and the permit
+        // releases as on a free.
+        hostErrorPermit_.Release();
+        PushPinnedRelay(hostError_);
         hostError_ = nullptr;
     }
     rootsOwner_.reset(); rootsQuarantineOwner_.reset();
@@ -336,11 +379,14 @@ ScatterGrowStatus CudaScatterGrow::BeginFresh(
     if (!hostError_) {
         auto permit = TryReserveCudaExecutionBytes(sizeof(int),
             UsdGenExecutionResourceKind::Scratch, reserve);
-        if (!permit || cudaHostAlloc(reinterpret_cast<void**>(&hostError_), sizeof(int),
-                                     cudaHostAllocDefault) != cudaSuccess) {
+        int* relay = PopPinnedRelay();
+        if (!permit || (!relay && cudaHostAlloc(reinterpret_cast<void**>(&relay), sizeof(int),
+                                                cudaHostAllocDefault) != cudaSuccess)) {
+            if (relay) PushPinnedRelay(relay);
             discardPending();
             return ScatterGrowStatus::CudaError;
         }
+        hostError_ = relay;
         hostErrorPermit_ = std::move(*permit);
     }
     try {
