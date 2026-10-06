@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -598,13 +599,18 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
             plane.type = TfToken("float");
             plane.arity = 3;
             plane.f.resize(size_t(n) * 3);
-            for (uint32_t c = 0; c != n; ++c) {
-                GfVec3f const v = wantColorPerCv
-                    ? input.displayColor[spans[c]]
-                    : input.displayColor[c];
-                plane.f[size_t(c) * 3 + 0] = v[0];
-                plane.f[size_t(c) * 3 + 1] = v[1];
-                plane.f[size_t(c) * 3 + 2] = v[2];
+            if (!wantColorPerCv) {
+                // Per-curve colors are contiguous GfVec3f == 3 floats: one
+                // copy instead of a strided per-component loop. Same bytes.
+                std::memcpy(plane.f.data(), input.displayColor.cdata(),
+                            size_t(n) * 3 * sizeof(float));
+            } else {
+                for (uint32_t c = 0; c != n; ++c) {
+                    GfVec3f const v = input.displayColor[spans[c]];
+                    plane.f[size_t(c) * 3 + 0] = v[0];
+                    plane.f[size_t(c) * 3 + 1] = v[1];
+                    plane.f[size_t(c) * 3 + 2] = v[2];
+                }
             }
             out.varyings.push_back(plane);
             continue;
