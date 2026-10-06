@@ -1,9 +1,12 @@
 // usdGen engine — scheduler: private tbb::task_arena + commit driver (03 §5.3/§5.4).
 //
-// I8: every parallel region runs in a PRIVATE task_arena sized at the measured
-// 8-thread knee (EV-001/EV-008), never the process-default 20-worker arena.
-// USDGEN_THREAD_LIMIT (env) pins it explicitly; otherwise one-time calibration
-// (03 §5.3) picks the smallest concurrency within 5 % of best.
+// I8: every parallel region runs in a PRIVATE task_arena sized at
+// max(8, fast-core count) on heterogeneous Linux (the measured 8-thread
+// knee of EV-001/EV-008 is the floor; all-fast-core width wins
+// compute-bound passes while pinning holds), never the process-default
+// 20-worker arena. USDGEN_THREAD_LIMIT (env) pins it explicitly;
+// otherwise one-time calibration (03 §5.3) picks the smallest
+// concurrency within 5 % of best.
 // All loops are tbb::parallel_for inside _arena.execute — never pxr work::
 // (WorkHasConcurrency() reads the process-global PXR_WORK_THREAD_LIMIT and would
 // serialise under PXR_WORK_THREAD_LIMIT=1, 03 §5.3 caveat).

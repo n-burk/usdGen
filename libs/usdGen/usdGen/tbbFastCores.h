@@ -29,4 +29,11 @@ namespace usdGen {
 std::unique_ptr<tbb::task_scheduler_observer> ObserveFastCores(
     tbb::task_arena& arena, int workers);
 
+// The process-allowed max-frequency core count where the topology
+// qualifies, else 0: the same qualification ObserveFastCores applies
+// (heterogeneous, readable, not disabled), minus the worker-count
+// comparison. Non-Linux builds always return 0. Sizing an arena to this
+// count engages pinning by construction.
+int FastCoreCount();
+
 } // namespace usdGen

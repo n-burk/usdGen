@@ -35,10 +35,19 @@ long ReadCpuMaxFreqKhz(int cpu)
     return freq;
 }
 
-std::optional<cpu_set_t> FastCores(int workers)
+struct FastTopology {
+    cpu_set_t fast;
+    int fastCount = 0;
+    int allowedCount = 0;
+};
+
+// The topology scan behind FastCores/FastCoreCount: null when disabled,
+// unreadable, trivially small, or homogeneous. Uncached (sysfs reads are
+// microseconds, arenas are built rarely), so a mid-process
+// USDGEN_NO_FAST_CORE_PIN change takes effect on the next query.
+std::optional<FastTopology> ReadFastTopology()
 {
     if (TfGetenv("USDGEN_NO_FAST_CORE_PIN") == "1") return std::nullopt;
-    if (workers <= 0) return std::nullopt;
     cpu_set_t allowed;
     CPU_ZERO(&allowed);
     if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0) return std::nullopt;
@@ -52,19 +61,27 @@ std::optional<cpu_set_t> FastCores(int workers)
         if (freq > maxFreq) maxFreq = freq;
     }
     if (allowedCount <= 1) return std::nullopt;
-    cpu_set_t fast;
-    CPU_ZERO(&fast);
-    int fastCount = 0;
+    FastTopology topo;
+    topo.allowedCount = allowedCount;
+    CPU_ZERO(&topo.fast);
     for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
         if (!CPU_ISSET(cpu, &allowed)) continue;
         if (ReadCpuMaxFreqKhz(cpu) == maxFreq) {
-            CPU_SET(cpu, &fast);
-            ++fastCount;
+            CPU_SET(cpu, &topo.fast);
+            ++topo.fastCount;
         }
     }
-    if (fastCount == allowedCount) return std::nullopt;  // homogeneous
-    if (fastCount < workers) return std::nullopt;        // would oversubscribe
-    return fast;
+    if (topo.fastCount == topo.allowedCount) return std::nullopt;  // homogeneous
+    return topo;
+}
+
+std::optional<cpu_set_t> FastCores(int workers)
+{
+    if (workers <= 0) return std::nullopt;
+    auto topo = ReadFastTopology();
+    if (!topo) return std::nullopt;
+    if (topo->fastCount < workers) return std::nullopt;  // would oversubscribe
+    return topo->fast;
 }
 
 class FastCoreObserver : public tbb::task_scheduler_observer {
@@ -124,6 +141,16 @@ std::unique_ptr<tbb::task_scheduler_observer> ObserveFastCores(
     (void)arena;
     (void)workers;
     return nullptr;
+#endif
+}
+
+int FastCoreCount()
+{
+#if defined(__linux__) && !defined(__ANDROID__)
+    auto topo = ReadFastTopology();
+    return topo ? topo->fastCount : 0;
+#else
+    return 0;
 #endif
 }
 

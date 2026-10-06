@@ -60,10 +60,15 @@ int ResolveThreadLimit(int requested)
         const int parsed = std::atoi(env.c_str());
         if (parsed > 0) return parsed;
     }
-    // 03 §5.3: the measured 8-thread knee (EV-001/EV-008, this host is
-    // heterogeneous) is the documented default until gate E-7 ships the
-    // one-shot sweep; `USDGEN_THREAD_LIMIT` above wins and skips it.
-    return 8;
+    // 03 §5.3: the topology-aware default. The measured 8-thread knee
+    // (EV-001/EV-008) is the floor; on heterogeneous Linux with more fast
+    // cores than that, the arena spans every fast core — pinning engages
+    // by construction (workers == fast cores), and compute-bound passes
+    // (the fp64 RBF kernel scales linearly to the fast count) gain while
+    // bandwidth-bound passes keep at least their old width. Undetectable,
+    // homogeneous, or disabled topologies keep 8, and
+    // `USDGEN_THREAD_LIMIT` above wins and skips all of this.
+    return std::max(8, FastCoreCount());
 }
 
 

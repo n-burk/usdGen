@@ -9,6 +9,8 @@
 //
 // Usage: benchUsdGenRbfDeform [--threads N] [--density D] [--vulkan-spv dir]
 //   [--vulkan-budget-mb MB]
+// --threads sets the scheduler arena width; 0 (the default) resolves the
+// product default (I8: max(8, fast-core count) on heterogeneous Linux).
 // --vulkan-budget-mb sizes the deform leg's pool (default 512); larger
 // budgets show what the budget-adaptive R-cache prefix does at
 // production scale (a 2048MiB budget funds the full 1M-CV prefix).
@@ -514,7 +516,7 @@ void PoseSurface(UsdGenSurfaceDesc *s, int k)
 
 int main(int argc, char **argv)
 {
-    int threads = 8;
+    int threads = 0;  // the product default (see the usage note above)
     double density = 25.0;   // ~25k curves, 225k CVs at 8 segments
     std::string vulkanSpvDir;
     size_t vulkanBudgetMb = 512;

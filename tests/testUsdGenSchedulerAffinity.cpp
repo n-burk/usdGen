@@ -3,18 +3,26 @@
 
 // testUsdGenSchedulerAffinity — T0: on heterogeneous big.LITTLE Linux,
 // UsdGenScheduler pins its TBB arena workers to max-frequency cores.
-// Skips (77) on non-Linux, homogeneous, unreadable-topology, or
+// The thread-limit resolution checks run on every platform; the affinity
+// checks skip (77) on non-Linux, homogeneous, unreadable-topology, or
 // too-few-fast-core hosts.
 //
+// Asserted (every platform):
+//   0. Thread-limit resolution: an explicit count wins, else
+//      USDGEN_THREAD_LIMIT, else the product default.
 // Asserted (heterogeneous Linux only):
 //   1. A parallel region runs tasks on at least two distinct worker
 //      threads (parallelism actually happened).
 //   2. Every observed worker thread's affinity mask is exactly the
 //      process-allowed max-frequency set (fast cores, never widened).
 //   3. The calling thread's affinity is unchanged (never pinned).
+//   4. The product default is max(8, fast-core count), and the
+//      USDGEN_NO_FAST_CORE_PIN kill switch restores 8.
 
 #include "usdGen/scheduler.h"
+#include "usdGen/tbbFastCores.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -84,6 +92,23 @@ void RecordBody(size_t i, void *payload)
 
 int main()
 {
+    // Resolution precedence runs everywhere (no topology needed): an
+    // explicit count wins over the environment, which wins over the
+    // default. The outer environment is saved and restored.
+    char const *outerLimit = std::getenv("USDGEN_THREAD_LIMIT");
+    std::string const savedLimit = outerLimit ? outerLimit : "";
+    bool const hadLimit = outerLimit != nullptr;
+    setenv("USDGEN_THREAD_LIMIT", "3", 1);
+    {
+        UsdGenScheduler fromEnv;
+        Check(fromEnv.ThreadLimit() == 3, "USDGEN_THREAD_LIMIT=3 sizes a default scheduler");
+        UsdGenScheduler explicitWins(5);
+        Check(explicitWins.ThreadLimit() == 5, "an explicit count wins over USDGEN_THREAD_LIMIT");
+    }
+    if (hadLimit) setenv("USDGEN_THREAD_LIMIT", savedLimit.c_str(), 1);
+    else unsetenv("USDGEN_THREAD_LIMIT");
+    if (g_failures) return 1;
+
 #if !defined(__linux__) || defined(__ANDROID__)
     std::printf("SKIP: fast-core affinity is Linux-only\n");
     return 77;
@@ -129,6 +154,24 @@ int main()
         std::printf("SKIP: only %d fast cores for %d workers\n", fastCount, workers);
         return 77;
     }
+
+    // The product default follows the independently recomputed fast-core
+    // count (never below the 8-thread knee), and the kill switch
+    // restores 8 exactly.
+    Check(FastCoreCount() == fastCount, "FastCoreCount() matches the recomputed fast set");
+    {
+        UsdGenScheduler productDefault;
+        Check(productDefault.ThreadLimit() == std::max(8, fastCount),
+              "a default scheduler spans max(8, fast-core count)");
+    }
+    setenv("USDGEN_NO_FAST_CORE_PIN", "1", 1);
+    Check(FastCoreCount() == 0, "the kill switch empties FastCoreCount()");
+    {
+        UsdGenScheduler killedDefault;
+        Check(killedDefault.ThreadLimit() == 8, "the kill switch restores the 8-thread default");
+    }
+    setenv("USDGEN_NO_FAST_CORE_PIN", "0", 1);
+    if (g_failures) return 1;
 
     cpu_set_t mainBefore;
     CPU_ZERO(&mainBefore);
