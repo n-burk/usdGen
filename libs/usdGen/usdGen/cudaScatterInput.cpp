@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <set>
 
@@ -28,6 +29,191 @@ bool AllowedScatterParam(TfToken const& name) {
 }
 
 bool IsFloat(VtValue const& v) { return v.IsHolding<float>() || v.IsHolding<double>(); }
+
+// Assign-source iterator building float2/float3 values from K consecutive
+// floats per step, so vector::assign copies into uninitialized storage:
+// resize(n) would value-init (zero) the same elements assign then
+// overwrites, and the non-scalar zeroing loop costs ~10% of the convert.
+// GfVec2f/GfVec3f planes are contiguous floats (the static_asserts at the
+// convert pin the sizes), so float-wise reads carry the exact bytes.
+template <class Dst, int K>
+struct FloatRunIterator {
+    float const* p = nullptr;
+    using iterator_category = std::random_access_iterator_tag;
+    using value_type = Dst;
+    using difference_type = std::ptrdiff_t;
+    using pointer = Dst const*;
+    using reference = Dst;
+    FloatRunIterator() = default;
+    explicit FloatRunIterator(float const* q) : p(q) {}
+    Dst operator*() const;
+    Dst operator[](difference_type i) const { return *(*this + i); }
+    FloatRunIterator& operator++() { p += K; return *this; }
+    FloatRunIterator operator++(int) { FloatRunIterator c(*this); p += K; return c; }
+    FloatRunIterator& operator--() { p -= K; return *this; }
+    FloatRunIterator operator--(int) { FloatRunIterator c(*this); p -= K; return c; }
+    FloatRunIterator& operator+=(difference_type i) { p += K * i; return *this; }
+    FloatRunIterator& operator-=(difference_type i) { p -= K * i; return *this; }
+    friend FloatRunIterator operator+(FloatRunIterator a, difference_type i)
+    {
+        return a += i;
+    }
+    friend FloatRunIterator operator+(difference_type i, FloatRunIterator a)
+    {
+        return a += i;
+    }
+    friend FloatRunIterator operator-(FloatRunIterator a, difference_type i)
+    {
+        return a -= i;
+    }
+    friend difference_type operator-(FloatRunIterator const& a,
+                                    FloatRunIterator const& b)
+    {
+        return (a.p - b.p) / K;
+    }
+    friend bool operator==(FloatRunIterator const& a, FloatRunIterator const& b)
+    {
+        return a.p == b.p;
+    }
+    friend bool operator!=(FloatRunIterator const& a, FloatRunIterator const& b)
+    {
+        return a.p != b.p;
+    }
+    friend bool operator<(FloatRunIterator const& a, FloatRunIterator const& b)
+    {
+        return a.p < b.p;
+    }
+    friend bool operator<=(FloatRunIterator const& a, FloatRunIterator const& b)
+    {
+        return a.p <= b.p;
+    }
+    friend bool operator>(FloatRunIterator const& a, FloatRunIterator const& b)
+    {
+        return a.p > b.p;
+    }
+    friend bool operator>=(FloatRunIterator const& a, FloatRunIterator const& b)
+    {
+        return a.p >= b.p;
+    }
+};
+template <>
+inline float2 FloatRunIterator<float2, 2>::operator*() const
+{
+    return float2{p[0], p[1]};
+}
+template <>
+inline float3 FloatRunIterator<float3, 3>::operator*() const
+{
+    return float3{p[0], p[1], p[2]};
+}
+
+// Assign-source iterator transposing the SoA point planes into float3
+// positions: same no-zero-init rationale as FloatRunIterator.
+struct TransposePositionsIterator {
+    float const* px = nullptr;
+    float const* py = nullptr;
+    float const* pz = nullptr;
+    using iterator_category = std::random_access_iterator_tag;
+    using value_type = float3;
+    using difference_type = std::ptrdiff_t;
+    using pointer = float3 const*;
+    using reference = float3;
+    TransposePositionsIterator() = default;
+    TransposePositionsIterator(float const* x, float const* y, float const* z)
+        : px(x), py(y), pz(z) {}
+    float3 operator*() const { return float3{px[0], py[0], pz[0]}; }
+    float3 operator[](difference_type i) const { return *(*this + i); }
+    TransposePositionsIterator& operator++()
+    {
+        ++px;
+        ++py;
+        ++pz;
+        return *this;
+    }
+    TransposePositionsIterator operator++(int)
+    {
+        TransposePositionsIterator c(*this);
+        ++*this;
+        return c;
+    }
+    TransposePositionsIterator& operator--()
+    {
+        --px;
+        --py;
+        --pz;
+        return *this;
+    }
+    TransposePositionsIterator operator--(int)
+    {
+        TransposePositionsIterator c(*this);
+        --*this;
+        return c;
+    }
+    TransposePositionsIterator& operator+=(difference_type i)
+    {
+        px += i;
+        py += i;
+        pz += i;
+        return *this;
+    }
+    TransposePositionsIterator& operator-=(difference_type i)
+    {
+        px -= i;
+        py -= i;
+        pz -= i;
+        return *this;
+    }
+    friend TransposePositionsIterator operator+(TransposePositionsIterator a,
+                                               difference_type i)
+    {
+        return a += i;
+    }
+    friend TransposePositionsIterator operator+(difference_type i,
+                                               TransposePositionsIterator a)
+    {
+        return a += i;
+    }
+    friend TransposePositionsIterator operator-(TransposePositionsIterator a,
+                                               difference_type i)
+    {
+        return a -= i;
+    }
+    friend difference_type operator-(TransposePositionsIterator const& a,
+                                    TransposePositionsIterator const& b)
+    {
+        return a.px - b.px;
+    }
+    friend bool operator==(TransposePositionsIterator const& a,
+                           TransposePositionsIterator const& b)
+    {
+        return a.px == b.px;
+    }
+    friend bool operator!=(TransposePositionsIterator const& a,
+                           TransposePositionsIterator const& b)
+    {
+        return a.px != b.px;
+    }
+    friend bool operator<(TransposePositionsIterator const& a,
+                          TransposePositionsIterator const& b)
+    {
+        return a.px < b.px;
+    }
+    friend bool operator<=(TransposePositionsIterator const& a,
+                           TransposePositionsIterator const& b)
+    {
+        return a.px <= b.px;
+    }
+    friend bool operator>(TransposePositionsIterator const& a,
+                          TransposePositionsIterator const& b)
+    {
+        return a.px > b.px;
+    }
+    friend bool operator>=(TransposePositionsIterator const& a,
+                           TransposePositionsIterator const& b)
+    {
+        return a.px >= b.px;
+    }
+};
 
 bool ValidScatterParam(UsdGenParamValue const& param) {
     if(param.name==TfToken("subdivisionLevel"))
@@ -197,24 +383,35 @@ CudaScatterInputStatus PrepareCudaScatterInput(
     static_assert(sizeof(float3) == sizeof(GfVec3f), "float3/GfVec3f layout");
     prepared->stableIds.assign(roots.curveId.cbegin(), roots.curveId.cend());
     prepared->rootPrim.assign(roots.rootPrim.cbegin(), roots.rootPrim.cend());
-    prepared->rootUV.resize(n);
-    prepared->rootT.resize(n);
-    prepared->rootB.resize(n);
-    prepared->rootN.resize(n);
+    // reserve+assign instead of resize+memcpy/loop: resize value-inits
+    // (zeroes) every element through the non-scalar fill loop and the
+    // copy then overwrites them all. assign copies straight into
+    // uninitialized storage with identical bytes.
+    prepared->rootUV.reserve(n);
+    prepared->rootT.reserve(n);
+    prepared->rootB.reserve(n);
+    prepared->rootN.reserve(n);
+    prepared->positions.reserve(n);
     if (n) {
-        std::memcpy(prepared->rootUV.data(), roots.rootUV.cdata(),
-                    n * sizeof(float2));
-        std::memcpy(prepared->rootT.data(), roots.rootT.cdata(),
-                    n * sizeof(float3));
-        std::memcpy(prepared->rootB.data(), roots.rootB.cdata(),
-                    n * sizeof(float3));
-        std::memcpy(prepared->rootN.data(), roots.rootN.cdata(),
-                    n * sizeof(float3));
+        float const* uv = reinterpret_cast<float const*>(roots.rootUV.cdata());
+        float const* rt = reinterpret_cast<float const*>(roots.rootT.cdata());
+        float const* rb = reinterpret_cast<float const*>(roots.rootB.cdata());
+        float const* rn = reinterpret_cast<float const*>(roots.rootN.cdata());
+        prepared->rootUV.assign(FloatRunIterator<float2, 2>(uv),
+                               FloatRunIterator<float2, 2>(uv + 2 * n));
+        prepared->rootT.assign(FloatRunIterator<float3, 3>(rt),
+                              FloatRunIterator<float3, 3>(rt + 3 * n));
+        prepared->rootB.assign(FloatRunIterator<float3, 3>(rb),
+                              FloatRunIterator<float3, 3>(rb + 3 * n));
+        prepared->rootN.assign(FloatRunIterator<float3, 3>(rn),
+                              FloatRunIterator<float3, 3>(rn + 3 * n));
+        prepared->positions.assign(
+            TransposePositionsIterator(roots.px.cdata(), roots.py.cdata(),
+                                       roots.pz.cdata()),
+            TransposePositionsIterator(roots.px.cdata() + n,
+                                       roots.py.cdata() + n,
+                                       roots.pz.cdata() + n));
     }
-    prepared->positions.resize(n);
-    for (size_t i = 0; i < n; ++i)
-        prepared->positions[i] =
-            make_float3(roots.px[i], roots.py[i], roots.pz[i]);
     *out = std::move(prepared);
     return CudaScatterInputStatus::Ok;
 }
