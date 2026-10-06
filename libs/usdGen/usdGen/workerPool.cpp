@@ -35,8 +35,19 @@ long SpinBudgetUs()
     return 50000;
 }
 
-void CpuRelax()
+// Spin-hint most iterations, with a periodic true yield so a parked
+// spinner (or a joining master) surrenders its core to real work —
+// latency-sensitive calls between dispatches (a sub-millisecond pick)
+// must not queue behind ten spinning threads. The yield costs ~100ns
+// against an uncontended core and returns immediately, so dispatch
+// observation stays hot; only genuinely contended cores deschedule the
+// spinner, which is exactly when yielding is correct.
+void CpuRelax(unsigned spin)
 {
+    if ((spin & 63) == 0) {
+        std::this_thread::yield();
+        return;
+    }
 #if defined(__aarch64__)
     __asm__ volatile("yield" ::: "memory");
 #elif defined(__x86_64__) || defined(_M_X64)
@@ -127,7 +138,7 @@ struct UsdGenWorkerPool::State {
                 if ((spin & 255) == 0 &&
                     std::chrono::steady_clock::now() >= spinUntil)
                     break;
-                CpuRelax();
+                CpuRelax(spin);
             }
             unsigned e = epoch.load(std::memory_order_acquire);
             if (e == seen && !stop.load(std::memory_order_relaxed)) {
@@ -225,17 +236,21 @@ void UsdGenWorkerPool::ParallelFor(size_t count, void (*body)(size_t, void *),
     _state->observed.store(0, std::memory_order_relaxed);
     _state->epoch.fetch_add(1, std::memory_order_release);  // idle even -> work odd
     _state->wake.notify_all();  // no-op for spinning workers, wakes sleepers
-    while (_state->finished.load(std::memory_order_acquire) !=
-           unsigned(_state->workers))
-        CpuRelax();
+    for (unsigned spin = 0;
+         _state->finished.load(std::memory_order_acquire) !=
+         unsigned(_state->workers);
+         ++spin)
+        CpuRelax(spin);
     _state->epoch.fetch_add(1, std::memory_order_release);  // work odd -> idle even
     // Sleepers parked between their finished++ and this bump need the
     // kick to observe the marker; without it the observed join below
     // deadlocks against a worker that never wakes.
     _state->wake.notify_all();
-    while (_state->observed.load(std::memory_order_acquire) !=
-           unsigned(_state->workers))
-        CpuRelax();
+    for (unsigned spin = 0;
+         _state->observed.load(std::memory_order_acquire) !=
+         unsigned(_state->workers);
+         ++spin)
+        CpuRelax(spin);
     std::exception_ptr error;
     {
         std::lock_guard<std::mutex> errors(_state->errorMutex);
