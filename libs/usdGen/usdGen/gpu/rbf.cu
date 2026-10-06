@@ -156,6 +156,13 @@ constexpr int kEvalBlock = 128;
 // n=100 need 812MB, so the production and bench shapes engage; anything
 // larger keeps today's direct kernel with no added work.
 constexpr size_t kEvalCacheMaxBytes = size_t(1) << 30;
+// Fresh-path cache floor: the verify + predicated-fill launch overhead
+// meets the cached-eval win at ~1M CV-sample pairs (tied there, 2.9x up
+// at 3M, 3.3x at 100M on GB10), so smaller shapes keep the direct kernel.
+constexpr size_t kFreshEvalCacheMinPairs = size_t(1) << 20;
+// Fresh fill-miss grid X extent: the hit early-out dispatches at most
+// 16*256*n exiting threads; the miss strides i to cover the row.
+constexpr unsigned kFillMissMaxXBlocks = 16;
 // Bitwise device memcmp: sets *flag iff any word differs. Plain stores
 // race benignly (every writer stores 1); the caller zeroes first and
 // reads after the stream syncs.
@@ -163,6 +170,38 @@ __global__ void verifyKernel(const int* a, const int* b, size_t words, int* flag
     size_t const stride = size_t(blockDim.x) * gridDim.x;
     for (size_t i = size_t(blockIdx.x) * size_t(blockDim.x) + threadIdx.x; i < words; i += stride)
         if (a[i] != b[i]) *flag = 1;
+}
+// Miss-predicated R fill for the fresh path: the whole verify/fill/eval
+// sequence submits as one stream slice with no host round-trip. On a
+// verify hit every thread exits after one flag read, so the cache serves
+// the evaluation; on a miss the grid refills R and the proof copies and
+// the cached evaluator below reads what it just wrote (stream-ordered).
+// The R expression is rFillKernel's text verbatim, so a refilled cache is
+// bitwise a direct-path fill, and proof bytes are copies, exact by
+// construction. The i-stride keeps (i, j) div-free (j is blockIdx.y, i
+// strides within the row), and the capped X extent keeps the hit
+// early-out to ~400k exiting threads instead of count*n. Row 0 copies the
+// CV proofs (each CV once) and thread x0 of every row copies one rest
+// sample; both are uniform-across-the-launch on a miss and skipped on a
+// hit by the same flag read.
+__global__ void rFillMissKernel(const float3* cvs, const double* sn, double* r, float3* rCvs,
+    const float3* rest, float3* rRest, size_t count, int n,
+    double cx, double cy, double cz, double invScale, const int* miss) {
+    if (*miss == 0) return;
+    size_t const x0 = size_t(blockIdx.x) * size_t(blockDim.x) + threadIdx.x;
+    size_t const xStride = size_t(blockDim.x) * gridDim.x;
+    int const j = blockIdx.y;
+    if (x0 == 0) rRest[j] = rest[j];
+    double const s0 = sn[j], s1 = sn[n + j], s2 = sn[2 * n + j];
+    for (size_t i = x0; i < count; i += xStride) {
+        float3 p = cvs[i];
+        if (j == 0) rCvs[i] = p;
+        double x = (p.x - cx) * invScale, y = (p.y - cy) * invScale, z = (p.z - cz) * invScale;
+        double dx = x - s0, dy = y - s1, dz = z - s2;
+        double rr = sqrt(dx * dx + dy * dy + dz * dz);
+        rr *= rr * rr;
+        r[size_t(j) * count + i] = rr;
+    }
 }
 // Fills the R cache: R[j*count+i] is the radius-cubed kernel value for CV
 // i and sample j. The r expression is evalKernel's text verbatim (same
@@ -560,8 +599,61 @@ RbfStatus CudaRbfBinding::BeginFreshEvaluate(DeviceView<const float3> cvs, Devic
     packet->unproven=true; packet->phase=FreshState::Phase::Evaluate;
     auto& f=*acceptedFresh_;
     freshEval_=std::move(packet); auto& e=*freshEval_;
-    if (!ok(cudaMemsetAsync(f.flags.data(),0,sizeof(int),stream))) { e.failed=true; return fail(RbfStatus::CudaError,"fresh RBF evaluation status reset failed"); }
-    evalKernel<<<(cvs.size+kEvalBlock-1)/kEvalBlock,kEvalBlock,0,stream>>>(cvs.data,output.data,(int)cvs.size,f.norm.data(),f.coefficients.data(),f.n,f.m,f.center[0],f.center[1],f.center[2],1./f.scale,f.scale,f.flags.data());
+    // Pose-invariant radii (see Evaluate): the fresh geometry is rest CVs,
+    // so a verified cache serves every pose after the first. The whole
+    // verify/fill/eval sequence submits as one stream slice: on a hit the
+    // predicated fill exits after one flag read and the cached kernel reads
+    // the verified rows; on a miss the fill refills R and the proof copies
+    // first (stream-ordered), so the next stable pose hits. The kernels are
+    // the direct path's text verbatim over the same bytes (the fresh rest
+    // and norm are the same doubles the direct bind writes), so cached
+    // fresh evaluation is bitwise direct evaluation. Over the byte cap,
+    // under the pair floor, with the test seam set, or if a cache buffer
+    // fails to allocate, the direct kernel runs exactly as before; a
+    // failed submit still fails the same way (the verify guards the next
+    // call, so a stale rValid_ can only miss, never mis-hit). count/n
+    // carry the direct path's INT_MAX/46336 bounds, so the products below
+    // cannot overflow 64 bits.
+    int const n = f.n;
+    size_t const count = cvs.size;
+    size_t const pairs = count * size_t(n);
+    bool cached = !disableEvalCache.load(std::memory_order_relaxed) &&
+        pairs >= kFreshEvalCacheMinPairs &&
+        pairs * sizeof(double) + count * sizeof(float3) + size_t(n) * sizeof(float3) <=
+            kEvalCacheMaxBytes;
+    if (cached) {
+        bool const shapeOk = rValid_ && rN_ == n && rCount_ == count;
+        if (shapeOk) {
+            cached = ok(rMiss_.reset(1));
+        } else {
+            cached = ok(rCache_.reset(count * size_t(n))) && ok(rCvs_.reset(count)) &&
+                ok(rRest_.reset(size_t(n))) && ok(rMiss_.reset(1));
+            if (cached) { rN_ = n; rCount_ = count; }
+        }
+        if (cached) {
+            if (!ok(cudaMemsetAsync(rMiss_.data(), shapeOk ? 0 : 1, sizeof(int), stream))) { e.failed=true; return fail(RbfStatus::CudaError,"fresh RBF evaluation status reset failed"); }
+            if (shapeOk) {
+                verifyKernel<<<(3 * count + 255) / 256, 256, 0, stream>>>(
+                    reinterpret_cast<int const*>(cvs.data), reinterpret_cast<int const*>(rCvs_.data()),
+                    3 * count, rMiss_.data());
+                verifyKernel<<<(size_t(3) * size_t(n) + 255) / 256, 256, 0, stream>>>(
+                    reinterpret_cast<int const*>(f.rest.data()), reinterpret_cast<int const*>(rRest_.data()),
+                    size_t(3) * size_t(n), rMiss_.data());
+            }
+            if (!ok(cudaMemsetAsync(f.flags.data(),0,sizeof(int),stream))) { e.failed=true; return fail(RbfStatus::CudaError,"fresh RBF evaluation status reset failed"); }
+            dim3 const fillGrid(std::min<unsigned>(static_cast<unsigned>((count + 255) / 256), kFillMissMaxXBlocks),
+                static_cast<unsigned>(n));
+            rFillMissKernel<<<fillGrid, 256, 0, stream>>>(cvs.data, f.norm.data(), rCache_.data(), rCvs_.data(),
+                f.rest.data(), rRest_.data(), count, n, f.center[0], f.center[1], f.center[2],
+                1. / f.scale, rMiss_.data());
+            evalCachedKernel<<<(count+kEvalBlock-1)/kEvalBlock,kEvalBlock,0,stream>>>(cvs.data,output.data,(int)count,rCache_.data(),f.coefficients.data(),n,f.m,f.center[0],f.center[1],f.center[2],1./f.scale,f.scale,f.flags.data());
+            rValid_ = true;
+        }
+    }
+    if (!cached) {
+        if (!ok(cudaMemsetAsync(f.flags.data(),0,sizeof(int),stream))) { e.failed=true; return fail(RbfStatus::CudaError,"fresh RBF evaluation status reset failed"); }
+        evalKernel<<<(cvs.size+kEvalBlock-1)/kEvalBlock,kEvalBlock,0,stream>>>(cvs.data,output.data,(int)cvs.size,f.norm.data(),f.coefficients.data(),f.n,f.m,f.center[0],f.center[1],f.center[2],1./f.scale,f.scale,f.flags.data());
+    }
     if (cudaGetLastError()!=cudaSuccess || !ok(cudaMemcpyAsync(&e.host->flag,f.flags.data(),sizeof(int),cudaMemcpyDeviceToHost,stream))) { e.failed=true; return fail(RbfStatus::CudaError,"fresh RBF evaluation submit failed"); }
     if (failFreshEvaluateAfterSubmit.exchange(false, std::memory_order_acq_rel)) { e.failed=true; return fail(RbfStatus::CudaError,"forced fresh RBF evaluation post-submit failure"); }
     return RbfStatus::Ok;

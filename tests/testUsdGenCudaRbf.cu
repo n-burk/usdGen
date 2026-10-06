@@ -310,5 +310,86 @@ int main(){
     for(int i=0;i<bp;i++){ assert(std::isfinite(bout[size_t(i)].x)&&std::isfinite(bout[size_t(i)].y)&&std::isfinite(bout[size_t(i)].z)); assert(near(bout[size_t(i)],bcvs[size_t(i)])); }
     cudaFree(bdr); cudaFree(bdp); cudaFree(bdc); cudaFree(bdo);
   }
+  // Fresh-evaluate R cache: over the pair floor the fresh path verifies
+  // into a device word and predicates its fill on it, so verify/fill/eval
+  // submit as one stream slice with no host round-trip. The predicate is
+  // device-side, so engagement is proven two ways: a fresh fill serves a
+  // later direct Evaluate as a counted host-side hit, and every cached
+  // fresh output is bitwise the seam-disabled uncached kernel. The direct
+  // path counters never move on the fresh path.
+  {
+    int const fn=100, fc=12000;
+    auto h01 = [&](uint64_t k){ k+=0x9e3779b97f4a7c15ULL; k=(k^(k>>30))*0xbf58476d1ce4e5b9ULL; k=(k^(k>>27))*0x94d049bb133111ebULL; return double((k^(k>>31))>>11)/double(1ull<<53); };
+    std::vector<float3> frest(fn), fpose(fn), fcvs(fc);
+    for(int i=0;i<fn;i++){ int x=i%5,y=(i/5)%5,z=(i/25)%4; frest[size_t(i)]=f(float(x)+.01f*float(i%7),float(y)+.01f*float((i+3)%7),float(z)+.01f*float((i+5)%7)); fpose[size_t(i)]=f(frest[size_t(i)].x+.1f*float(h01(uint64_t(i))-0.5),frest[size_t(i)].y+.1f*float(h01(uint64_t(i)+1000)-0.5),frest[size_t(i)].z+.1f*float(h01(uint64_t(i)+2000)-0.5)); }
+    for(int i=0;i<fc;i++) fcvs[size_t(i)]=f(float(4*h01(uint64_t(i))-2),float(4*h01(uint64_t(i)+500000)-2),float(4*h01(uint64_t(i)+1000000)-2));
+    float3 *fdr,*fdp,*fdc,*fdo; check(cudaMalloc(&fdr,size_t(fn)*sizeof(float3))); check(cudaMalloc(&fdp,size_t(fn)*sizeof(float3))); check(cudaMalloc(&fdc,size_t(fc)*sizeof(float3))); check(cudaMalloc(&fdo,size_t(fc)*sizeof(float3)));
+    check(cudaMemcpyAsync(fdr,frest.data(),size_t(fn)*sizeof(float3),cudaMemcpyHostToDevice,s));
+    check(cudaMemcpyAsync(fdp,fpose.data(),size_t(fn)*sizeof(float3),cudaMemcpyHostToDevice,s));
+    check(cudaMemcpyAsync(fdc,fcvs.data(),size_t(fc)*sizeof(float3),cudaMemcpyHostToDevice,s));
+    auto freadback = [&](float3* d){ std::vector<float3> v(fc); check(cudaMemcpyAsync(v.data(),d,size_t(fc)*sizeof(float3),cudaMemcpyDeviceToHost,s)); check(cudaStreamSynchronize(s)); return v; };
+    auto fsameBits = [&](std::vector<float3> const& a, std::vector<float3> const& b){ return a.size()==b.size() && std::memcmp(a.data(),b.data(),a.size()*sizeof(float3))==0; };
+    auto freshBind = [&](CudaRbfBinding& b, float3* rr){ assert(b.BeginFreshBind({rr,size_t(fn)},0,s)==RbfStatus::Ok); check(cudaStreamSynchronize(s)); assert(b.CommitFreshBindExtent()==RbfStatus::Ok); assert(b.BeginFreshBindRank(s)==RbfStatus::Ok); check(cudaStreamSynchronize(s)); assert(b.CommitFreshBindRank()==RbfStatus::Ok); assert(b.BeginFreshBindLu(s)==RbfStatus::Ok); check(cudaStreamSynchronize(s)); assert(b.CommitFreshBindLu()==RbfStatus::Ok); };
+    auto freshSolve = [&](CudaRbfBinding& b, float3* pp){ assert(b.BeginFreshSolve({pp,size_t(fn)},s)==RbfStatus::Ok); check(cudaStreamSynchronize(s)); assert(b.CommitFreshSolveInput()==RbfStatus::Ok); assert(b.BeginFreshSolveFactors(s)==RbfStatus::Ok); check(cudaStreamSynchronize(s)); assert(b.CommitFreshSolve()==RbfStatus::Ok); };
+    auto freshEval = [&](CudaRbfBinding& b){ assert(b.BeginFreshEvaluate({fdc,size_t(fc)},{fdo,size_t(fc)},s)==RbfStatus::Ok); check(cudaStreamSynchronize(s)); assert(b.CommitFreshEvaluate()==RbfStatus::Ok); };
+    CudaRbfBinding fb; freshBind(fb,fdr); freshSolve(fb,fdp);
+    uint64_t fh0=CudaRbfEvalCacheHitsForTesting(), fm0=CudaRbfEvalCacheMissesForTesting();
+    freshEval(fb); std::vector<float3> fo0=freadback(fdo);
+    freshEval(fb); std::vector<float3> fo1=freadback(fdo);
+    assert(fsameBits(fo0,fo1));
+    assert(CudaRbfEvalCacheHitsForTesting()==fh0 && CudaRbfEvalCacheMissesForTesting()==fm0);
+    // The seam-disabled uncached kernel is bitwise the cached path.
+    TestDisableCudaRbfEvalCache(true);
+    freshEval(fb); assert(fsameBits(freadback(fdo),fo0));
+    TestDisableCudaRbfEvalCache(false);
+    // A 1-ULP CV change misses and refills; restoring re-hits the bits.
+    std::vector<float3> fcvs2=fcvs; fcvs2[7].x=std::nextafterf(fcvs2[7].x,2.f);
+    check(cudaMemcpyAsync(fdc,fcvs2.data(),size_t(fc)*sizeof(float3),cudaMemcpyHostToDevice,s));
+    freshEval(fb); std::vector<float3> frefill=freadback(fdo);
+    TestDisableCudaRbfEvalCache(true);
+    freshEval(fb); assert(fsameBits(freadback(fdo),frefill));
+    TestDisableCudaRbfEvalCache(false);
+    check(cudaMemcpyAsync(fdc,fcvs.data(),size_t(fc)*sizeof(float3),cudaMemcpyHostToDevice,s));
+    freshEval(fb); assert(fsameBits(freadback(fdo),fo0));
+    // The fresh fill serves the direct path: a direct bind/solve over the
+    // same samples evaluates as a counted host-side hit with the same bits.
+    assert(fb.Bind({fdr,size_t(fn)},0,s)==RbfStatus::Ok); assert(fb.Solve({fdp,size_t(fn)},s)==RbfStatus::Ok);
+    assert(fb.Evaluate({fdc,size_t(fc)},{fdo,size_t(fc)},s)==RbfStatus::Ok); assert(fb.Finish(s)==RbfStatus::Ok);
+    assert(CudaRbfEvalCacheHitsForTesting()==fh0+1 && CudaRbfEvalCacheMissesForTesting()==fm0);
+    assert(fsameBits(freadback(fdo),fo0));
+    // A fresh rebind over moved rest misses, refills, and matches a clean
+    // binding bitwise (new center/scale included).
+    std::vector<float3> frest2=frest; for(int i=0;i<fn;i++) frest2[size_t(i)]=f(frest[size_t(i)].x+.5f,frest[size_t(i)].y-.25f,frest[size_t(i)].z+.125f);
+    std::vector<float3> fpose2=fpose; for(int i=0;i<fn;i++) fpose2[size_t(i)]=f(fpose[size_t(i)].x+.5f,fpose[size_t(i)].y-.25f,fpose[size_t(i)].z+.125f);
+    check(cudaMemcpyAsync(fdr,frest2.data(),size_t(fn)*sizeof(float3),cudaMemcpyHostToDevice,s));
+    check(cudaMemcpyAsync(fdp,fpose2.data(),size_t(fn)*sizeof(float3),cudaMemcpyHostToDevice,s));
+    assert(fb.AcceptFreshSolve()==RbfStatus::Ok);
+    freshBind(fb,fdr); freshSolve(fb,fdp); freshEval(fb); std::vector<float3> frebind=freadback(fdo);
+    CudaRbfBinding fb2; freshBind(fb2,fdr); freshSolve(fb2,fdp);
+    assert(fb2.BeginFreshEvaluate({fdc,size_t(fc)},{fdo,size_t(fc)},s)==RbfStatus::Ok); check(cudaStreamSynchronize(s)); assert(fb2.CommitFreshEvaluate()==RbfStatus::Ok);
+    assert(fsameBits(freadback(fdo),frebind));
+    TestDisableCudaRbfEvalCache(true);
+    freshEval(fb); assert(fsameBits(freadback(fdo),frebind));
+    TestDisableCudaRbfEvalCache(false);
+    // A NaN CV fails the flag proof exactly like the direct kernel, and
+    // the binding recovers on the next stable pose.
+    std::vector<float3> fnan=fcvs; fnan[3].z=NAN;
+    check(cudaMemcpyAsync(fdc,fnan.data(),size_t(fc)*sizeof(float3),cudaMemcpyHostToDevice,s));
+    assert(fb.BeginFreshEvaluate({fdc,size_t(fc)},{fdo,size_t(fc)},s)==RbfStatus::Ok); check(cudaStreamSynchronize(s));
+    assert(fb.CommitFreshEvaluate()==RbfStatus::NonFiniteInput);
+    check(cudaMemcpyAsync(fdc,fcvs.data(),size_t(fc)*sizeof(float3),cudaMemcpyHostToDevice,s));
+    freshEval(fb); assert(fsameBits(freadback(fdo),frebind));
+    // Rollback restores the prior pose through the warm cache.
+    check(cudaMemcpyAsync(fdp,fpose.data(),size_t(fn)*sizeof(float3),cudaMemcpyHostToDevice,s));
+    assert(fb.AcceptFreshSolve()==RbfStatus::Ok);
+    freshSolve(fb,fdp); freshEval(fb); std::vector<float3> frb=freadback(fdo);
+    assert(fb.AcceptFreshSolve()==RbfStatus::Ok);
+    check(cudaMemcpyAsync(fdp,fpose2.data(),size_t(fn)*sizeof(float3),cudaMemcpyHostToDevice,s));
+    freshSolve(fb,fdp); freshEval(fb);
+    assert(fb.RollbackFreshSolve()==RbfStatus::Ok);
+    freshEval(fb); assert(fsameBits(freadback(fdo),frb));
+    assert(CudaRbfEvalCacheHitsForTesting()==fh0+1 && CudaRbfEvalCacheMissesForTesting()==fm0);
+    cudaFree(fdr); cudaFree(fdp); cudaFree(fdc); cudaFree(fdo);
+  }
   cudaFree(dr);cudaFree(dp);cudaFree(do_);cudaStreamDestroy(s);cudaStreamDestroy(s2);
 }

@@ -106,14 +106,19 @@ private:
     DeviceBuffer<double> matrix_, work_, coefficients_, normSamples_;
     DeviceBuffer<double> gram_;
     DeviceBuffer<int> pivots_, evalFlags_;
-    // Direct-evaluate R cache: the radius-cubed kernel values are
-    // pose-invariant (they depend only on the CVs, the rest samples, and
-    // the rest-derived center/scale), so a verified cache turns the
-    // sqrt-bound evaluate into a streaming FMA pass. rCvs_/rRest_ are the
-    // bitwise proof copies: a hit requires both device memcmps to match,
-    // so no host trust and no caller versioning is involved.
+    // Evaluate R cache, shared by the direct and fresh paths: the
+    // radius-cubed kernel values are pose-invariant (they depend only on
+    // the CVs, the rest samples, and the rest-derived center/scale), so a
+    // verified cache turns the sqrt-bound evaluate into a streaming FMA
+    // pass. rCvs_/rRest_ are the bitwise proof copies: a hit requires both
+    // device memcmps to match, so no host trust and no caller versioning
+    // is involved, and either path's fill serves the other. The direct
+    // path verifies on the host between submits; the fresh path verifies
+    // into rMiss_ and predicates its fill on the word, so the whole
+    // verify/fill/eval sequence submits as one stream slice.
     DeviceBuffer<double> rCache_;
     DeviceBuffer<float3> rCvs_, rRest_;
+    DeviceBuffer<int> rMiss_;
     int rN_ = 0;
     size_t rCount_ = 0;
     bool rValid_ = false;
