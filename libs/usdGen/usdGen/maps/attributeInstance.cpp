@@ -37,6 +37,17 @@ bool UsdGenAttributeCookInstances(UsdGenAttributeInstanceInput const &input,
     cooked.keep.resize(count);
     cooked.prototype.resize(count);
     cooked.instanceIndices.resize(size_t(input.numPrototypes));
+    // Pre-size the per-slot index lists (bit-identical: same pushed values,
+    // no reallocation copies): every kept root lands in exactly one slot,
+    // so count slots total suffice however skewed the distribution is. The
+    // uniform split covers the balanced case with zero growth; a skewed
+    // slot resumes geometric growth past its share, never worse than the
+    // unreserved baseline. Bounded by the kept total, not count times the
+    // slot count, so a huge prototype count cannot over-reserve.
+    size_t const perSlot =
+        (count + size_t(input.numPrototypes) - 1) / size_t(input.numPrototypes);
+    for (std::vector<int> &slot : cooked.instanceIndices)
+        slot.reserve(perSlot);
 
     // Inline UsdGenAttributeMap::Sample Bilinear (attributeMap.cpp is
     // canonical): same checks, same clamp, same node math, same lerp
