@@ -920,14 +920,18 @@ UsdGenInstancer::BuildInstancerDataSource(
         // mis-syncs every instance. Storm accepts both encodings, so the
         // data source publishes quath -- the wire type every Hydra consumer
         // reads -- while Bake keeps full float precision (docs/moonray-fur.md).
-        VtQuathArray quath(result.rotations.size());
-        // Vector quatf->quath conversion (bit-identical to the inlined
-        // GfQuath(GfQuatf) spelling): SIMD pre-scan routes finite
-        // in-half-range inputs to the FCVTN loop, NaN/Inf/out-of-range
-        // to the scalar loop.
-        if (!result.rotations.empty())
-            _ConvertQuats(quath.data(), result.rotations.cdata(),
-                          result.rotations.size());
+        // Uninitialized sizing (bit-identical): VtQuathArray(n)
+        // value-initializes (8MB of zeroes here) that the vector
+        // quatf->quath conversion overwrites in full, so the array sizes
+        // through resize(n, fill) with the conversion as the filler over
+        // uninitialized storage. `quath` is function-local, so the fill
+        // runs exactly once at full range.
+        VtQuathArray quath;
+        GfQuatf const *quatSrc = result.rotations.cdata();
+        quath.resize(result.rotations.size(),
+                     [quatSrc](GfQuath *b, GfQuath *e) {
+                         _ConvertQuats(b, quatSrc, size_t(e - b));
+                     });
         _Add(&pvNames, &pvValues, HdInstancerTokens->instanceRotations,
              _InstancePrimvar(_Samp(quath)));
         _Add(&pvNames, &pvValues, HdInstancerTokens->instanceScales,
@@ -945,19 +949,30 @@ UsdGenInstancer::BuildInstancerDataSource(
                 // hdMoonray ignores elementSize, so pack float3: a flat
                 // VtFloatArray would be misread as one scalar per instance.
                 // GfVec3f is 3 contiguous floats: one copy, same bytes.
-                VtVec3fArray packed(plane.f.size() / 3);
-                if (!plane.f.empty())
-                    std::memcpy(packed.data(), plane.f.cdata(),
-                                plane.f.size() * sizeof(float));
+                // Uninitialized sizing (bit-identical): the pack sizes
+                // through resize(count, fill) with the copy as the filler
+                // over uninitialized storage. Same bytes either way.
+                VtVec3fArray packed;
+                void const *packSrc = plane.f.cdata();
+                packed.resize(plane.f.size() / 3,
+                              [packSrc](GfVec3f *b, GfVec3f *e) {
+                                  std::memcpy(b, packSrc,
+                                              size_t(e - b) *
+                                              sizeof(GfVec3f));
+                              });
                 sampled = _Samp(packed);
                 if (plane.name == TfToken("displayColor"))
                     role = TfToken("color");
             } else if (plane.arity == 2 && plane.f.size() % 2 == 0) {
                 // Likewise: GfVec2f is 2 contiguous floats.
-                VtVec2fArray packed(plane.f.size() / 2);
-                if (!plane.f.empty())
-                    std::memcpy(packed.data(), plane.f.cdata(),
-                                plane.f.size() * sizeof(float));
+                VtVec2fArray packed;
+                void const *packSrc = plane.f.cdata();
+                packed.resize(plane.f.size() / 2,
+                              [packSrc](GfVec2f *b, GfVec2f *e) {
+                                  std::memcpy(b, packSrc,
+                                              size_t(e - b) *
+                                              sizeof(GfVec2f));
+                              });
                 sampled = _Samp(packed);
             } else {
                 sampled = _Samp(plane.f);
