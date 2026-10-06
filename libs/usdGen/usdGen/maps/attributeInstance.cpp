@@ -121,15 +121,19 @@ bool UsdGenAttributeCookInstances(UsdGenAttributeInstanceInput const &input,
     // digest.h): the same words feed each lane in root order, so every
     // assignment stays digest-sensitive while the four chains overlap.
     // Tail roots join lane 0. Lane seeds domain-separate the header hash.
+    // One word per root: keep is redundant with the prototype (kept roots
+    // carry a slot, dropped roots carry -1), so the value bits and the
+    // prototype pack into a single feed. Digest values are internal keys
+    // (digest.h), never persisted: the packing changes them by design.
     uint64_t lane[4] = {hash, hash ^ 0x9E3779B97F4A7C15ull,
                         hash ^ 0xBF58476D1CE4E5B9ull,
                         hash ^ 0x94D049BB133111EBull};
     auto feed = [&](uint64_t &h, size_t i) {
         uint32_t vbits = 0;
         std::memcpy(&vbits, &cooked.values[i], sizeof(vbits));
-        UsdGenDigestMixWord(h, vbits);
-        UsdGenDigestMixWord(h, uint64_t(cooked.keep[i]));
-        UsdGenDigestMixWord(h, uint64_t(uint32_t(cooked.prototype[i])));
+        uint64_t const packed = (uint64_t(vbits) << 32) |
+                                uint64_t(uint32_t(cooked.prototype[i]));
+        UsdGenDigestMixWord(h, packed);
     };
     size_t i = 0;
     size_t const n4 = count & ~size_t(3);
