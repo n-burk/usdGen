@@ -4,7 +4,9 @@
 // Stages (median of --reps runs, taskset-pinned by the caller):
 //   scatter_capture_ms   UsdGenScatterOp::Capture on a 1M-face grid (~1M roots)
 //   scatter_digest_ms    UsdGenScatterOp::CaptureDigest on the same surface
-//   bake_cards_ms        UsdGenInstancer::Bake, cards+surfaceFrame+twist
+//   bake_cards_ms        UsdGenInstancer::Bake, cards+surfaceFrame+twist stress
+//   bake_notwist_ms      Bake, cards+surfaceFrame at schema defaults (twist 0)
+//   bake_twist_ms        Bake, cards+surfaceFrame uniform twist (no random)
 //   bake_tangent_ms      UsdGenInstancer::Bake, cards+curveTangent
 //   bake_spheres_ms      UsdGenInstancer::Bake, spheres
 //   instancer_draw_ms    BuildInstancerDataSource + primvar readback
@@ -354,7 +356,8 @@ uint64_t HashBake(UsdGenInstanceResult const &r)
     return f.h;
 }
 
-UsdGenInstanceParams BakeParams(char const *primitive, char const *orient)
+UsdGenInstanceParams BakeParams(char const *primitive, char const *orient,
+                              float twist, float twistRandom)
 {
     UsdGenInstanceParams p;
     p.primitive = TfToken(primitive);
@@ -362,8 +365,8 @@ UsdGenInstanceParams BakeParams(char const *primitive, char const *orient)
     p.prototypes = {SdfPath("/groom/Prototypes/cardA"),
                     SdfPath("/groom/Prototypes/cardB")};
     p.scaleRandom = GfVec2f(0.8f, 1.2f);
-    p.twist = 15.0f;
-    p.twistRandom = 30.0f;
+    p.twist = twist;
+    p.twistRandom = twistRandom;
     p.width = 0.02f;
     p.length = 0.09f;
     p.seed = 7;
@@ -371,10 +374,11 @@ UsdGenInstanceParams BakeParams(char const *primitive, char const *orient)
 }
 
 int RunBake(Options const &opts, char const *stage, char const *primitive,
-            char const *orient, UsdGenCurveBuffer const &curves,
-            VtVec3fArray const &color)
+            char const *orient, float twist, float twistRandom,
+            UsdGenCurveBuffer const &curves, VtVec3fArray const &color)
 {
-    UsdGenInstanceParams const params = BakeParams(primitive, orient);
+    UsdGenInstanceParams const params =
+        BakeParams(primitive, orient, twist, twistRandom);
     UsdGenInstanceCurves input;
     input.curves = &curves;
     input.displayColor = color;
@@ -412,7 +416,8 @@ HdContainerDataSourceHandle Child(HdContainerDataSourceHandle const &c,
 int RunDraw(Options const &opts, UsdGenCurveBuffer const &curves,
             VtVec3fArray const &color)
 {
-    UsdGenInstanceParams const params = BakeParams("cards", "surfaceFrame");
+    UsdGenInstanceParams const params =
+        BakeParams("cards", "surfaceFrame", 15.0f, 30.0f);
     UsdGenInstanceCurves input;
     input.curves = &curves;
     input.displayColor = color;
@@ -1094,6 +1099,7 @@ int main(int argc, char **argv)
     bool const needRoots =
         WantStage(opts, "") || WantStage(opts, "bake_cards") ||
         WantStage(opts, "bake_tangent") || WantStage(opts, "bake_spheres") ||
+        WantStage(opts, "bake_notwist") || WantStage(opts, "bake_twist") ||
         WantStage(opts, "instancer_draw") || WantStage(opts, "attr_cook") ||
         WantStage(opts, "vk_build_targets") || WantStage(opts, "vk_build_cpu") ||
         WantStage(opts, "vk_dispatch");
@@ -1109,22 +1115,34 @@ int main(int argc, char **argv)
                         faceCount);
     }
     if (WantStage(opts, "bake_cards") || WantStage(opts, "bake_tangent") ||
-        WantStage(opts, "bake_spheres") || WantStage(opts, "instancer_draw")) {
+        WantStage(opts, "bake_spheres") || WantStage(opts, "bake_notwist") ||
+        WantStage(opts, "bake_twist") || WantStage(opts, "instancer_draw")) {
         UsdGenCurveBuffer const curves = GrowForBake(roots, opts.bakeCvs);
         VtVec3fArray color(curves.totalCurves);
         for (uint32_t c = 0; c < curves.totalCurves; ++c)
             color[c] = GfVec3f(float(c % 256) / 255.0f, 0.5f, 0.25f);
+        // bake_cards is the twist stress case; bake_notwist is the schema
+        // default (twist 0/0, the common path); bake_twist is uniform twist
+        // (constant angle, hoistable trig).
         if (WantStage(opts, "bake_cards"))
             if (int rc = RunBake(opts, "bake_cards", "cards", "surfaceFrame",
-                                 curves, color))
+                                 15.0f, 30.0f, curves, color))
+                return rc;
+        if (WantStage(opts, "bake_notwist"))
+            if (int rc = RunBake(opts, "bake_notwist", "cards", "surfaceFrame",
+                                 0.0f, 0.0f, curves, color))
+                return rc;
+        if (WantStage(opts, "bake_twist"))
+            if (int rc = RunBake(opts, "bake_twist", "cards", "surfaceFrame",
+                                 15.0f, 0.0f, curves, color))
                 return rc;
         if (WantStage(opts, "bake_tangent"))
             if (int rc = RunBake(opts, "bake_tangent", "cards",
-                                 "curveTangent", curves, color))
+                                 "curveTangent", 15.0f, 30.0f, curves, color))
                 return rc;
         if (WantStage(opts, "bake_spheres"))
             if (int rc = RunBake(opts, "bake_spheres", "spheres",
-                                 "surfaceFrame", curves, color))
+                                 "surfaceFrame", 15.0f, 30.0f, curves, color))
                 return rc;
         if (WantStage(opts, "instancer_draw"))
             if (int rc = RunDraw(opts, curves, color))
