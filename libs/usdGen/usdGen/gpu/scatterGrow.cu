@@ -3,8 +3,8 @@
 
 #include <cmath>
 #include <limits>
-#include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace usdGen::gpu {
 namespace {
@@ -246,13 +246,33 @@ ScatterGrowStatus CudaScatterGrow::ValidateRoots(
     auto requirementStatus = GetScatterGrowRequirements(n, c.cvCount, &requirements);
     if (requirementStatus != ScatterGrowStatus::Ok) return requirementStatus;
     *total = requirements.pointCount;
-    std::unordered_set<uint64_t> seen;
+    // Duplicate stable ids through a small open-addressed set: the same
+    // insertion order and the same first-dup-in-index-order report as the
+    // unordered_set, without its per-node allocation. Capacity is a power
+    // of two past 2n (load <= 0.5); the SplitMix avalanche keeps
+    // sequential untrusted ids from clustering.
+    size_t setCap = 16;
+    while (setCap <= n) setCap *= 2;
+    setCap *= 2;
+    std::vector<uint64_t> setKeys(setCap);
+    std::vector<unsigned char> setUsed(setCap, 0);
+    size_t const setMask = setCap - 1;
     for(size_t i=0;i<n;++i) {
         if(!Finite(r->positions[i])||!Finite(r->rootUV[i])||!Finite(r->rootT[i])||
            !Finite(r->rootB[i])||!Finite(r->rootN[i]))
             return ScatterGrowStatus::NonFiniteInput;
-        if(!seen.insert(r->stableIds[i]).second)
-            return ScatterGrowStatus::DuplicateStableId;
+        uint64_t const id = r->stableIds[i];
+        size_t slot = size_t(Hash64Host(id, 0x9E3779B9u) & uint64_t(setMask));
+        while (true) {
+            if (!setUsed[slot]) {
+                setUsed[slot] = 1;
+                setKeys[slot] = id;
+                break;
+            }
+            if (setKeys[slot] == id)
+                return ScatterGrowStatus::DuplicateStableId;
+            slot = (slot + 1) & setMask;
+        }
 
         // Catch deterministic target and output overflow before reserving or
         // submitting any work.  The device repeats this check and reports a
