@@ -28,7 +28,9 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <numeric>
+#include <type_traits>
 #include <vector>
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -550,30 +552,37 @@ bool UsdGenScatterOp::Capture(
 
     buf.totalCurves = uint32_t(N);
     buf.totalCvs = uint32_t(N);
-    buf.px = VtFloatArray(N); buf.py = VtFloatArray(N); buf.pz = VtFloatArray(N);
-    buf.curveId = VtArray<uint64_t>(N);
-    buf.rootPrim = VtIntArray(N);
-    buf.rootUV = VtVec2fArray(N);
-    buf.rootT = VtVec3fArray(N); buf.rootN = VtVec3fArray(N); buf.rootB = VtVec3fArray(N);
-    buf.hairT = VtFloatArray(N, 0.0f);
     // Per-plane gather (bit-identical): the permuted read stream jumps over
     // the whole emission range, so gathering every plane in one loop keeps
     // ~68MB of random-read working set live and thrashes the LLC. One plane
     // per pass shrinks the random window to a single 4-12MB array (the
     // sequential perm re-read stays cache-hot); writes stay sequential in
     // both forms. Same bytes in the same slots.
-    auto gather = [perm, N](auto *dst, auto const *src) {
-        for (size_t i = 0; i < N; ++i) dst[i] = src[perm[i]];
+    // Uninitialized sizing (bit-identical): VtArray(N) value-initializes
+    // (~68MB of zeroes here) that the gather overwrites in full, so each
+    // plane sizes through resize(N, fill) instead, whose filler runs over
+    // uninitialized storage. clear() first keeps a reused capture exact:
+    // resize alone is a no-op at equal size and would leave stale data.
+    // Every plane is trivially copyable, so placement-new is a plain store.
+    auto gather = [perm, N](auto &arr, auto const *src) {
+        using T = typename std::decay_t<decltype(arr)>::value_type;
+        arr.clear();
+        arr.resize(N, [perm, src](T *b, T *e) {
+            size_t i = 0;
+            for (T *d = b; d != e; ++d, ++i)
+                new (d) T(src[perm[i]]);
+        });
     };
-    gather(buf.px.data(), ax.data());
-    gather(buf.py.data(), ay.data());
-    gather(buf.pz.data(), az.data());
-    gather(buf.curveId.data(), aids.data());
-    gather(buf.rootPrim.data(), aPrim.data());
-    gather(buf.rootUV.data(), aUv.data());
-    gather(buf.rootT.data(), aT.data());
-    gather(buf.rootN.data(), aN.data());
-    gather(buf.rootB.data(), aB.data());
+    gather(buf.px, ax.data());
+    gather(buf.py, ay.data());
+    gather(buf.pz, az.data());
+    gather(buf.curveId, aids.data());
+    gather(buf.rootPrim, aPrim.data());
+    gather(buf.rootUV, aUv.data());
+    gather(buf.rootT, aT.data());
+    gather(buf.rootN, aN.data());
+    gather(buf.rootB, aB.data());
+    buf.hairT = VtFloatArray(N, 0.0f);
     return true;
 }
 
