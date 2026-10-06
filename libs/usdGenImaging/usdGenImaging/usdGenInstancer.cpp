@@ -445,6 +445,16 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
     float const lo = std::min(params.scaleRandom[0], params.scaleRandom[1]);
     float const hi = std::max(params.scaleRandom[0], params.scaleRandom[1]);
 
+    // Constant-twist fast path (bit-identical): with twistRandom == 0 the
+    // angle is params.twist for every curve (twist + 0*x == twist for the
+    // finite inputs Validate admits), so its cos/sin hoist out of the loop
+    // and the per-curve twist draw is dead. With twist == 0 as well the
+    // angle is exactly zero and the post-rotation always skips, as before.
+    bool const twistConst = params.twistRandom == 0.0f;
+    double const twistA =
+        double(params.twist) * (3.141592653589793 / 180.0);
+    double const twistCa = std::cos(twistA), twistSa = std::sin(twistA);
+
     double weightTotal = 0.0;
     for (float w : params.weights) weightTotal += double(w);
 
@@ -551,15 +561,26 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
             xAxis = GfCross(yAxis, zAxis);
         }
 
-        float const tDraw =
-            _Draw01(params.seed, curveId, kSaltInstanceTwist);
-        float const twDeg =
-            params.twist + params.twistRandom * (tDraw * 2.0f - 1.0f);
+        float twDeg = params.twist;
+        if (!twistConst) {
+            float const tDraw =
+                _Draw01(params.seed, curveId, kSaltInstanceTwist);
+            twDeg =
+                params.twist + params.twistRandom * (tDraw * 2.0f - 1.0f);
+        }
         if (params.orient != OrientWorld() && twDeg != 0.0f) {
             // Local-space post-rotation by R_y(+tw): newX = M*(ca,0,-sa),
             // newZ = M*(sa,0,ca). twist = +90 about Y sends local X to -Z.
-            double const a = double(twDeg) * (3.141592653589793 / 180.0);
-            double const ca = std::cos(a), sa = std::sin(a);
+            double ca, sa;
+            if (twistConst) {
+                ca = twistCa;
+                sa = twistSa;
+            } else {
+                double const a =
+                    double(twDeg) * (3.141592653589793 / 180.0);
+                ca = std::cos(a);
+                sa = std::sin(a);
+            }
             GfVec3d const x = xAxis * ca - zAxis * sa;
             GfVec3d const z = xAxis * sa + zAxis * ca;
             xAxis = x;
