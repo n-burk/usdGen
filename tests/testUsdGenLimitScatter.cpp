@@ -68,6 +68,18 @@ int main() {
     d1=d0;d1.surfaces[0].densityMultiplier.assign(9,.5f);
     CHECK(op.CaptureDigest(c0)!=op.CaptureDigest(c1));
     CHECK(Run(Desc(s,0),&b));CHECK(b.totalCurves!=a.totalCurves);
+    // Shuffled multi-face subset at level 0: every root lands on a
+    // subset face (random corner-table order), deterministically.
+    auto sub = s;
+    sub.subsetFaces = {7, 2, 5};
+    UsdGenCurveBuffer s1, s4;
+    CHECK(Run(Desc(sub,0),&s1,1));
+    CHECK(Run(Desc(sub,0),&s4,4));
+    CHECK(s1.totalCurves > 0 && s1.totalCurves == s4.totalCurves);
+    CHECK(s1.px == s4.px && s1.py == s4.py && s1.pz == s4.pz &&
+          s1.curveId == s4.curveId && s1.rootPrim == s4.rootPrim);
+    for (size_t i = 0; i < s1.totalCurves; ++i)
+        CHECK(s1.rootPrim[i] == 7 || s1.rootPrim[i] == 2 || s1.rootPrim[i] == 5);
     CHECK(!Run(Desc(s,7),&b));
     tags=s;tags.subdivisionScheme=TfToken("none");CHECK(!Run(Desc(tags,3),&b));
     tags=s;tags.creaseIndices={0,1};tags.creaseLengths={2};tags.creaseSharpnesses={3};CHECK(limit.Build(tags,3,&error));
