@@ -2821,6 +2821,27 @@ set_tests_properties(benchUsdGenSurfaceBindings PROPERTIES
     LABELS "T0;perf;sources;root-bindings;cache"
     TIMEOUT 600 SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 
+# Instancing/scattering per-stage timing + checksums (autoresearch
+# instscatter). GPU stages compile in only when their backend does, and skip
+# at runtime without a device (CUDA) or --vk-spv (Vulkan dispatch), so the
+# registered run stays green on CPU-only CI.
+add_executable(benchUsdGenInstanceScatter tests/perf/benchUsdGenInstanceScatter.cpp)
+target_link_libraries(benchUsdGenInstanceScatter PRIVATE usdGenTestUtilsHd)
+target_include_directories(benchUsdGenInstanceScatter PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+if(USDGEN_ENABLE_CUDA)
+    target_link_libraries(benchUsdGenInstanceScatter PRIVATE usdGenGpu)
+    target_compile_definitions(benchUsdGenInstanceScatter PRIVATE USDGEN_ENABLE_CUDA)
+endif()
+if(USDGEN_ENABLE_VULKAN_RUNTIME)
+    target_link_libraries(benchUsdGenInstanceScatter PRIVATE usdGenVulkanNative)
+    target_compile_definitions(benchUsdGenInstanceScatter PRIVATE USDGEN_ENABLE_VULKAN_RUNTIME)
+endif()
+add_test(NAME benchUsdGenInstanceScatter COMMAND benchUsdGenInstanceScatter)
+set_tests_properties(benchUsdGenInstanceScatter PROPERTIES
+    LABELS "T1;perf;instance;scatter" TIMEOUT 900 RESOURCE_LOCK usdgen_gpu
+    SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+
 # M1 T1 imaging tests (scene index over the real UsdImaging chain).
 foreach(_t testUsdGenTileContract testUsdGenStockStormContract testUsdGenInvalidation testUsdGenScheduling
            testUsdGenSnapshotRace testUsdGenPopulation testUsdGenAdapter testUsdGenScenePublication
