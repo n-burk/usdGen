@@ -236,14 +236,28 @@ void UsdGenWorkerPool::ParallelFor(size_t count, void (*body)(size_t, void *),
     _state->next.store(0, std::memory_order_relaxed);
     _state->finished.store(0, std::memory_order_relaxed);
     _state->observed.store(0, std::memory_order_relaxed);
-    _state->epoch.fetch_add(1, std::memory_order_release);  // idle even -> work odd
+    // The bump holds the sleep mutex: a worker checks the epoch under the
+    // same mutex before parking, so bump-then-notify is atomic against
+    // check-then-sleep and no wakeup is lost. A lock-free bump lets the
+    // notify land between the worker's check and its park; the sleeper
+    // then misses the dispatch and the join below deadlocks (5/10
+    // SPIN_US=0 bench runs hung before this).
+    {
+        std::lock_guard<std::mutex> lock(_state->mutex);
+        _state->epoch.fetch_add(1, std::memory_order_release);  // idle even -> work odd
+    }
     _state->wake.notify_all();  // no-op for spinning workers, wakes sleepers
     for (unsigned spin = 0;
          _state->finished.load(std::memory_order_acquire) !=
          unsigned(_state->workers);
          ++spin)
         CpuRelax(spin);
-    _state->epoch.fetch_add(1, std::memory_order_release);  // work odd -> idle even
+    // Same mutex as the dispatch bump above: the marker must not slip
+    // between a worker's check and its park either.
+    {
+        std::lock_guard<std::mutex> lock(_state->mutex);
+        _state->epoch.fetch_add(1, std::memory_order_release);  // work odd -> idle even
+    }
     // Sleepers parked between their finished++ and this bump need the
     // kick to observe the marker; without it the observed join below
     // deadlocks against a worker that never wakes.

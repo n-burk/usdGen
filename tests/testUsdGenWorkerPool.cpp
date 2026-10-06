@@ -157,6 +157,21 @@ int main()
             CheckCounts(pool, 1000, "forced sleep/wake");
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             CheckCounts(pool, 1000, "wake after an idle gap");
+            // Many forced-sleep dispatches: each park/wake cycle is a
+            // missed-wakeup lottery ticket, so two dispatches pass by
+            // luck (the pre-fix pool hung ~1% per sleep dispatch).
+            bool slept = true;
+            for (int round = 0; round < 100; ++round) {
+                std::vector<std::atomic<int>> hits(257);
+                for (auto &h : hits) h.store(0, std::memory_order_relaxed);
+                std::set<std::thread::id> threads;
+                std::mutex threadsMutex;
+                CountPayload pl{hits.data(), &threads, &threadsMutex};
+                pool.ParallelFor(257, CountBody, &pl);
+                for (auto &h : hits)
+                    if (h.load(std::memory_order_relaxed) != 1) slept = false;
+            }
+            Check(slept, "100 forced-sleep dispatches are all exact");
         }
         if (had) setenv("USDGEN_POOL_SPIN_US", saved.c_str(), 1);
         else unsetenv("USDGEN_POOL_SPIN_US");
