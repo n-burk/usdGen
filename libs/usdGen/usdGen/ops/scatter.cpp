@@ -409,8 +409,13 @@ bool UsdGenScatterOp::Capture(
     // Morton-sort the roots by rest position: surface-major, locality-
     // preserving chunk placement (plan/04 :641, ADR §4.1). cellScale 64
     // cells/unit is an M1 choice — the plan does not pin a cell size; ties
-    // keep the deterministic face-major emission order (stable_sort), so the
-    // result is bit-stable across thread counts and chunk splits (E-8).
+    // keep the deterministic face-major emission order (stable passes), so
+    // the result is bit-stable across thread counts and chunk splits (E-8).
+    // LSD radix over 16-bit digits: each pass is stable and the digits run
+    // least- to most-significant, so the final order is exactly the
+    // stable_sort order (primary morton key, ties in emission order) at
+    // linear cost. The even pass count lands the result back in the
+    // morton/order pair.
     const size_t N = aids.size();
     std::vector<uint64_t> morton(N);
     std::vector<size_t> order(N);
@@ -418,8 +423,35 @@ bool UsdGenScatterOp::Capture(
         morton[i] = UsdGenMortonKey3(ax[i], ay[i], az[i], 64.0f);
         order[i] = i;
     }
-    std::stable_sort(order.begin(), order.end(),
-                     [&](size_t a, size_t b) { return morton[a] < morton[b]; });
+    if (N > 1) {
+        std::vector<uint64_t> tmpKeys(N);
+        std::vector<size_t> tmpIdx(N);
+        std::vector<size_t> counts(65536);
+        uint64_t *keys = morton.data();
+        size_t *idx = order.data();
+        uint64_t *keysOut = tmpKeys.data();
+        size_t *idxOut = tmpIdx.data();
+        for (int pass = 0; pass < 4; ++pass) {
+            std::fill(counts.begin(), counts.end(), size_t(0));
+            int const shift = pass * 16;
+            for (size_t i = 0; i < N; ++i)
+                ++counts[(keys[i] >> shift) & 0xffffu];
+            size_t sum = 0;
+            for (size_t c = 0; c < 65536; ++c) {
+                size_t const t = counts[c];
+                counts[c] = sum;
+                sum += t;
+            }
+            for (size_t i = 0; i < N; ++i) {
+                size_t const d = (keys[i] >> shift) & 0xffffu;
+                size_t const p = counts[d]++;
+                keysOut[p] = keys[i];
+                idxOut[p] = idx[i];
+            }
+            std::swap(keys, keysOut);
+            std::swap(idx, idxOut);
+        }
+    }
 
     buf.totalCurves = uint32_t(N);
     buf.totalCvs = uint32_t(N);
