@@ -290,8 +290,17 @@ ScatterGrowStatus CudaScatterGrow::ValidateRoots(
              (c.randomHi - c.randomLo));
         float const target = static_cast<float>(targetDouble);
         if (!Finite(target)) return ScatterGrowStatus::NonFiniteInput;
-        for (uint32_t j = 0; j != c.cvCount; ++j) {
-            float const t = float(j) / float(c.cvCount - 1);
+        // Only the last iteration (t = 1) can report NonFiniteInput, so
+        // the loop over j runs once, spelled verbatim: distance_j =
+        // target * t_j with t_j in [0,1] can neither overflow (its
+        // magnitude is at most |target|, finite) nor go non-finite, and
+        // the output sum pos + dir*distance_j overflows at some j only
+        // if it overflows at full extension (same-sign sums grow with
+        // |distance|; opposite-sign sums stay within the larger of the
+        // two finite magnitudes). The device repeats the full loop
+        // unchanged.
+        {
+            float const t = float(c.cvCount - 1) / float(c.cvCount - 1);
             float const distance = target * t;
             float3 const output = make_float3(
                 r->positions[i].x + direction.x * distance,
