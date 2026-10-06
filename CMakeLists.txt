@@ -3072,6 +3072,11 @@ add_executable(testUsdGenAttributeMap tests/testUsdGenAttributeMap.cpp)
 target_link_libraries(testUsdGenAttributeMap PRIVATE usdGen)
 add_test(NAME testUsdGenAttributeMap COMMAND testUsdGenAttributeMap)
 set_tests_properties(testUsdGenAttributeMap PROPERTIES LABELS "T0;maps" TIMEOUT 120)
+# Internal digest contract (determinism + sensitivity, never golden values).
+add_executable(testUsdGenDigest tests/testUsdGenDigest.cpp)
+target_link_libraries(testUsdGenDigest PRIVATE usdGen)
+add_test(NAME testUsdGenDigest COMMAND testUsdGenDigest)
+set_tests_properties(testUsdGenDigest PROPERTIES LABELS "T0;digest" TIMEOUT 120)
 # Painted attribute maps: the .ptx bake and the async bake-to-stage worker.
 # Engine-only (threads + filesystem, no USD/Hydra), like the map it bakes.
 add_executable(testUsdGenAttributeBake tests/testUsdGenAttributeBake.cpp)

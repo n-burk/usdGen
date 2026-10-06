@@ -15,6 +15,7 @@
 #include "usdGen/ops/scatter.h"
 
 #include "usdGen/opParams.h"
+#include "usdGen/digest.h"
 #include "usdGen/limitSurface.h"
 #include "usdGenMath/usdGenMath/hash.h"
 #include "usdGenMath/usdGenMath/kernels.h"
@@ -128,11 +129,9 @@ UsdGenEpoch UsdGenScatterOp::CaptureDigest(UsdGenCaptureContext const &ctx) cons
     if (desc && ctx.surface < desc->surfaces.size()) {
         auto const &surface = desc->surfaces[ctx.surface];
         auto array = [&](char const *name, auto const &values) {
-            uint64_t hash = 1469598103934665603ULL;
-            auto const *bytes = reinterpret_cast<unsigned char const *>(values.cdata());
-            for (size_t i = 0; i < values.size() * sizeof(*values.cdata()); ++i) {
-                hash ^= bytes[i]; hash *= 0x100000001b3ULL;
-            }
+            uint64_t const hash = UsdGenDigestBytes(
+                values.cdata(), values.size() * sizeof(*values.cdata()),
+                1469598103934665603ULL);
             feed(name, hash); feed(name, uint64_t(values.size()));
         };
         array("restPoints", surface.restPoints);
@@ -147,14 +146,10 @@ UsdGenEpoch UsdGenScatterOp::CaptureDigest(UsdGenCaptureContext const &ctx) cons
         // back the cached pre-stroke roots.
         auto const &mult = desc->surfaces[ctx.surface].densityMultiplier;
         feed("densityMultSize", uint64_t(mult.size()));
-        uint64_t mh = 1469598103934665603ULL;
-        for (float v : mult) {
-            uint32_t bits = 0;
-            static_assert(sizeof(bits) == sizeof(v), "float is 32 bits");
-            std::memcpy(&bits, &v, sizeof(bits));
-            mh ^= uint64_t(bits);
-            mh *= 0x100000001b3ULL;
-        }
+        static_assert(sizeof(float) == 4, "float is 32 bits");
+        uint64_t const mh = UsdGenDigestBytes(
+            mult.cdata(), mult.size() * sizeof(float),
+            1469598103934665603ULL);
         feed("densityMult", mh);
     }
 
