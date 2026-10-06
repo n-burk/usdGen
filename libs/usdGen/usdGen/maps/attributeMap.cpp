@@ -5,6 +5,7 @@
 #include "usdGen/digest.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -64,6 +65,14 @@ float UsdGenBrushWeight(UsdGenBrushFalloff falloff, float hardness, double dist,
 struct UsdGenAttributeMap::State {
     UsdGenAttributeMapSpec spec;
     std::vector<float> texels;
+    // Cached Digest(): the full-texel hash costs milliseconds on large
+    // maps and cooks rarely follow a mutation, so Digest memoizes until
+    // the next write. EVERY texel write must clear digestValid: SetTexel
+    // and Fill do it directly, MutableData dirties eagerly on fetch since
+    // bulk writes bypass per-texel hooks. Atomics keep concurrent const
+    // Digest() calls race-free (mutation-vs-access was already exclusive).
+    std::atomic<bool> digestValid{false};
+    std::atomic<uint64_t> digestCache{0};
 };
 
 UsdGenAttributeMap::UsdGenAttributeMap() : state_(std::make_unique<State>()) {}
@@ -140,6 +149,7 @@ bool UsdGenAttributeMap::SetTexel(int face, int s, int t, int channel, float val
                              size_t(state.spec.channels) +
                          size_t(channel);
     state.texels[index] = value;
+    state.digestValid.store(false, std::memory_order_relaxed);
     return true;
 }
 
@@ -193,10 +203,13 @@ void UsdGenAttributeMap::Fill(float value)
     if (!std::isfinite(value)) return;
     if (state_->spec.clamp01) value = Clamp01f(value);
     std::fill(state_->texels.begin(), state_->texels.end(), value);
+    state_->digestValid.store(false, std::memory_order_relaxed);
 }
 
 uint64_t UsdGenAttributeMap::Digest() const
 {
+    if (state_->digestValid.load(std::memory_order_acquire))
+        return state_->digestCache.load(std::memory_order_relaxed);
     // 4-lane FNV-1a (see digest.h) over the spec words then every texel
     // bit: the spec feeds the single-lane header, whose hash seeds the
     // bulk texel lanes. Same contract — bitwise-identical maps digest
@@ -210,13 +223,24 @@ uint64_t UsdGenAttributeMap::Digest() const
     std::memcpy(&defaultBits, &state_->spec.defaultValue, sizeof(defaultBits));
     UsdGenDigestMixWord(hash, defaultBits);
     static_assert(sizeof(float) == 4, "float is 32 bits");
-    return UsdGenDigestBytes(state_->texels.data(),
-                             state_->texels.size() * sizeof(float), hash);
+    uint64_t const digest = UsdGenDigestBytes(state_->texels.data(),
+                                              state_->texels.size() * sizeof(float), hash);
+    state_->digestCache.store(digest, std::memory_order_relaxed);
+    state_->digestValid.store(true, std::memory_order_release);
+    return digest;
 }
 
 float const *UsdGenAttributeMap::Data() const { return state_->texels.data(); }
 size_t UsdGenAttributeMap::FloatCount() const { return state_->texels.size(); }
-float *UsdGenAttributeMap::MutableData() { return state_->texels.data(); }
+float *UsdGenAttributeMap::MutableData()
+{
+    // Eager digest invalidation: bulk writes bypass per-texel hooks, so
+    // any fetch dirties the cache. Complete all writes through the
+    // pointer before the next Digest(); holding it across a Digest call
+    // with further writes would read back a stale epoch key.
+    state_->digestValid.store(false, std::memory_order_relaxed);
+    return state_->texels.data();
+}
 
 // ---------------------------------------------------------------------------
 // UsdGenBrushStroke
