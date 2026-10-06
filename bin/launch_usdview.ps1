@@ -98,7 +98,8 @@ $pluginDirs = @(
     (Join-Path $Build "usd\usdGenShaders\resources"),
     (Join-Path $Build "usd\usdGenTools\resources"),
     (Join-Path $Build "usd\usdGenPomade\resources"),
-    (Join-Path $Build "usd\usdGenPomadeTools\resources")
+    (Join-Path $Build "usd\usdGenPomadeTools\resources"),
+    (Join-Path $Build "usd\usdNoodles\resources")
 ) + $moonrayPluginDirs + @(
     (Join-Path $UsdInstallDir "plugin\usd"),
     (Join-Path $UsdInstallDir "lib\usd")

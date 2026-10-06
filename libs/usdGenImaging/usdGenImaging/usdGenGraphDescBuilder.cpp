@@ -37,6 +37,7 @@
 #include <cmath>
 #include <initializer_list>
 #include <map>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -388,34 +389,121 @@ _HForwardSourceColor(HdContainerDataSourceHandle const &primDs, _HdTime t,
     out->authoredPlanes.push_back(std::move(plane));
 }
 
-// OutputCurves ownership is carried by one uniform integer per source curve.
-// Do not reinterpret a malformed or differently interpolated primvar: the
-// authored-plane contract requires a primitive-domain scalar.
+// Mirror the Stage builder's generic authored-plane import. Hydra presents
+// primvars by local name and flattens indexed values before GetPrimvarValue.
+// Native clump fields fail closed: dropping one would silently change motion.
 void
-_HForwardOwnershipPlane(HdContainerDataSourceHandle const &primDs,
-                        TfToken const &name, _HdTime t,
-                        usdGen::UsdGenCurveSetDesc *out)
+_HForwardAuthoredPlanes(HdContainerDataSourceHandle const &primDs,
+                        SdfPath const &path, _HdTime t,
+                        usdGen::UsdGenCurveSetDesc *out,
+                        std::vector<std::string> *errors)
 {
-    HdPrimvarSchema const primvar =
-        HdPrimvarsSchema::GetFromParent(primDs).GetPrimvar(name);
-    HdSampledDataSourceHandle const values = primvar.GetPrimvarValue();
-    if (!values) return;
-    HdTokenDataSourceHandle const interpolation = primvar.GetInterpolation();
-    if (!interpolation || interpolation->GetTypedValue(t) != TfToken("uniform")) {
-        return;
+    static std::set<TfToken> const reserved{
+        TfToken("points"), TfToken("rest"), TfToken("widths"), TfToken("st"),
+        TfToken("skinprim"), TfToken("skinprimuv"), TfToken("displayColor"),
+        TfToken("usdGen:curveId"), TfToken("usdGen:rootFrame"),
+        TfToken("usdGen:role"), usdGen::UsdGenSourceColorPlane()};
+    auto const isClump = [](std::string const &name) {
+        return name.rfind("clumpId_", 0) == 0 ||
+               name.rfind("clumpCenter_", 0) == 0 ||
+               name.rfind("clumpCenterId_", 0) == 0 ||
+               name.rfind("clumpWeight_", 0) == 0;
+    };
+    size_t pointCount = 0;
+    for (int count : out->curveVertexCounts)
+        if (count > 0) pointCount += static_cast<size_t>(count);
+    HdPrimvarsSchema const primvars = HdPrimvarsSchema::GetFromParent(primDs);
+    for (TfToken const &name : primvars.GetPrimvarNames()) {
+        if (name.IsEmpty() || reserved.count(name)) continue;
+        bool const nativeClump = isClump(name.GetString());
+        HdPrimvarSchema const primvar = primvars.GetPrimvar(name);
+        HdSampledDataSourceHandle const values = primvar.GetPrimvarValue();
+        TfToken interpolation;
+        if (HdTokenDataSourceHandle const source = primvar.GetInterpolation())
+            interpolation = source->GetTypedValue(t);
+        usdGen::UsdGenAuthoredPlaneDesc plane;
+        plane.name = name;
+        size_t expected = 0;
+        if (interpolation == TfToken("vertex")) {
+            plane.domain = usdGen::UsdGenAuthoredPlaneDomain::Point;
+            expected = pointCount;
+        } else if (interpolation == TfToken("uniform")) {
+            plane.domain = usdGen::UsdGenAuthoredPlaneDomain::Primitive;
+            expected = out->curveVertexCounts.size();
+        } else if (interpolation == TfToken("constant")) {
+            plane.domain = usdGen::UsdGenAuthoredPlaneDomain::Groom;
+            expected = 1;
+        } else if (!nativeClump) {
+            continue;
+        }
+        VtValue const value = values ? values->GetValue(t) : VtValue();
+        size_t elements = 0;
+        if (value.IsHolding<VtFloatArray>()) {
+            plane.type = usdGen::UsdGenAuthoredPlaneType::Float32;
+            plane.arity = 1;
+            plane.floatValues = value.UncheckedGet<VtFloatArray>();
+            elements = plane.floatValues.size();
+        } else if (value.IsHolding<VtIntArray>()) {
+            plane.type = usdGen::UsdGenAuthoredPlaneType::Int32;
+            plane.arity = 1;
+            plane.intValues = value.UncheckedGet<VtIntArray>();
+            elements = plane.intValues.size();
+        } else {
+            auto const flatten = [&](auto const &array, auto *values, uint8_t arity) {
+                plane.arity = arity;
+                elements = array.size();
+                values->reserve(elements * arity);
+                for (auto const &element : array)
+                    for (uint8_t component = 0; component < arity; ++component)
+                        values->push_back(element[component]);
+            };
+            if (value.IsHolding<VtVec2fArray>()) {
+                plane.type = usdGen::UsdGenAuthoredPlaneType::Float32;
+                flatten(value.UncheckedGet<VtVec2fArray>(), &plane.floatValues, 2);
+            } else if (value.IsHolding<VtVec3fArray>()) {
+                plane.type = usdGen::UsdGenAuthoredPlaneType::Float32;
+                flatten(value.UncheckedGet<VtVec3fArray>(), &plane.floatValues, 3);
+            } else if (value.IsHolding<VtVec4fArray>()) {
+                plane.type = usdGen::UsdGenAuthoredPlaneType::Float32;
+                flatten(value.UncheckedGet<VtVec4fArray>(), &plane.floatValues, 4);
+            } else if (value.IsHolding<VtVec2iArray>()) {
+                plane.type = usdGen::UsdGenAuthoredPlaneType::Int32;
+                flatten(value.UncheckedGet<VtVec2iArray>(), &plane.intValues, 2);
+            } else if (value.IsHolding<VtVec3iArray>()) {
+                plane.type = usdGen::UsdGenAuthoredPlaneType::Int32;
+                flatten(value.UncheckedGet<VtVec3iArray>(), &plane.intValues, 3);
+            } else if (value.IsHolding<VtVec4iArray>()) {
+                plane.type = usdGen::UsdGenAuthoredPlaneType::Int32;
+                flatten(value.UncheckedGet<VtVec4iArray>(), &plane.intValues, 4);
+            }
+        }
+        bool valid = values && plane.arity != 0 && elements == expected;
+        if (nativeClump) {
+            std::string const &n = name.GetString();
+            if (n.rfind("clumpId_", 0) == 0)
+                valid = valid && plane.type == usdGen::UsdGenAuthoredPlaneType::Int32 &&
+                        plane.arity == 1 && interpolation == TfToken("uniform");
+            else if (n.rfind("clumpCenter_", 0) == 0)
+                valid = valid && plane.type == usdGen::UsdGenAuthoredPlaneType::Float32 &&
+                        plane.arity == 3 && interpolation == TfToken("uniform");
+            else if (n.rfind("clumpCenterId_", 0) == 0)
+                valid = valid && plane.type == usdGen::UsdGenAuthoredPlaneType::Int32 &&
+                        plane.arity == 2 && interpolation == TfToken("uniform");
+            else
+                valid = valid && plane.type == usdGen::UsdGenAuthoredPlaneType::Float32 &&
+                        plane.arity == 1 && interpolation == TfToken("vertex");
+        }
+        if (!valid) {
+            if (!nativeClump) continue;
+            if (errors) errors->push_back(path.GetString() +
+                ": malformed native Clump primvar '" + name.GetString() + "'");
+            plane.type = usdGen::UsdGenAuthoredPlaneType::Float32;
+            plane.arity = 0;
+            plane.floatValues.clear();
+            plane.intValues.clear();
+        }
+        out->authoredPlanes.push_back(std::move(plane));
     }
-    VtValue const value = values->GetValue(t);
-    if (!value.IsHolding<VtIntArray>()) return;
-    VtIntArray const &integers = value.UncheckedGet<VtIntArray>();
-    if (integers.size() != out->curveVertexCounts.size()) return;
-
-    usdGen::UsdGenAuthoredPlaneDesc plane;
-    plane.name = name;
-    plane.type = usdGen::UsdGenAuthoredPlaneType::Int32;
-    plane.domain = usdGen::UsdGenAuthoredPlaneDomain::Primitive;
-    plane.arity = 1;
-    plane.intValues = integers;
-    out->authoredPlanes.push_back(std::move(plane));
 }
 
 template <class T>
@@ -902,7 +990,8 @@ _HBuildSurfaceCagePayload(HdContainerDataSourceHandle const &root,
 
 void
 _HBuildCurveSet(HdSceneIndexBase &input, SdfPath const &path,
-                UsdGenRole role, _HdTime t, UsdGenCurveSetDesc *out)
+                UsdGenRole role, _HdTime t, UsdGenCurveSetDesc *out,
+                std::vector<std::string> *errors)
 {
     HdContainerDataSourceHandle primDs;
     if (!_HPrim(input, path, &primDs, nullptr)) {
@@ -984,9 +1073,9 @@ _HBuildCurveSet(HdSceneIndexBase &input, SdfPath const &path,
     _HPrimvarTyped(primDs, "usdGen:rootFrame", t, &out->rootFrame);
 
     _HForwardSourceColor(primDs, t, out);
-    _HForwardOwnershipPlane(primDs, TfToken("tubeId"), t, out);
-    _HForwardOwnershipPlane(primDs, TfToken("regionId"), t, out);
-    _HForwardOwnershipPlane(primDs, TfToken("hierarchyLevel"), t, out);
+    _HForwardAuthoredPlanes(primDs, path, t, out, errors);
+    std::sort(out->authoredPlanes.begin(), out->authoredPlanes.end(),
+        [](auto const &a, auto const &b) { return a.name < b.name; });
 
     TfToken curveRole;
     _HPrimvarTyped(primDs, "usdGen:role", t, &curveRole);
@@ -1587,7 +1676,7 @@ CaptureGraphDescFromHydra(
         auto it = curveIndex.find(p.GetString());
         if (it == curveIndex.end()) {
             UsdGenCurveSetDesc cs;
-            _HBuildCurveSet(input, p, role, t, &cs);
+            _HBuildCurveSet(input, p, role, t, &cs, &desc.validationErrors);
             it = curveIndex.emplace(p.GetString(), desc.curveSets.size())
                      .first;
             desc.curveSets.push_back(std::move(cs));

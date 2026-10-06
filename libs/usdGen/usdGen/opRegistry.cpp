@@ -61,7 +61,8 @@ bool UsdGenOpRegistry::Register(TfToken const &type, Factory factory)
     if (!probe) return false;
     _entries.push_back(Entry{type, std::move(factory),
                              probe->GeometryInputArity(),
-                             probe->ReferenceInputs().size(), probe->Role()});
+                             probe->ReferenceInputs().size(), probe->Role(),
+                             probe->ReadsTime(), probe->SamplesFrameInputs()});
     return true;
 }
 
@@ -84,6 +85,20 @@ bool UsdGenOpRegistry::HasKernel(TfToken const &type) const
 {
     for (auto const& entry : _entries)
         if (entry.type == type && entry.factory) return true;
+    return false;
+}
+
+bool UsdGenOpRegistry::ReadsTime(TfToken const &type) const
+{
+    for (Entry const &entry : _entries)
+        if (entry.type == type) return entry.readsTime;
+    return false;
+}
+
+bool UsdGenOpRegistry::SamplesFrameInputs(TfToken const &type) const
+{
+    for (Entry const &entry : _entries)
+        if (entry.type == type) return entry.samplesFrameInputs;
     return false;
 }
 

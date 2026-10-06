@@ -892,6 +892,23 @@ CompileVulkanSourceWidthPlan(UsdGenGraphDesc const &original, UsdGenDiagnostics 
     auto const &sourceNode = desc.nodes[sourceIndex];
     if (!ValidateSource(desc, sourceNode, &source, &sourceControls, diagnostics))
         return {};
+    // Imported CurveSource planes can contain a baked native Clump quartet
+    // without a Clump node in this graph. Vulkan Noise currently transports
+    // those named channels but does not consume the motion weights, so a plan
+    // would silently produce ungrouped field samples. ID-only legacy inputs
+    // have no weight and retain the existing Noise behavior.
+    bool const weightedClump = std::any_of(source->authoredPlanes.begin(),
+        source->authoredPlanes.end(), [](auto const &plane) {
+            return plane.name.GetString().rfind("clumpWeight_", 0) == 0;
+        });
+    bool reachableNoise = false;
+    for (size_t i = 0; i < desc.nodes.size(); ++i)
+        reachableNoise = reachableNoise ||
+            (reachable[i] && desc.nodes[i].type == TfToken("UsdGenNoise"));
+    if (weightedClump && reachableNoise) {
+        Fail(diagnostics, "Noise does not support imported clump motion planes");
+        return {};
+    }
     {
         std::vector<ExprVkStageBinding> bindings;
         std::vector<std::string> errors;

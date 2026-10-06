@@ -11,6 +11,7 @@
 // zero-length axis bends nothing. All work is per curve/CV in Evaluate;
 // Capture only validates.
 #include "usdGen/ops/bend.h"
+#include "usdGen/clumpMotion.h"
 
 #include "usdGen/opParams.h"
 #include "usdGenMath/usdGenMath/hash.h"
@@ -34,6 +35,8 @@ namespace {
 
 struct UsdGenBendCapture final : public UsdGenCapturePayload
 {
+    UsdGenClumpMotion clumpMotion;
+    std::vector<std::vector<float>> groupDraws;
     std::unique_ptr<UsdGenCapture> Clone() const override
     {
         return std::make_unique<UsdGenBendCapture>(*this);
@@ -151,7 +154,23 @@ bool UsdGenBendOp::Capture(
     UsdGenCapture *out,
     UsdGenDiagnostics *diag)
 {
-    TF_UNUSED(out);
+    auto &cap = *static_cast<UsdGenBendCapture *>(out);
+    std::string clumpError;
+    auto const *prior = dynamic_cast<UsdGenBendCapture const *>(ctx.previousCapture);
+    auto const *previousMotion = prior ? &prior->clumpMotion :
+        (cap.clumpMotion.levels.empty() ? nullptr : &cap.clumpMotion);
+    if (!UsdGenBuildClumpMotion(upstream, &cap.clumpMotion, &clumpError,
+                                previousMotion)) {
+        if (diag) diag->Error("UsdGenBend: " + clumpError);
+        return false;
+    }
+    cap.groupDraws.clear();
+    for (auto const &level : cap.clumpMotion.levels) {
+        auto &draws = cap.groupDraws.emplace_back();
+        draws.reserve(level.groups.size());
+        for (auto const &group : level.groups)
+            draws.push_back(UsdGenDraw01(int(ctx.seed), group.centerId, kSaltBend));
+    }
     UsdGenParamView const *p = ctx.params ? &*ctx.params : nullptr;
     if (!p) return true;
     if (!Bind(*p, diag)) return false;
@@ -216,7 +235,7 @@ void UsdGenBendOp::Evaluate(
     UsdGenCapture const &captureIn,
     UsdGenChunkView *view) const
 {
-    TF_UNUSED(captureIn);
+    auto const &cap = static_cast<UsdGenBendCapture const &>(captureIn);
     UsdGenParamView const *p = ctx.params ? &*ctx.params : nullptr;
     UsdGenParamField const angleField =
         p ? p->GetScalarField(sAngle, 0.0) : UsdGenParamField{0.0};
@@ -273,8 +292,7 @@ void UsdGenBendOp::Evaluate(
             if (lo > hi) std::swap(lo, hi);
         }
         uint64_t const id = curveId ? curveId[c] : 0;
-        float const draw = UsdGenDraw01(int(ctx.seed), id, kSaltBend);
-        float const mult = float(lo + (hi - lo) * double(draw));
+        float const individualDraw = UsdGenDraw01(int(ctx.seed), id, kSaltBend);
         // Per-curve bend axis. A zero-length axis bends nothing.
         GfVec3f axis(0.0f);
         if (attributeMode) {
@@ -313,6 +331,20 @@ void UsdGenBendOp::Evaluate(
         float cumul = 0.0f;   // cumulative bend in radians
         float prevR = 0.0f;   // R(t_{-1}) := 0, so a flat ramp bends at the root
         for (size_t k = 0; k + 1 < n; ++k) {
+            float draw = individualDraw;
+            float remaining = 1.0f;
+            for (size_t li = cap.clumpMotion.levels.size(); li-- > 0 && remaining > 0.0f;) {
+                auto const &level = cap.clumpMotion.levels[li];
+                if (level.weight.empty() || curve >= level.groupForCurve.size()) continue;
+                uint32_t const group = level.groupForCurve[curve];
+                if (group == UINT32_MAX || group >= level.groups.size()) continue;
+                // Segment k controls CV k+1; sample cohesion at that CV so
+                // a root-locked clump can still move its first free segment.
+                float const portion = remaining * level.weight[cvBase + g + k + 1];
+                draw += portion * (cap.groupDraws[li][group] - individualDraw);
+                remaining -= portion;
+            }
+            float const mult = float(lo + (hi - lo) * double(draw));
             float const angleK =
                 static_cast<float>(angleField.Value(curve, cvBase + g + k));
             float const maskK = std::clamp(

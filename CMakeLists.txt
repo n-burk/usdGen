@@ -20,6 +20,14 @@ else()
     option(USDGEN_BUILD_TESTS "Build the usdGen test and benchmark targets" ON)
 endif()
 
+# The USD install the tests RUN against: its bin/lib go on the test
+# loader path and its plugin/python/tool paths feed the test
+# environment. This is USD_INSTALL_DIR unless that is a CMake shim
+# rather than a real install (as with the Houdini build, where the
+# shim lives in cmake/houdini but the binaries come from HOUDINI_ROOT).
+set(USDGEN_TEST_USD_DIR "${USD_INSTALL_DIR}"
+    CACHE PATH "USD install whose binaries the tests run against")
+
 # ---------------------------------------------------------------------------
 # OpenUSD discovery
 # ---------------------------------------------------------------------------
@@ -480,7 +488,7 @@ target_include_directories(usdGenImaging PUBLIC
 target_link_libraries(usdGenImaging
     PUBLIC hd hdsi hf usd usdGeom usdShade sdr usdImaging
            sdf tf gf vt trace pxOsd usdGen
-    PRIVATE hio
+    PRIVATE hio js
     PRIVATE usdGenSchema)
 set_target_properties(usdGenImaging PROPERTIES
     CXX_VISIBILITY_PRESET default
@@ -705,6 +713,23 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
 if(_usdgen_pomade_tools_icons)
     file(COPY ${_usdgen_pomade_tools_icons}
         DESTINATION "${_usdgen_pomade_tools_resources}/icons")
+endif()
+
+# Localized Noodles usdview editor. Its native bindings need OpenUSD's Python
+# and graphics libraries; the editor remains optional for headless builds.
+if(NOT CMAKE_CROSSCOMPILING AND TARGET python AND TARGET garch AND TARGET glf)
+    set(_usdgen_noodles_default ON)
+else()
+    set(_usdgen_noodles_default OFF)
+endif()
+option(USDGEN_BUILD_USDNOODLES "Build the Noodles usdview editor"
+    ${_usdgen_noodles_default})
+if(USDGEN_BUILD_USDNOODLES)
+    if(NOT TARGET python OR NOT TARGET garch OR NOT TARGET glf)
+        message(FATAL_ERROR
+            "USDGEN_BUILD_USDNOODLES requires OpenUSD Python and graphics libraries")
+    endif()
+    add_subdirectory(plugin/usdNoodles)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -1227,9 +1252,9 @@ endfunction()
 # OpenUSD's Windows install splits its runtime in two: the usd_*.dll core
 # lands in lib/ while the bundled third-party DLLs (tbb, embree, ...) land in
 # bin/, so both directories are needed there.
-set(USDGEN_TEST_RUNTIME_DIRS "${USD_INSTALL_DIR}/lib")
+set(USDGEN_TEST_RUNTIME_DIRS "${USDGEN_TEST_USD_DIR}/lib")
 if(WIN32)
-    list(APPEND USDGEN_TEST_RUNTIME_DIRS "${USD_INSTALL_DIR}/bin")
+    list(APPEND USDGEN_TEST_RUNTIME_DIRS "${USDGEN_TEST_USD_DIR}/bin")
 endif()
 list(APPEND USDGEN_TEST_RUNTIME_DIRS "$<TARGET_FILE_DIR:usdGen>")
 
@@ -1237,6 +1262,10 @@ add_executable(testUsdGenExecutionPipeline tests/testUsdGenExecutionPipeline.cpp
 target_link_libraries(testUsdGenExecutionPipeline PRIVATE usdGen)
 add_test(NAME testUsdGenExecutionPipeline COMMAND testUsdGenExecutionPipeline)
 set_tests_properties(testUsdGenExecutionPipeline PROPERTIES LABELS "T1;scheduling;sessions" TIMEOUT 30)
+add_executable(testUsdGenCutFailure tests/testUsdGenCutFailure.cpp)
+target_link_libraries(testUsdGenCutFailure PRIVATE usdGen)
+add_test(NAME testUsdGenCutFailure COMMAND testUsdGenCutFailure)
+set_tests_properties(testUsdGenCutFailure PROPERTIES LABELS "T0;scheduling;collision" TIMEOUT 30)
 add_executable(testUsdGenExecutionSequenceWindow tests/testUsdGenExecutionSequenceWindow.cpp)
 target_link_libraries(testUsdGenExecutionSequenceWindow PRIVATE usdGen)
 add_test(NAME testUsdGenExecutionSequenceWindow COMMAND testUsdGenExecutionSequenceWindow)
@@ -2155,6 +2184,10 @@ set_tests_properties(testUsdGenDirtyRouterDensity PROPERTIES
 add_executable(testUsdGenIncrementalCapture tests/testUsdGenIncrementalCapture.cpp)
 add_executable(testUsdGenCaptureCache tests/testUsdGenCaptureCache.cpp)
 add_executable(testUsdGenAsyncScenePublication tests/testUsdGenAsyncScenePublication.cpp)
+add_executable(testUsdGenPlaybackStatus tests/testUsdGenPlaybackStatus.cpp)
+target_link_libraries(testUsdGenPlaybackStatus PRIVATE usdGenImaging usdGen js)
+add_test(NAME testUsdGenPlaybackStatus COMMAND testUsdGenPlaybackStatus)
+set_tests_properties(testUsdGenPlaybackStatus PROPERTIES LABELS "T1;imaging;playback" TIMEOUT 60)
 target_link_libraries(testUsdGenAsyncScenePublication PRIVATE usdGenImaging usdGen)
 add_test(NAME testUsdGenAsyncScenePublication COMMAND testUsdGenAsyncScenePublication)
 set_tests_properties(testUsdGenAsyncScenePublication PROPERTIES
@@ -2735,7 +2768,7 @@ add_test(NAME testUsdGenChainOrder COMMAND testUsdGenChainOrder)
 usdgen_test_pluginpath_ops(_usdgen_chain_order_env
     "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
     "${_usdgen_pomade_resources}" "${_fake_prman_resources}"
-    "${USD_INSTALL_DIR}/plugin/usd" "${USD_INSTALL_DIR}/lib/usd")
+    "${USDGEN_TEST_USD_DIR}/plugin/usd" "${USDGEN_TEST_USD_DIR}/lib/usd")
 # The loader path is applied to every test by the sweep at the end of this
 # block, so only the plugin search path is per-test here.
 set_tests_properties(testUsdGenChainOrder PROPERTIES
@@ -2776,12 +2809,13 @@ set_tests_properties(testUsdGenPluginDiscovery PROPERTIES
 set(_usdgen_m1_pluginpath_dirs
     "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
     "${_usdgen_shader_resources}"
-    "${USD_INSTALL_DIR}/plugin/usd" "${USD_INSTALL_DIR}/lib/usd")
+    "${USDGEN_TEST_USD_DIR}/plugin/usd" "${USDGEN_TEST_USD_DIR}/lib/usd")
 usdgen_test_pluginpath_ops(_usdgen_m1_env ${_usdgen_m1_pluginpath_dirs})
 
 # M1 T0 engine tests (no Hydra, no stage — gate B-1 keeps them clean).
 foreach(_t testUsdGenGraph testUsdGenKernelDeterminism testUsdGenWidth
            testUsdGenCpuFanout testUsdGenCpuReferenceMap testUsdGenCurveRagged
+           testUsdGenClumpMotion
            testUsdGenCpuCurveSource testUsdGenLengthRaggedLayout testUsdGenSurfaceRootFrames
            testUsdGenSurfaceRootBindings testUsdGenSurfaceRootBindingBoundaries
            testUsdGenSurfaceBindingCache testUsdGenScatterDensity testUsdGenLimitScatter)
@@ -2794,6 +2828,10 @@ set_tests_properties(testUsdGenGraph PROPERTIES LABELS "T0;gate:E-6")
 set_tests_properties(testUsdGenKernelDeterminism PROPERTIES LABELS "T0;gate:E-8")
 set_tests_properties(testUsdGenWidth PROPERTIES LABELS "T0")
 set_tests_properties(testUsdGenCpuFanout PROPERTIES LABELS "T0;scheduling;dag")
+set_tests_properties(testUsdGenClumpMotion PROPERTIES LABELS "T0;clump;motion;topology")
+add_executable(benchUsdGenClumpMotion tests/perf/benchUsdGenClumpMotion.cpp)
+target_link_libraries(benchUsdGenClumpMotion PRIVATE usdGen)
+# Informational benchmark: run manually on an otherwise quiet host.
 set_tests_properties(testUsdGenCpuReferenceMap PROPERTIES LABELS "T0;scheduling;reference;map")
 set_tests_properties(testUsdGenCurveRagged PROPERTIES LABELS "T0;topology;cow;sources")
 set_tests_properties(testUsdGenCpuCurveSource PROPERTIES LABELS "T0;topology;cow;sources")
@@ -2824,6 +2862,7 @@ set_tests_properties(benchUsdGenSurfaceBindings PROPERTIES
 # M1 T1 imaging tests (scene index over the real UsdImaging chain).
 foreach(_t testUsdGenTileContract testUsdGenStockStormContract testUsdGenInvalidation testUsdGenScheduling
            testUsdGenSnapshotRace testUsdGenPopulation testUsdGenAdapter testUsdGenScenePublication
+           testUsdGenNativeTimePublication
            testUsdGenRestAdapter testUsdGenCurveRestAdapter testUsdGenContracts
            testUsdGenExpressionPrimConnection testUsdGenViewportOverlay testUsdGenFurOcclusion
            testUsdGenSourceColor testUsdGenLookPrimvars
@@ -2846,6 +2885,10 @@ set_tests_properties(testUsdGenPaintLengthRecook PROPERTIES
     LABELS "T1;imaging;paint;brush" TIMEOUT 120)
 set_tests_properties(testUsdGenScenePublication PROPERTIES
     LABELS "T1;scheduling;imaging;scene-owner" TIMEOUT 60)
+set_tests_properties(testUsdGenNativeTimePublication PROPERTIES
+    LABELS "T1;scheduling;imaging;operators")
+target_compile_definitions(testUsdGenNativeTimePublication PRIVATE
+    USDGEN_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 set_tests_properties(testUsdGenDormantGroom PROPERTIES
     LABELS "T1;scheduling;imaging;scene-owner" TIMEOUT 60)
 set_tests_properties(testUsdGenInvalidation PROPERTIES LABELS "T1;gate:SI-2")
@@ -3035,6 +3078,8 @@ foreach(_styler_test Direction Smooth Resample Scale Straighten Displace SculptL
     set_tests_properties(testUsdGen${_styler_test} PROPERTIES
         LABELS "T0;operators;expressions" TIMEOUT 120)
 endforeach()
+target_compile_definitions(testUsdGenCollide PRIVATE
+    USDGEN_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 # testUsdGenScale recomputes UsdGenDraw01 expectations; usdGenMath is PRIVATE
 # to usdGen (N-7), so the test links it explicitly (CudaCurveGrowSession
 # precedent).
@@ -3152,7 +3197,7 @@ elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/testUsdGenSchemaUpToDate.cpp")
     target_compile_definitions(testUsdGenSchemaUpToDate PRIVATE
         USDGEN_TEST_SCHEMA_USDA="${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGenSchema/schema.usda"
         USDGEN_TEST_SCHEMA_RESOURCES="${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenSchema/resources"
-        USDGEN_TEST_USD_GEN_SCHEMA_TOOL="${USD_INSTALL_DIR}/bin/usdGenSchema")
+        USDGEN_TEST_USD_GEN_SCHEMA_TOOL="${USDGEN_TEST_USD_DIR}/bin/usdGenSchema")
     add_test(NAME testUsdGenSchemaUpToDate COMMAND testUsdGenSchemaUpToDate)
     set(_usdgen_schema_uptodate_props SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 else()
@@ -3332,7 +3377,7 @@ if(_usdgen_test_python AND EXISTS "${USD_INSTALL_DIR}/bin/testusdview")
     usdgen_test_pluginpath_ops(_usdgen_tools_plugin_env
         "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
         "${_usdgen_shader_resources}" "${_usdgen_tools_resources}"
-        "${USD_INSTALL_DIR}/plugin/usd" "${USD_INSTALL_DIR}/lib/usd")
+        "${USDGEN_TEST_USD_DIR}/plugin/usd" "${USDGEN_TEST_USD_DIR}/lib/usd")
     # Both python package layouts OpenUSD installs on Windows/POSIX, plus
     # build/python where the usdGenTools package is staged. Last, the
     # nanousd scrub (bin/launch_env/sitecustomize.py): the last prepend
@@ -3340,7 +3385,7 @@ if(_usdgen_test_python AND EXISTS "${USD_INSTALL_DIR}/bin/testusdview")
     # nanousd editable install cannot shadow the prefix's pxr. A no-op
     # where nanousd is absent.
     usdgen_test_path_list_ops(_usdgen_tools_python_env PYTHONPATH path_list_prepend
-        "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages"
+        "${USDGEN_TEST_USD_DIR}/lib/python" "${USDGEN_TEST_USD_DIR}/Lib/site-packages"
         "${CMAKE_CURRENT_BINARY_DIR}/python"
         "${CMAKE_CURRENT_SOURCE_DIR}/bin/launch_env")
     set_tests_properties(testUsdGenToolsExprEditor PROPERTIES
@@ -3396,11 +3441,11 @@ if(_usdgen_test_python AND EXISTS "${USD_INSTALL_DIR}/bin/testusdview")
         "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
         "${_usdgen_shader_resources}"
         "${_usdgen_pomade_resources}" "${_usdgen_pomade_tools_resources}"
-        "${USD_INSTALL_DIR}/plugin/usd" "${USD_INSTALL_DIR}/lib/usd")
+        "${USDGEN_TEST_USD_DIR}/plugin/usd" "${USDGEN_TEST_USD_DIR}/lib/usd")
     # bin/launch_env last so its sitecustomize lands first on PYTHONPATH and
     # scrubs a nanousd editable install's pxr shadow (no-op otherwise).
     usdgen_test_path_list_ops(_usdgen_pomade_python_env PYTHONPATH path_list_prepend
-        "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages"
+        "${USDGEN_TEST_USD_DIR}/lib/python" "${USDGEN_TEST_USD_DIR}/Lib/site-packages"
         "${CMAKE_CURRENT_BINARY_DIR}/python"
         "${CMAKE_CURRENT_SOURCE_DIR}/bin/launch_env")
     set_tests_properties(testUsdviewPomadeGraph PROPERTIES
@@ -3751,18 +3796,28 @@ if(_usdgen_test_python)
     usdgen_test_pluginpath_ops(_usdgen_toolsapi_plugin_env
         "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
         "${_usdgen_shader_resources}" "${_usdgen_tools_resources}"
-        "${USD_INSTALL_DIR}/plugin/usd" "${USD_INSTALL_DIR}/lib/usd")
+        "${USDGEN_TEST_USD_DIR}/plugin/usd" "${USDGEN_TEST_USD_DIR}/lib/usd")
     # bin/launch_env last: the last prepend lands first on PYTHONPATH, so
     # its sitecustomize scrubs a nanousd editable install's pxr shadow
     # before the test imports (a no-op where nanousd is absent).
     usdgen_test_path_list_ops(_usdgen_toolsapi_python_env PYTHONPATH path_list_prepend
-        "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages"
+        "${USDGEN_TEST_USD_DIR}/lib/python" "${USDGEN_TEST_USD_DIR}/Lib/site-packages"
         "${CMAKE_CURRENT_BINARY_DIR}/python"
         "${CMAKE_CURRENT_SOURCE_DIR}/bin/launch_env")
     set_tests_properties(testUsdGenToolsExprApi PROPERTIES
         LABELS "T1;tools;expressions" TIMEOUT 120
         FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
         ENVIRONMENT_MODIFICATION "${_usdgen_toolsapi_plugin_env};${_usdgen_toolsapi_python_env}")
+
+    # The Qt-free half of the brush tool -- the map/stroke twin, camera
+    foreach(_playback_test PlaybackState PlaybackFlow FrameStatusApi)
+        add_test(NAME testUsdGen${_playback_test}
+            COMMAND "${_usdgen_test_python}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/testenv/testUsdGen${_playback_test}.py")
+        set_tests_properties(testUsdGen${_playback_test} PROPERTIES
+            LABELS "T1;tools;playback" TIMEOUT 60
+            FAIL_REGULAR_EXPRESSION "FAIL:|Traceback")
+    endforeach()
 
     # The Qt-free half of the brush tool -- the map/stroke twin, camera
     # maths, CPU surface pick, bind/bake authoring, session preview, the
@@ -3882,7 +3937,7 @@ if(_usdgen_test_python)
     # The soak imports the prefix's pxr through pomadeLib; bin/launch_env
     # first so its sitecustomize scrubs a nanousd editable install's shadow.
     usdgen_test_path_list_ops(_usdgen_pomadesoak_python_env PYTHONPATH path_list_prepend
-        "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages"
+        "${USDGEN_TEST_USD_DIR}/lib/python" "${USDGEN_TEST_USD_DIR}/Lib/site-packages"
         "${CMAKE_CURRENT_SOURCE_DIR}/bin/launch_env")
     set_tests_properties(testPomadeSoak PROPERTIES
         LABELS "T4;pomade;tools;gate:TN-5" TIMEOUT 2400
@@ -3995,7 +4050,7 @@ if(_usdgen_test_python)
         COMMAND "${_usdgen_test_python}"
             "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenPomadeTools/testenv/testUsdGenPomadeToolsBridge.py")
     usdgen_test_path_list_ops(_usdgen_pomadebridge_python_env PYTHONPATH path_list_prepend
-        "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages"
+        "${USDGEN_TEST_USD_DIR}/lib/python" "${USDGEN_TEST_USD_DIR}/Lib/site-packages"
         "${CMAKE_CURRENT_SOURCE_DIR}/bin/launch_env")
     set_tests_properties(testUsdGenPomadeToolsBridge PROPERTIES
         LABELS "T1;pomade;tools" TIMEOUT 120
@@ -4014,7 +4069,7 @@ if(_usdgen_test_python)
         COMMAND "${_usdgen_test_python}"
             "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenPomadeTools/testenv/testUsdGenPomadeToolsStage.py")
     usdgen_test_path_list_ops(_usdgen_pomadestage_python_env PYTHONPATH path_list_prepend
-        "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages"
+        "${USDGEN_TEST_USD_DIR}/lib/python" "${USDGEN_TEST_USD_DIR}/Lib/site-packages"
         "${CMAKE_CURRENT_SOURCE_DIR}/bin/launch_env")
     set_tests_properties(testUsdGenPomadeToolsStage PROPERTIES
         LABELS "T1;pomade;tools" TIMEOUT 120
@@ -4048,9 +4103,9 @@ if(_usdgen_test_python)
     usdgen_test_pluginpath_ops(_usdgen_hair_plugin_env
         "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
         "${_usdgen_shader_resources}"
-        "${USD_INSTALL_DIR}/plugin/usd" "${USD_INSTALL_DIR}/lib/usd")
+        "${USDGEN_TEST_USD_DIR}/plugin/usd" "${USDGEN_TEST_USD_DIR}/lib/usd")
     usdgen_test_path_list_ops(_usdgen_hair_python_env PYTHONPATH path_list_prepend
-        "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages"
+        "${USDGEN_TEST_USD_DIR}/lib/python" "${USDGEN_TEST_USD_DIR}/Lib/site-packages"
         "${CMAKE_CURRENT_BINARY_DIR}/python"
         "${CMAKE_CURRENT_SOURCE_DIR}/bin/launch_env")
 

@@ -1,0 +1,452 @@
+{
+  "version": 1,
+  "operators": {
+    "UsdGenClump": {
+      "image": "docs/site/media/clump.png",
+      "caption": "Clump centers draw nearby tips together while the roots stay separate.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "scene": "examples/docs/operators/clump.usda",
+      "generator": "tools/docs/render_pathtraced.py",
+      "provenance": "The checked-in procedural USD scene was cooked by the usdGen compiler and scheduler into native BasisCurves using tools/docs/bake_groom.cpp, then path-traced by MoonRay with the authored Preview material. No illustrative geometry was substituted.",
+      "animation": "docs/site/media/clump.gif",
+      "animationProvenance": "Seven live Storm scene-index captures sweep usdGen:clump:amount with fixed seed, camera and lighting; reverse playback reuses captured frames.",
+      "sceneSha256": "de639659dd927f660a71dca5c705f835d7dd758a3ef7baa435fa4d69a3699683",
+      "imageSha256": "ae554659d6c8d7e0de13971a0df9d2fbebc3d5b9e69ba71d4d493047dc512f9d",
+      "animationSha256": "1b0877a12a9821176f1701ecc481e64b10a46df7f446a9ebcc6bb1e24313f3c1"
+    },
+    "UsdGenScatter": {
+      "image": "docs/site/media/scatter.png",
+      "caption": "Evenly distributed root sites shown as short upright fur.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "scene": "examples/docs/operators/scatter.usda",
+      "generator": "tools/docs/render_pathtraced.py",
+      "provenance": "The checked-in procedural USD scene was cooked by the usdGen compiler and scheduler into native BasisCurves using tools/docs/bake_groom.cpp, then path-traced by MoonRay with the authored Preview material. No illustrative geometry was substituted.",
+      "sceneSha256": "c3a05cccd9cba66cabc35baa433cb3f816f5f47c107f637dfc08f1f9a3317bf7",
+      "imageSha256": "40012e2b817b428a249b1b40436b25f554335639a5bfd12e6f978680968fcd82"
+    },
+    "UsdGenGrow": {
+      "image": "docs/site/media/grow.png",
+      "caption": "Scatter roots grown into 18-CV strands with a combed lean.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "scene": "examples/docs/operators/grow.usda",
+      "generator": "tools/docs/render_pathtraced.py",
+      "provenance": "The checked-in procedural USD scene was cooked by the usdGen compiler and scheduler into native BasisCurves using tools/docs/bake_groom.cpp, then path-traced by MoonRay with the authored Preview material. No illustrative geometry was substituted.",
+      "sceneSha256": "c5a0560fe870a892afc03ed881c613826a3e3733de3b7525b7b47a3b6f9dad91",
+      "imageSha256": "442e30a674e9cec7626d6d8224d85e2df1f236bfef6583658d7b635315966721"
+    },
+    "UsdGenReferenceSource": {
+      "image": "docs/site/media/reference-source.png",
+      "caption": "A baked in-stage C3 snapshot enters through ReferenceSource.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "scene": "examples/docs/operators/reference-source.usda",
+      "generator": "tools/docs/render_pathtraced.py",
+      "provenance": "The checked-in procedural USD scene was cooked by the usdGen compiler and scheduler into native BasisCurves using tools/docs/bake_groom.cpp, then path-traced by MoonRay with the authored Preview material. No illustrative geometry was substituted.",
+      "sceneSha256": "df6ad18889764f048f6b71b4b9d31315766ee856590f3cd97595302028d153f1",
+      "imageSha256": "41392319574cf3ab5b29358d003f5ca76896ae5855193987824372581f4c7c9c"
+    },
+    "UsdGenCurveSource": {
+      "image": "docs/site/media/curve-source.png",
+      "caption": "Authored C3 curves enter the stack through CurveSource.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "scene": "examples/docs/operators/curve-source.usda",
+      "generator": "tools/docs/render_pathtraced.py",
+      "provenance": "The checked-in procedural USD scene was cooked by the usdGen compiler and scheduler into native BasisCurves using tools/docs/bake_groom.cpp, then path-traced by MoonRay with the authored Preview material. No illustrative geometry was substituted.",
+      "sceneSha256": "af14dc4f051ad6130a37b0e417402bacfcdbc4244f9acd1dc4878dc1a6109884",
+      "imageSha256": "80ade5960e02b0c481c4c884e0b67b4c160a5967483d985f293328d5c301a9b4"
+    },
+    "UsdGenNoise": {
+      "image": "docs/site/media/noise.png",
+      "caption": "Tip-weighted noise breaks up the smooth combed profile.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "scene": "examples/docs/operators/noise.usda",
+      "generator": "tools/docs/render_pathtraced.py",
+      "provenance": "The checked-in procedural USD scene was cooked by the usdGen compiler and scheduler into native BasisCurves using tools/docs/bake_groom.cpp, then path-traced by MoonRay with the authored Preview material. No illustrative geometry was substituted.",
+      "sceneSha256": "4eaf49b6a6bf9b313a53212279214c4bc8369210cbd428cdac4fede373a38a74",
+      "imageSha256": "1612b72f9f4571d668242694776f2ed09906972a7d9c6a7b84d956de0ec5b9e5"
+    },
+    "UsdGenLength": {
+      "image": "docs/site/media/length.png",
+      "caption": "Set mode gives each strand a shorter absolute length with stable variation.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "scene": "examples/docs/operators/length.usda",
+      "generator": "tools/docs/render_pathtraced.py",
+      "provenance": "The checked-in procedural USD scene was cooked by the usdGen compiler and scheduler into native BasisCurves using tools/docs/bake_groom.cpp, then path-traced by MoonRay with the authored Preview material. No illustrative geometry was substituted.",
+      "sceneSha256": "f3bfab21eb215863fd6975260589b1c33a8f16e3d484995b8e6ba955a7ba6a74",
+      "imageSha256": "970e749059eaa0c54189e6ac2fb6d22590425852deaf034ea59fa157adbdec1c"
+    },
+    "UsdGenWidth": {
+      "image": "docs/site/media/width.png",
+      "caption": "A fine root profile tapers nearly to zero at the tip.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "scene": "examples/docs/operators/width.usda",
+      "generator": "tools/docs/render_pathtraced.py",
+      "provenance": "The checked-in procedural USD scene was cooked by the usdGen compiler and scheduler into native BasisCurves using tools/docs/bake_groom.cpp, then path-traced by MoonRay with the authored Preview material. No illustrative geometry was substituted.",
+      "sceneSha256": "a98a33346054aadb9d8702f3783d954ab5e042b34ba985416444b6f828248ea0",
+      "imageSha256": "e726066cac5a2b018e43e8248bcf17e1439c63a7b204a16c6bbb80befee4dd88"
+    },
+    "UsdGenDirection": {
+      "image": "docs/site/media/direction.png",
+      "caption": "Direction combs the leaning input toward a more upright target.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "scene": "examples/docs/operators/direction.usda",
+      "generator": "tools/docs/render_pathtraced.py",
+      "provenance": "The checked-in procedural USD scene was cooked by the usdGen compiler and scheduler into native BasisCurves using tools/docs/bake_groom.cpp, then path-traced by MoonRay with the authored Preview material. No illustrative geometry was substituted.",
+      "sceneSha256": "c3465a8b16cf28d32116678cc8274f903c29a1033f77ae3f140160116e07734a",
+      "imageSha256": "46025ab7d54ba968da6403a8ee2679508beb4e888ad78dae0744a59c23ea086e"
+    },
+    "UsdGenSmooth": {
+      "image": "docs/site/media/smooth.png",
+      "caption": "Smooth relaxes the strong upstream noise along each strand.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "scene": "examples/docs/operators/smooth.usda",
+      "generator": "tools/docs/render_pathtraced.py",
+      "provenance": "The checked-in procedural USD scene was cooked by the usdGen compiler and scheduler into native BasisCurves using tools/docs/bake_groom.cpp, then path-traced by MoonRay with the authored Preview material. No illustrative geometry was substituted.",
+      "sceneSha256": "403a6c701ebaef28f9cf36f81f26a4d2c3669890bff35fb34120e5ad0bdd9ce8",
+      "imageSha256": "09c09a4985c4739fb711a31e1b15d24dc85c78453902b18e390f83df8cfd7895"
+    },
+    "UsdGenScale": {
+      "image": "docs/site/media/scale.png",
+      "caption": "Scale shortens offsets from each fixed root, most at the tips.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "scene": "examples/docs/operators/scale.usda",
+      "generator": "tools/docs/render_pathtraced.py",
+      "provenance": "The checked-in procedural USD scene was cooked by the usdGen compiler and scheduler into native BasisCurves using tools/docs/bake_groom.cpp, then path-traced by MoonRay with the authored Preview material. No illustrative geometry was substituted.",
+      "sceneSha256": "7dddc754bf9b4795161c1f033f692e2364eb27b8a9212c4a839dff1ccff43166",
+      "imageSha256": "a7c4120bb9d7f482af8700db79633557bad4f61955ecf7cfa6ba4829cac6d304"
+    },
+    "UsdGenCurl": {
+      "image": "docs/site/media/curl.png",
+      "caption": "A radius ramp and varied phase make defined coils.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "scene": "examples/docs/operators/curl.usda",
+      "generator": "tools/docs/render_pathtraced.py",
+      "provenance": "The checked-in procedural USD scene was cooked by the usdGen compiler and scheduler into native BasisCurves using tools/docs/bake_groom.cpp, then path-traced by MoonRay with the authored Preview material. No illustrative geometry was substituted.",
+      "sceneSha256": "2d2dcb4b7919b7a94bc18c1325096eef420a18a6a947422f4a34567c111d91b5",
+      "imageSha256": "1940fafba526c4195e2a30ffa85c6ca4bbff4e3fb5089964d230da72b4c75fd4",
+      "animation": "docs/site/media/curl.gif",
+      "animationProvenance": "Seven live Storm scene-index captures sweep usdGen:radius with fixed seed, camera and lighting; reverse playback reuses captured frames.",
+      "animationSha256": "cc4f1b84a19fd005a38aa94438a59ae96f0dbefb660c8e999c09a5ad57310696"
+    },
+    "UsdGenBend": {
+      "image": "docs/site/media/bend.png",
+      "caption": "Bend turns the tips while preserving attachment at the roots.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "scene": "examples/docs/operators/bend.usda",
+      "generator": "tools/docs/render_pathtraced.py",
+      "provenance": "The checked-in procedural USD scene was cooked by the usdGen compiler and scheduler into native BasisCurves using tools/docs/bake_groom.cpp, then path-traced by MoonRay with the authored Preview material. No illustrative geometry was substituted.",
+      "sceneSha256": "46f00e0458407fed681f63d4b34c614b29c4b9c963ce46c4764f60cfd9193d5b",
+      "imageSha256": "01c6f7f8a7527602941e1effaca458749867d22e0d550c7682c051441f1e0dbc"
+    },
+    "UsdGenDisplace": {
+      "image": "docs/site/media/displace.png",
+      "caption": "A constant height offset lifts all CVs, including roots, along the rest normal.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "scene": "examples/docs/operators/displace.usda",
+      "generator": "tools/docs/render_pathtraced.py",
+      "provenance": "The checked-in procedural USD scene was cooked by the usdGen compiler and scheduler into native BasisCurves using tools/docs/bake_groom.cpp, then path-traced by MoonRay with the authored Preview material. No illustrative geometry was substituted.",
+      "sceneSha256": "dd9942dc655d05fa89a0a1ea649aca5293babde16ded0ef130af7bd3b63b9f83",
+      "imageSha256": "18395df8db64a99e667ef9098ac88818778d3ffea18c011463a732c9e92363eb"
+    },
+    "UsdGenWave": {
+      "image": "docs/site/media/wave.png",
+      "caption": "Independent U and normal waves ripple the strands.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "scene": "examples/docs/operators/wave.usda",
+      "generator": "tools/docs/render_pathtraced.py",
+      "provenance": "The checked-in procedural USD scene was cooked by the usdGen compiler and scheduler into native BasisCurves using tools/docs/bake_groom.cpp, then path-traced by MoonRay with the authored Preview material. No illustrative geometry was substituted.",
+      "sceneSha256": "ea9548ec0bb84efb64f826d8b27ebd629effe3eae8fc77b39b0445373408c77d",
+      "imageSha256": "d312cce3dbf5b2f260520e0fe0c6ff2b52489d36416691e117e10a290e6b0904"
+    },
+    "UsdGenPart": {
+      "status": "native fixture",
+      "image": "docs/site/media/part-native.png",
+      "caption": "Actual cooked partId plane seen from above: blue and orange mark the two assigned sides, gray marks unassigned strands. Part leaves strand points unchanged.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "source": "tools/docs/utility_fixtures.cpp",
+      "generator": "tools/render_utility_fixtures.py",
+      "provenance": "A native graph fixture executed the typed Part kernel and exported cooked partId values. Diagnostic colors map those IDs; original strand positions are unchanged. The studio layer adds only camera, lights and material.",
+      "diagram": "docs/site/media/part.svg",
+      "scene": "examples/docs/fixtures/part-studio.usda",
+      "imageSha256": "0b79ace8ccfe2d36737ef60905fb13b35c2322f97ba48769fa5f5010e5471210",
+      "sceneSha256": "b38fb770948efff34988d134f3ee25e7120d0ab2a3310081fb72780f091dd0d0"
+    },
+    "UsdGenExprOp": {
+      "image": "docs/site/media/expr-op.png",
+      "caption": "An expression adds an increasing tip displacement in X and Z.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "scene": "examples/docs/operators/expr-op.usda",
+      "generator": "tools/docs/render_pathtraced.py",
+      "provenance": "The checked-in procedural USD scene was cooked by the usdGen compiler and scheduler into native BasisCurves using tools/docs/bake_groom.cpp, then path-traced by MoonRay with the authored Preview material. No illustrative geometry was substituted.",
+      "sceneSha256": "58aea292a3815dadd54376e87dde15a8553d23ab6a9d7b13ffdffc7b8f57db3f",
+      "imageSha256": "2bcf0785d14f8eaae64b1cb2fa0285bf09a5047b693db6bd4b42cdea8a0aacf9"
+    },
+    "UsdGenSculptLayer": {
+      "image": "docs/site/media/sculpt-layer.png",
+      "caption": "Stable-ID sculpt deltas lift and fan a selected tuft of imported curves.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "scene": "examples/docs/operators/sculpt-layer.usda",
+      "generator": "tools/docs/render_pathtraced.py",
+      "provenance": "The checked-in procedural USD scene was cooked by the usdGen compiler and scheduler into native BasisCurves using tools/docs/bake_groom.cpp, then path-traced by MoonRay with the authored Preview material. No illustrative geometry was substituted.",
+      "sceneSha256": "30a44d34e59d4d3ac8be2dc8d98996aca2fecfe68ae83a63b54830c2769881e2",
+      "imageSha256": "f55fd31f0dbaa7400adf5cc7c789505abc7291f2f6d0dea0d9e85f472e0b4e6c"
+    },
+    "UsdGenWind": {
+      "image": "docs/site/media/wind-clumped.png",
+      "caption": "Native Wind sends broad, slow billows and finer, faster ripples through a 6,500-strand patch; Clump cohesion changes how neighboring strands share that motion.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "scene": "examples/docs/operators/wind-clumped.usda",
+      "generator": "tools/render_wind_variants.py",
+      "provenance": "The clumped and unclumped scenes keep Scatter density 6,500, root sites, Wind controls, camera and lighting matched. Native usdGen cooked the curves and MoonRay rendered them; only Clump enabled differs. Both have 100 distinct native point states and fixed roots.",
+      "sceneSha256": "f28f87ee1fe883b56e313ade4b9f9e1478f9a94480d2ed7ee760f1f01849f9c0",
+      "imageSha256": "6352960fa7aa8d22d966eafcb9a32639cf92d97270a8ab6c366cc7ce8fd0b983",
+      "animation": "docs/site/media/wind-clumped.gif",
+      "animationProvenance": "The paired GIFs each show frames 0–99 at 24 fps, 100 distinct native cooks and decoded images over 4.17 seconds. Four independent MoonRay renders at frames 50 and 99 matched the corresponding batch poses. Frame labels are presentation annotations; native Wind and Clump supply the motion.",
+      "animationSha256": "a392af24fa23f96c28200348907ade703e31b85af2f777f1d83207d9272b4272",
+      "comparison": true,
+      "animationLabel": "Play matched billows",
+      "provenanceDisclosure": true,
+      "inlineAnimation": true,
+      "animationAlt": "Native broad Wind billows and fine ripples move through 6,500 clumped fur strands over 100 frames; roots remain fixed.",
+      "variants": [
+        {
+          "scene": "examples/docs/operators/wind-clumped.usda",
+          "sceneSha256": "f28f87ee1fe883b56e313ade4b9f9e1478f9a94480d2ed7ee760f1f01849f9c0",
+          "image": "docs/site/media/wind-clumped.png",
+          "imageSha256": "6352960fa7aa8d22d966eafcb9a32639cf92d97270a8ab6c366cc7ce8fd0b983",
+          "animation": "docs/site/media/wind-clumped.gif",
+          "animationSha256": "a392af24fa23f96c28200348907ade703e31b85af2f777f1d83207d9272b4272",
+          "label": "With Clump cohesion",
+          "caption": "Clump enabled: native broad billows and fine ripples travel through the 6,500-strand patch with shared motion where effective cohesion survives.",
+          "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+          "provenance": "The authored scene was cooked by the native usdGen compiler and scheduler at each time code; MoonRay rendered the resulting BasisCurves. The matched pair changes only the native Clump enabled control.",
+          "animationProvenance": "Frames 0–99 at 24 fps use 100 distinct native point states and 100 distinct decoded GIF frames over 4.17 seconds. Roots remain fixed. Independent MoonRay renders at frames 50 and 99 matched the batch frames within mean absolute RGB 0.14–0.15.",
+          "animationAlt": "Animated native Wind on a dense clumped fur patch with broad traveling billows and finer ripples.",
+          "inlineAnimation": true,
+          "fullSize": true,
+          "provenanceDisclosure": true
+        },
+        {
+          "scene": "examples/docs/operators/wind-unclumped.usda",
+          "sceneSha256": "87a30737f855b86a8cfdd9067bf912fbb470af7caa5ea9ff812f3bfb94ba6a60",
+          "image": "docs/site/media/wind-unclumped.png",
+          "imageSha256": "2873cb019fc86f9db6d1f23380316b566235373faab162572ba7332b890acc4b",
+          "animation": "docs/site/media/wind-unclumped.gif",
+          "animationSha256": "f6eabf80186ba05c34abbbd986bbdebc175260d8da09134bb5eab22ec5dcfa01",
+          "label": "Without Clump cohesion",
+          "caption": "Clump disabled: the matched 6,500-strand patch keeps the same Wind controls and root sites while billows move strands individually.",
+          "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+          "provenance": "The authored scene was cooked by the native usdGen compiler and scheduler at each time code; MoonRay rendered the resulting BasisCurves. The matched pair changes only the native Clump enabled control.",
+          "animationProvenance": "Frames 0–99 at 24 fps use 100 distinct native point states and 100 distinct decoded GIF frames over 4.17 seconds. Roots remain fixed. Independent MoonRay renders at frames 50 and 99 matched the batch frames within mean absolute RGB 0.14–0.15.",
+          "animationAlt": "Animated native Wind on the same dense fur patch with Clump disabled, showing individual billowing.",
+          "inlineAnimation": true,
+          "fullSize": true,
+          "provenanceDisclosure": true
+        }
+      ]
+    },
+    "UsdGenInstance": {
+      "status": "diagram",
+      "image": "docs/site/media/instance.svg",
+      "caption": "Reserved schema type with no registered kernel. The diagram shows its declared prototype controls.",
+      "renderer": "Source diagram",
+      "source": "libs/usdGenSchema/schema.usda",
+      "generator": "tools/render_operator_diagrams.py",
+      "provenance": "Schematic of the source contract; this is not a rendered operator result.",
+      "imageSha256": "9dbe337d64769ea2bc1413cb26d36638c4574a171ee417c5b85d9dc671466b4a"
+    },
+    "UsdGenGuideInterpolate": {
+      "image": "docs/site/media/guide-interpolate.png",
+      "caption": "Dense strands follow a sparse authored guide set, with region-aware blending.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "scene": "examples/guide-interpolate-plane.usda",
+      "generator": "tools/docs/render_pathtraced.py",
+      "studio": "tools/docs/operator_studio.py",
+      "provenance": "The usdGen baker cooked /World/Groom/Hair into 14,000 native curves with 168,000 CVs, then MoonRay path-traced the result with studio lighting. The distinct styled regions follow the checked-in authored guides.",
+      "imageSha256": "3de202f18e9fd0b93097de3b903db00acf0fef62c97a43744ff10839a5005674",
+      "sceneSha256": "3da49b127f65a9cb7576f208c290fe767266d689ee07fa65fa91d5bfe5b40199"
+    },
+    "UsdGenResample": {
+      "image": "docs/site/media/resample.png",
+      "caption": "Seven uniformly spaced CVs simplify an upstream curl.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "scene": "examples/docs/operators/resample.usda",
+      "generator": "tools/docs/render_pathtraced.py",
+      "provenance": "The checked-in procedural USD scene was cooked by the usdGen compiler and scheduler into native BasisCurves using tools/docs/bake_groom.cpp, then path-traced by MoonRay with the authored Preview material. No illustrative geometry was substituted.",
+      "sceneSha256": "cdf3bdb79d19cc7561469e45adbd3fc729d8cd788f3b533bbcc8389a87e5bd16",
+      "imageSha256": "e31e4646e8c6c2d8a679e897c9dcdbc3dfe2a16945ce371bb72c25119808a6d3"
+    },
+    "UsdGenStraighten": {
+      "image": "docs/site/media/straighten.png",
+      "caption": "Straighten reduces an upstream curl's curvature.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "scene": "examples/docs/operators/straighten.usda",
+      "generator": "tools/docs/render_pathtraced.py",
+      "provenance": "The checked-in procedural USD scene was cooked by the usdGen compiler and scheduler into native BasisCurves using tools/docs/bake_groom.cpp, then path-traced by MoonRay with the authored Preview material. No illustrative geometry was substituted.",
+      "sceneSha256": "59bba292a2e04700e8876447a018f3e83c1c629ab3be40ef361b1590fbbe9dc0",
+      "imageSha256": "91b627097ff5bdc1cedbdad46a40785fec092554ce95386fd4209723e0191a96"
+    },
+    "UsdGenDeform": {
+      "image": "docs/site/media/deform.png",
+      "caption": "At frame 24, animated driver curves bend the groom through an RBF field.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "frame": 24,
+      "scene": "examples/rbf-guides-plane.usda",
+      "generator": "tools/docs/render_pathtraced.py",
+      "studio": "tools/docs/operator_studio.py",
+      "provenance": "The time-aware usdGen baker cooked /World/Groom/Hair at time code 24 into native BasisCurves; MoonRay path-traced the result with studio lighting. Frame-1 and frame-24 cooks differ at 108,000 of 120,000 CVs, with maximum position change 0.198486 scene units.",
+      "imageSha256": "e775419a0af21f8dffa82857e48006da8df36a5959d10b29f79102888a3bdba3",
+      "sceneSha256": "c0b00280cdca04d782b3f82f9829979c22e91113c63f1e760328d7f8b7efe691"
+    },
+    "UsdGenCollide": {
+      "image": "docs/site/media/collide.png",
+      "caption": "A sphere descends into 8,000 clumped strands, then slides across the patch. Collision bends against the outer subdivision limit; temporary shortening starts 0.15 stage units inside it and recovers as contact clears.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "scene": "examples/docs/operators/collide.usda",
+      "generator": "tools/docs/render_collide_cut_accepted.py",
+      "provenance": "Native usdGen cooked 8,000 strands with 18 CVs at each of 100 frames using cutThenCollide, flexible resolution, inset depth 0.15, blend depth 0.02, 128 iterations, pushAmount 1 and offset 0. Collision uses the Catmull-Clark Shield limit and the invisible closed ScalpVolume floor. All sequence geometry, root and clump metadata checks passed; 1,824 cleared-contact recovery controls returned to their incoming shape. Bounded temporal checks refined the strongest transition to eighth-frame steps. Flexible collision may change segment and total chord lengths. MoonRay rendered the accepted native BasisCurves; the 1,400-pixel hero shows frame 99.",
+      "imageSha256": "e1b41fd938a51d3565f0532416b95bbd7d932d56fc5eb83d12cc85e066fbd5f0",
+      "sceneSha256": "45f940bf88748379f2f75fe1af227ac0a1e0a749dd5f0b342c1c356e8df49f18",
+      "generatorSha256": "d2a13708eb76a87d1b2ccce50db173c49e656bd601d75e61147d99828b4c9f9f",
+      "solverSha256": "8b1a176174f9636942480881ba68331e5844766937c2fc51d5471cccd643f69c",
+      "bakerSha256": "52eef15a0a82b3bbe563459d8823bfd269edb2e5927339792f046cae7824e0e2",
+      "fullSize": true,
+      "provenanceDisclosure": true,
+      "animation": "docs/site/media/collide.gif",
+      "animationSha256": "d6f40b9f8db859afc6455e934259e9a63f624af8cde6f7dcec1afc09d62dab75",
+      "animationLabel": "Play sphere descent and slide",
+      "inlineAnimation": true,
+      "animationAlt": "A sphere quickly descends into dense clumped fur, bending shallow contacts before deeper temporary shortening, then slides in Z as cleared fur recovers.",
+      "animationProvenance": "100 distinct native MoonRay images show frames 0–99 at 24 fps. The shared-palette GIF preserves 100 encoded records and totals 4,170 ms. Independent native-frame renders verified the batch poses. The companion changes only Shield visibility; no fur geometry, material or animation is substituted.",
+      "nativeCoreSha256": "5e533e8c4ed62b389c569c0a73306112b610532de47a1d70cecff74131dbbf0e",
+      "renderDriverSha256": "d2a13708eb76a87d1b2ccce50db173c49e656bd601d75e61147d99828b4c9f9f",
+      "encoder": "tools/docs/encode_collide_gif.py",
+      "encoderSha256": "e2041c24420aea0bc684ddfdd2c3dacf12f0b31b6e120a764e4365cb99323134",
+      "animationFrames": 100,
+      "animationFps": 24,
+      "animationDurationMs": 4170,
+      "validationEvidence": [
+        {
+          "path": "renders/docs/pathtrace/collide-cut-flexible-inset150-full100-main5e-overlay7b-prep-20261005/cut-full100-proof-temporal-summary.json",
+          "sha256": "0d864280ad1d782e6ab426947a4f35cb2480607cb07fb44aa137345d8d72a2bf"
+        },
+        {
+          "path": "renders/docs/pathtrace/collide-cut-flexible-inset150-full100-main5e-overlay7b-prep-20261005/temporal-review.json",
+          "sha256": "aecab20aa62180dc5d2f5cdb9bbfd6ea5073c4b86fad1bc57909b69aa1c92227"
+        },
+        {
+          "path": "renders/docs/pathtrace/collide-cut-flexible-inset150-full100-main5e-overlay7b-prep-20261005/render-acceptance-approved.json",
+          "sha256": "d6561164f0474eb8b3cb376b2d959a7f42b4c5fd7b8a7b9679f1ac9c947e637c"
+        },
+        {
+          "path": "renders/docs/pathtrace/collide-cut-flexible-inset150-full100-main5e-overlay7b-prep-20261005/publication-prep-primary-5c32.json",
+          "sha256": "f47478dc76e538b6099b7aa762cbd540a6fd49f6c7054e89cde98d5932c96191"
+        },
+        {
+          "path": "renders/docs/pathtrace/collide-cut-flexible-inset150-full100-main5e-overlay7b-prep-20261005/publication-prep-r3.json",
+          "sha256": "721750b46d1f41914f11aab7a994efcc87f65601776b7b4bea5dff03c3a7c191"
+        },
+        {
+          "path": "renders/docs/pathtrace/collide-cut-flexible-inset150-full100-main5e-overlay7b-prep-20261005/primary-semantic-preflight.json",
+          "sha256": "79d96a06d84548ba30eb39c8ed9c1a6fa5e2ec8627a8ed5066cb10ca0bf357e5"
+        },
+        {
+          "path": "renders/docs/pathtrace/collide-cut-flexible-inset150-full100-main5e-overlay7b-prep-20261005/sphere-visible/paired-view-qa.json",
+          "sha256": "2c0675a32f9c288fbdc475eec44c886293cb2daf18e6a5cac652b9142c65af56"
+        },
+        {
+          "path": "renders/docs/pathtrace/collide-cut-flexible-inset150-full100-main5e-overlay7b-prep-20261005/sphere-hidden/paired-view-qa.json",
+          "sha256": "dceb9576066e6bad8eac96f05aee1952b0fcd78b4bb06dc625f66518e861a8d5"
+        },
+        {
+          "path": "renders/docs/pathtrace/collide-cut-flexible-inset150-full100-main5e-overlay7b-prep-20261005/sphere-hidden/primary-native-semantic-audit.json",
+          "sha256": "a6ae4fdc275b4106bdc97f829ebc8c165f2359494420d3e9a54c57c80f0543dc"
+        },
+        {
+          "path": "renders/docs/pathtrace/collide-cut-flexible-inset150-full100-main5e-overlay7b-prep-20261005/collide-cut-hero-qa.json",
+          "sha256": "75283e18b01eda826055f1ff33628bb78b8c3368fae1a8cc6a1959ee5fb457d7"
+        },
+        {
+          "path": "renders/docs/pathtrace/collide-cut-flexible-inset150-full100-main5e-overlay7b-prep-20261005/final-visual-review.json",
+          "sha256": "b695f97d90d7251dabba7b7c92053f7a3ded452f17c068e5e0e061be6bb04373"
+        },
+        {
+          "path": "renders/docs/collide-inset150-ui-r2-20261005/visibility-ui-proof.json",
+          "sha256": "de4ae8e38a350ae6d972385bfe6b291b57194ce3ad8ffcc714cca5a43f860fba"
+        },
+        {
+          "path": "renders/docs/pathtrace/collide-cut-flexible-inset150-hidden27-parity-r2-prep-20261005/visibility-native-parity.json",
+          "sha256": "5a3c27f64ce2e5383225f7ba7a02bcf4495153ec32980ef5fcf42bd65dc191f7"
+        }
+      ],
+      "primaryRenderWrapperSha256": "5c32ee1a707c41f1090966dcc0479fef11960586bae888227c1c1e1052a0d011",
+      "companionRenderWrapperSha256": "520e797f3918bd80bafb0a7ce6b16055337cb71ba77720b8490f92385c55af72",
+      "animationUniqueFrames": 100,
+      "variants": [
+        {
+          "scene": "examples/docs/operators/collide.usda",
+          "sceneSha256": "45f940bf88748379f2f75fe1af227ac0a1e0a749dd5f0b342c1c356e8df49f18",
+          "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+          "provenance": "Native usdGen cooked 8,000 strands with 18 CVs at each of 100 frames using cutThenCollide, flexible resolution, inset depth 0.15, blend depth 0.02, 128 iterations, pushAmount 1 and offset 0. Collision uses the Catmull-Clark Shield limit and the invisible closed ScalpVolume floor. All sequence geometry, root and clump metadata checks passed; 1,824 cleared-contact recovery controls returned to their incoming shape. Bounded temporal checks refined the strongest transition to eighth-frame steps. Flexible collision may change segment and total chord lengths. MoonRay rendered the accepted native BasisCurves; the 1,400-pixel hero shows frame 99.",
+          "fullSize": true,
+          "provenanceDisclosure": true,
+          "label": "Collider visible",
+          "caption": "A sphere descends into 8,000 clumped strands, then slides across the patch. Collision bends against the outer subdivision limit; temporary shortening starts 0.15 stage units inside it and recovers as contact clears.",
+          "image": "docs/site/media/collide.png",
+          "imageSha256": "e1b41fd938a51d3565f0532416b95bbd7d932d56fc5eb83d12cc85e066fbd5f0",
+          "animation": "docs/site/media/collide.gif",
+          "animationSha256": "d6f40b9f8db859afc6455e934259e9a63f624af8cde6f7dcec1afc09d62dab75",
+          "animationAlt": "A sphere quickly descends into dense clumped fur, bending shallow contacts before deeper temporary shortening, then slides in Z as cleared fur recovers.",
+          "animationProvenance": "100 distinct native MoonRay images show frames 0–99 at 24 fps. The shared-palette GIF preserves 100 encoded records and totals 4,170 ms. Independent native-frame renders verified the batch poses. The companion changes only Shield visibility; no fur geometry, material or animation is substituted.",
+          "inlineAnimation": true
+        },
+        {
+          "scene": "examples/docs/operators/collide.usda",
+          "sceneSha256": "45f940bf88748379f2f75fe1af227ac0a1e0a749dd5f0b342c1c356e8df49f18",
+          "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+          "provenance": "MoonRay rendered the same accepted native 8,000-strand, 18-CV result with only Shield visibility changed. The 800-pixel still is frame 99 of the companion movie; no fur points, widths, metadata, materials or animation were substituted.",
+          "fullSize": true,
+          "provenanceDisclosure": true,
+          "label": "Hair response (sphere hidden)",
+          "caption": "The same native 100-frame result with only the sphere hidden. Follow the radial bend during descent, the swept clumps during the slide, and the fur recovering behind contact.",
+          "animation": "docs/site/media/collide-fur-only.gif",
+          "animationSha256": "f39326174d2d38d784d2e5bd382184cd41e4fa85dcdd5a166dc3d3ccc70523fa",
+          "animationAlt": "The identical animated clumped fur with the sphere hidden, revealing bending, temporary shortening and recovery.",
+          "animationProvenance": "Same accepted native points, widths, primvars, time samples, materials and relationships as the visible movie; only /World/Shield visibility changes. All 100 timeline records are retained, including clear-contact frames where the fur pose repeats. Independent native-frame renders verify the batch poses.",
+          "visibilityOnlyComparison": "/World/Shield",
+          "animationUniqueFrames": 100,
+          "inlineAnimation": true,
+          "image": "docs/site/media/collide-fur-only.png",
+          "imageSha256": "eeae30d81bb97a94d67387aa72ded08ed2b09d4b0cbb1bfc63d2b000ac513343"
+        }
+      ]
+    },
+    "UsdGenWidthBlend": {
+      "status": "native fixture",
+      "image": "docs/site/media/width-blend.png",
+      "caption": "Actual WidthBlend kernel output, left to right: 0.0014 narrow input, 0.0037 blend at weight 0.5, and 0.0060 broad input. Curve positions are identical.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "source": "tools/docs/utility_fixtures.cpp",
+      "generator": "tools/render_utility_fixtures.py",
+      "provenance": "A native graph fixture executed the untyped WidthBlend kernel on two input curve buffers at weight 0.5. The studio layer adds only camera, lights and displayColor material.",
+      "diagram": "docs/site/media/width-blend.svg",
+      "scene": "examples/docs/fixtures/width-blend-studio.usda",
+      "imageSha256": "f164a3f5bcc06f7c4eb89df76bcf68904244b2db4c4d051a0117b63c30b3637c",
+      "sceneSha256": "d27d67404d0b8e6007ae4162766be53c98954d34f7c3960e619568e089e5b13d"
+    },
+    "UsdGenFreeze": {
+      "status": "native fixture",
+      "image": "docs/site/media/freeze.png",
+      "caption": "Actual two-cook Freeze result: the live input updates while the right-hand frozen curves retain their captured shape.",
+      "renderer": "MoonRay / HdMoonrayRendererDebugPlugin",
+      "source": "tools/docs/utility_fixtures.cpp",
+      "generator": "tools/render_utility_fixtures.py",
+      "provenance": "A native graph fixture cooked the typed Freeze kernel twice in one session, changed its upstream input before the second cook, and exported the updated live and held buffers. The studio layer adds only camera, lights and material.",
+      "diagram": "docs/site/media/freeze.svg",
+      "scene": "examples/docs/fixtures/freeze-studio.usda",
+      "imageSha256": "447199749f85698e132ccda6a81e6a83ee2506fabf2402e442653f83e1027e86",
+      "sceneSha256": "87151d4f25b9fcec450e210385f2ef8c7a3346e91d8741592194bcb54ca57e79"
+    }
+  },
+  "copyright": "Copyright (c) 2026 Nick Burkard",
+  "license": "SPDX-License-Identifier: MIT"
+}

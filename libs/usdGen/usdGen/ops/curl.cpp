@@ -11,6 +11,7 @@
 // offsets by r(0). All work is per curve/CV in Evaluate; Capture only
 // validates.
 #include "usdGen/ops/curl.h"
+#include "usdGen/clumpMotion.h"
 
 #include "usdGen/opParams.h"
 #include "usdGenMath/usdGenMath/hash.h"
@@ -34,6 +35,8 @@ namespace {
 
 struct UsdGenCurlCapture final : public UsdGenCapturePayload
 {
+    UsdGenClumpMotion clumpMotion;
+    std::vector<std::vector<float>> groupDraws;
     std::unique_ptr<UsdGenCapture> Clone() const override
     {
         return std::make_unique<UsdGenCurlCapture>(*this);
@@ -131,7 +134,23 @@ bool UsdGenCurlOp::Capture(
     UsdGenCapture *out,
     UsdGenDiagnostics *diag)
 {
-    TF_UNUSED(out);
+    auto &cap = *static_cast<UsdGenCurlCapture *>(out);
+    std::string clumpError;
+    auto const *prior = dynamic_cast<UsdGenCurlCapture const *>(ctx.previousCapture);
+    auto const *previousMotion = prior ? &prior->clumpMotion :
+        (cap.clumpMotion.levels.empty() ? nullptr : &cap.clumpMotion);
+    if (!UsdGenBuildClumpMotion(upstream, &cap.clumpMotion, &clumpError,
+                                previousMotion)) {
+        if (diag) diag->Error("UsdGenCurl: " + clumpError);
+        return false;
+    }
+    cap.groupDraws.clear();
+    for (auto const &level : cap.clumpMotion.levels) {
+        auto &draws = cap.groupDraws.emplace_back();
+        draws.reserve(level.groups.size());
+        for (auto const &group : level.groups)
+            draws.push_back(UsdGenDraw01(int(ctx.seed), group.centerId, kSaltCurl));
+    }
     UsdGenParamView const *p = ctx.params ? &*ctx.params : nullptr;
     if (!p) return true;
     TfToken const mode = p->GetToken(sAxisMode, sCurveTangent);
@@ -195,7 +214,7 @@ void UsdGenCurlOp::Evaluate(
     UsdGenCapture const &captureIn,
     UsdGenChunkView *view) const
 {
-    TF_UNUSED(captureIn);
+    auto const &cap = static_cast<UsdGenCurlCapture const &>(captureIn);
     UsdGenParamView const *p = ctx.params ? &*ctx.params : nullptr;
     UsdGenParamField const radiusField =
         p ? p->GetScalarField(sRadius, 0.02) : UsdGenParamField{0.02};
@@ -243,8 +262,7 @@ void UsdGenCurlOp::Evaluate(
         float const phaseRandom =
             static_cast<float>(phaseRandomField.Value(curve, cvBase + g));
         uint64_t const id = curveId ? curveId[c] : 0;
-        float const phi = phase +
-            phaseRandom * UsdGenDraw01(int(ctx.seed), id, kSaltCurl) * twoPi;
+        float const individualDraw = UsdGenDraw01(int(ctx.seed), id, kSaltCurl);
         GfVec3f frameN = rootN ? rootN[c] : GfVec3f(0.0f, 1.0f, 0.0f);
         GfVec3f const frameB = rootB ? rootB[c] : GfVec3f(0.0f, 0.0f, 1.0f);
         // Seed the rotation-minimizing normal: any vector off the first
@@ -304,7 +322,20 @@ void UsdGenCurlOp::Evaluate(
                 px[o] = inPx[o]; py[o] = inPy[o]; pz[o] = inPz[o];
                 continue;
             }
-            float const theta = twoPi * freq * s + phi;
+            float draw = individualDraw;
+            float remaining = 1.0f;
+            // Blend the stochastic phase at each CV so the clump's root lock,
+            // profile and mask remain effective at their authored positions.
+            for (size_t li = cap.clumpMotion.levels.size(); li-- > 0 && remaining > 0.0f;) {
+                auto const &level = cap.clumpMotion.levels[li];
+                if (level.weight.empty() || curve >= level.groupForCurve.size()) continue;
+                uint32_t const group = level.groupForCurve[curve];
+                if (group == UINT32_MAX || group >= level.groups.size()) continue;
+                float const portion = remaining * level.weight[cvBase + o];
+                draw += portion * (cap.groupDraws[li][group] - individualDraw);
+                remaining -= portion;
+            }
+            float const theta = twoPi * freq * s + phase + phaseRandom * draw * twoPi;
             float const co = std::cos(theta), si = std::sin(theta);
             px[o] = inPx[o] + r * (co * N[0] + sgn * si * B[0]);
             py[o] = inPy[o] + r * (co * N[1] + sgn * si * B[1]);

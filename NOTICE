@@ -77,3 +77,31 @@ build time. Their notices are in usdNoodles/THIRD_PARTY_LICENSES.txt.
 Files under usdNoodles/ that are not in the public noodles tree are
 usdGen code under the MIT license in the root LICENSE. They are listed
 in THIRD_PARTY.md.
+
+plugin/usdNoodles/ (localized usdview Noodles editor)
+-----------------------------------------------------
+
+Ported from usdRig commit 8dafce7d6d6299e6f79f9c4fb22c17145d96359e,
+based on OpenUSD PR #4156. The Python,
+binding, and editor code retains Meta/OpenUSD notices under the Tomorrow
+Open Source Technology License 1.0; see plugin/usdNoodles/LICENSE.txt.
+
+Native noodles and copied GLSL code retains Meta's MIT license; see
+plugin/usdNoodles/NOODLES_LICENSE.txt. Its upstream noodles dependency is
+pinned to commit ff5d473f10e8c37ceaf0da11ea7cb80805bc8314.
+
+Poppins font atlases are under SIL Open Font License 1.1. Their license and
+other dependency notices are in plugin/usdNoodles/THIRD_PARTY_LICENSES.txt.
+The local port removes rig-only TouchPose references and adapts build and
+installation paths for usdGen without changing upstream notices.
+
+ALab-derived manual images
+--------------------------
+
+docs/site/media/stoat-*.png and docs/site/media/ui/alab-*.png are derived
+from the ASWF Digital Production Example Library ALab asset, under the
+ASWF Digital Assets License v1.1.
+These images are not under the usdGen MIT license. See
+docs/site/media/ALab-LICENSE.md and docs/site/media/README.md.
+
+Netflix Animation Studios ALab Copyright 2025 Netflix, Inc. All rights reserved.

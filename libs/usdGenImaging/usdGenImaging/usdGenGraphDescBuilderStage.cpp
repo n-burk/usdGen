@@ -13,6 +13,7 @@
 
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/vt/array.h"
+#include "pxr/base/vt/types.h"
 #include "pxr/usd/sdf/assetPath.h"
 #include "pxr/usd/sdf/path.h"
 #include "pxr/usd/usd/attribute.h"
@@ -31,6 +32,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -684,7 +686,8 @@ _BuildSurfaceCagePayload(UsdPrim const &prim, UsdTimeCode time,
 
 void
 _BuildCurveSet(UsdStageRefPtr const &stage, SdfPath const &path,
-               UsdGenRole role, double time, UsdGenCurveSetDesc *out)
+               UsdGenRole role, double time, UsdGenCurveSetDesc *out,
+               std::vector<std::string> *errors)
 {
     UsdPrim prim = stage->GetPrimAtPath(path);
     if (!prim) {
@@ -759,28 +762,121 @@ _BuildCurveSet(UsdStageRefPtr const &stage, SdfPath const &path,
         }
     }
 
-    // OutputCurves ownership is carried by one uniform integer per source
-    // curve.  Do not reinterpret a malformed or differently interpolated
-    // primvar: the authored-plane contract requires a primitive-domain scalar.
-    auto forwardOwnership = [&](TfToken const &name) {
-        UsdGeomPrimvar const pv = UsdGeomPrimvarsAPI(prim).GetPrimvar(name);
-        if (!pv || pv.GetInterpolation() != UsdGeomTokens->uniform) return;
-        VtIntArray values;
-        if (!pv.Get(&values, UsdTimeCode(time)) ||
-            values.size() != out->curveVertexCounts.size()) {
-            return;
-        }
+    // Import baked named planes with their exact scalar type, arity and
+    // interpolation. The docs baker writes all native extra planes this way;
+    // in particular clumpCenterId_<level> is int2 carrying two exact ID words.
+    // Standard geometry/identity channels are handled above and must not be
+    // duplicated as authored extra planes.
+    static std::set<TfToken> const reserved{
+        TfToken("rest"), TfToken("widths"), TfToken("st"),
+        TfToken("skinprim"), TfToken("skinprimuv"), TfToken("displayColor"),
+        TfToken("usdGen:curveId"), TfToken("usdGen:rootFrame"),
+        TfToken("usdGen:role"), usdGen::UsdGenSourceColorPlane()};
+    auto const isClump = [](std::string const &name) {
+        return name.rfind("clumpId_", 0) == 0 ||
+               name.rfind("clumpCenter_", 0) == 0 ||
+               name.rfind("clumpCenterId_", 0) == 0 ||
+               name.rfind("clumpWeight_", 0) == 0;
+    };
+    size_t pointCount = 0;
+    for (int count : out->curveVertexCounts)
+        if (count > 0) pointCount += static_cast<size_t>(count);
+    for (UsdGeomPrimvar const &pv : UsdGeomPrimvarsAPI(prim).GetPrimvarsWithValues()) {
+        TfToken const name = pv.GetPrimvarName();
+        if (name.IsEmpty() || reserved.count(name)) continue;
+        bool const nativeClump = isClump(name.GetString());
         usdGen::UsdGenAuthoredPlaneDesc plane;
         plane.name = name;
-        plane.type = usdGen::UsdGenAuthoredPlaneType::Int32;
-        plane.domain = usdGen::UsdGenAuthoredPlaneDomain::Primitive;
-        plane.arity = 1;
-        plane.intValues = std::move(values);
+        TfToken const interpolation = pv.GetInterpolation();
+        size_t expected = 0;
+        if (interpolation == UsdGeomTokens->vertex) {
+            plane.domain = usdGen::UsdGenAuthoredPlaneDomain::Point;
+            expected = pointCount;
+        } else if (interpolation == UsdGeomTokens->uniform) {
+            plane.domain = usdGen::UsdGenAuthoredPlaneDomain::Primitive;
+            expected = out->curveVertexCounts.size();
+        } else if (interpolation == UsdGeomTokens->constant) {
+            plane.domain = usdGen::UsdGenAuthoredPlaneDomain::Groom;
+            expected = 1;
+        } else {
+            if (!nativeClump) continue;
+        }
+        VtValue value;
+        bool const gotValue = pv.ComputeFlattened(&value, UsdTimeCode(time));
+        size_t elements = 0;
+        if (gotValue && value.IsHolding<VtFloatArray>()) {
+            plane.type = usdGen::UsdGenAuthoredPlaneType::Float32;
+            plane.arity = 1;
+            plane.floatValues = value.UncheckedGet<VtFloatArray>();
+            elements = plane.floatValues.size();
+        } else if (gotValue && value.IsHolding<VtIntArray>()) {
+            plane.type = usdGen::UsdGenAuthoredPlaneType::Int32;
+            plane.arity = 1;
+            plane.intValues = value.UncheckedGet<VtIntArray>();
+            elements = plane.intValues.size();
+        } else {
+            auto const flatten = [&](auto const &array, auto *values, uint8_t arity) {
+                plane.arity = arity;
+                elements = array.size();
+                values->reserve(elements * arity);
+                for (auto const &element : array)
+                    for (uint8_t component = 0; component < arity; ++component)
+                        values->push_back(element[component]);
+            };
+            if (gotValue && value.IsHolding<VtVec2fArray>()) {
+                plane.type = usdGen::UsdGenAuthoredPlaneType::Float32;
+                flatten(value.UncheckedGet<VtVec2fArray>(), &plane.floatValues, 2);
+            } else if (gotValue && value.IsHolding<VtVec3fArray>()) {
+                plane.type = usdGen::UsdGenAuthoredPlaneType::Float32;
+                flatten(value.UncheckedGet<VtVec3fArray>(), &plane.floatValues, 3);
+            } else if (gotValue && value.IsHolding<VtVec4fArray>()) {
+                plane.type = usdGen::UsdGenAuthoredPlaneType::Float32;
+                flatten(value.UncheckedGet<VtVec4fArray>(), &plane.floatValues, 4);
+            } else if (gotValue && value.IsHolding<VtVec2iArray>()) {
+                plane.type = usdGen::UsdGenAuthoredPlaneType::Int32;
+                flatten(value.UncheckedGet<VtVec2iArray>(), &plane.intValues, 2);
+            } else if (gotValue && value.IsHolding<VtVec3iArray>()) {
+                plane.type = usdGen::UsdGenAuthoredPlaneType::Int32;
+                flatten(value.UncheckedGet<VtVec3iArray>(), &plane.intValues, 3);
+            } else if (gotValue && value.IsHolding<VtVec4iArray>()) {
+                plane.type = usdGen::UsdGenAuthoredPlaneType::Int32;
+                flatten(value.UncheckedGet<VtVec4iArray>(), &plane.intValues, 4);
+            }
+        }
+        bool valid = gotValue && plane.arity != 0 && elements == expected;
+        if (nativeClump) {
+            std::string const &n = name.GetString();
+            if (n.rfind("clumpId_", 0) == 0)
+                valid = valid && plane.type == usdGen::UsdGenAuthoredPlaneType::Int32 &&
+                        plane.arity == 1 && interpolation == UsdGeomTokens->uniform;
+            else if (n.rfind("clumpCenter_", 0) == 0)
+                valid = valid && plane.type == usdGen::UsdGenAuthoredPlaneType::Float32 &&
+                        plane.arity == 3 && interpolation == UsdGeomTokens->uniform;
+            else if (n.rfind("clumpCenterId_", 0) == 0)
+                valid = valid && plane.type == usdGen::UsdGenAuthoredPlaneType::Int32 &&
+                        plane.arity == 2 && interpolation == UsdGeomTokens->uniform;
+            else
+                valid = valid && plane.type == usdGen::UsdGenAuthoredPlaneType::Float32 &&
+                        plane.arity == 1 && interpolation == UsdGeomTokens->vertex;
+        }
+        if (!valid) {
+            if (!nativeClump) continue;
+            if (errors) errors->push_back(path.GetString() + ": malformed native Clump primvar '" +
+                                          name.GetString() + "'");
+            // Compile fails on this zero-arity sentinel instead of silently
+            // dropping a broken Clump field and changing the Wind result.
+            plane.type = usdGen::UsdGenAuthoredPlaneType::Float32;
+            plane.arity = 0;
+            plane.floatValues.clear();
+            plane.intValues.clear();
+        }
         out->authoredPlanes.push_back(std::move(plane));
-    };
-    forwardOwnership(TfToken("tubeId"));
-    forwardOwnership(TfToken("regionId"));
-    forwardOwnership(TfToken("hierarchyLevel"));
+    }
+    std::sort(out->authoredPlanes.begin(), out->authoredPlanes.end(),
+              [](usdGen::UsdGenAuthoredPlaneDesc const &a,
+                 usdGen::UsdGenAuthoredPlaneDesc const &b) {
+                  return a.name < b.name;
+              });
 
     TfToken curveRole;
     _GetPrimvarTyped(prim, TfToken("usdGen:role"), UsdTimeCode::Default(),
@@ -1187,7 +1283,7 @@ BuildGraphDescFromStage(
         auto it = curveIndex.find(p.GetString());
         if (it == curveIndex.end()) {
             UsdGenCurveSetDesc cs;
-            _BuildCurveSet(stage, p, role, time, &cs);
+            _BuildCurveSet(stage, p, role, time, &cs, &desc.validationErrors);
             it = curveIndex.emplace(p.GetString(), desc.curveSets.size())
                      .first;
             desc.curveSets.push_back(std::move(cs));

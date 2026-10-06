@@ -154,6 +154,8 @@ def run(appController):
         sys.path.insert(0, here)
         sys.path.insert(0, os.path.normpath(os.path.join(here, "..",
                                                          "python")))
+        sys.path.insert(0, os.path.normpath(os.path.join(here, "..", "..",
+                                                         "..", "tools", "docs")))
     try:
         import usdGenPomadeTools
         from pxr import Gf, Sdf, Usd, UsdGeom
@@ -162,6 +164,7 @@ def run(appController):
                                       pomadeGizmo, pomadeLib, pomadeLoops,
                                       pomadeModes, pomadePanels)
         import pomadeT3
+        from pomade_ui_capture import capture as captureUi
         from pomadeT3 import (Mouse, check, failureCount, frameScalp,
                              guideCount, info, levelInfo, pumpUntilCommitted,
                              sideCamera, statusRecorder, tubeCenters,
@@ -281,6 +284,7 @@ def run(appController):
     bindButton = workspace.button("file", "bind")
     check(bindButton is not None and bindButton.isEnabled() and
           bindButton.isVisible(), "the Bind scalp button is live")
+    captureUi(appController, "pomade-01-open-workspace")
     modeBefore = state.activeMode
     qtTest.mouseClick(modeButtons["tube"], QtCore.Qt.LeftButton)
     wait(20)
@@ -347,6 +351,7 @@ def run(appController):
     check(workspace._geometryPathLabel.text() == "Scalp: /Scalp",
           "the scalp line names the bound mesh (%r)"
           % workspace._geometryPathLabel.text())
+    captureUi(appController, "pomade-02-bind-scalp")
     # Straight after the picker, without clicking the viewport.
     typeKey(view, "2")
     wait(20)
@@ -399,6 +404,7 @@ def run(appController):
     # MD-01: guides appear by default once a region closes.
     check(guidesA > 0, "guides exist as soon as region A closed (%d)"
           % guidesA)
+    captureUi(appController, "pomade-03-first-region")
 
     section("region B: closed by clicking its first CV")
     for point in RIGHT:
@@ -439,6 +445,7 @@ def run(appController):
     check(pill == "Synced" and not workspace._statusAmber,
           "idle after the two regions, the sync pill reads Synced (%r)"
           % pill)
+    captureUi(appController, "pomade-04-two-regions")
 
     # ------------------------------------------------------------------
     section("Tube (2): side camera, dock rows, instruction")
@@ -510,6 +517,7 @@ def run(appController):
     selTube = session.readSelection(pomadeLib.POMADE_PICK_TUBE_VERT)
     check(selTube == [(rightTube, -1, -1)],
           "a body click selects the whole tube (%r)" % (selTube,))
+    captureUi(appController, "pomade-05-select-tube")
     # Walkthrough CONFUSING: F9 ignored unless the pointer is over the
     # view. Keys now follow the view's keyboard focus as well (FB-01).
     view.setFocus()
@@ -769,6 +777,7 @@ def run(appController):
                     if d.id == "density"), None)
     check(density is not None and density.isEnabled(),
           "the Fill page has a live Density field")
+    captureUi(appController, "pomade-06-fill-parameters")
 
     def modelDensity():
         return float(session.stageLib.fillParams(session.model,
@@ -798,6 +807,7 @@ def run(appController):
         gHigh = guideCount(session)
         check(abs(modelDensity() - 40.0) < 1e-3 and gHigh > gLow > 0,
               "typing 40 grows more guides (%d -> %d)" % (gLow, gHigh))
+        captureUi(appController, "pomade-07-fill-density")
         check(not isinstance(QtWidgets.QApplication.focusWidget(),
                              QtWidgets.QAbstractSpinBox),
               "Enter hands the keyboard back from the spin box")
@@ -861,6 +871,7 @@ def run(appController):
     wait(30)
     check(state.activeMode == "hierarchy" and
           viewport.loop.modeId == "hierarchy", "4 selects Hierarchy")
+    captureUi(appController, "pomade-08-hierarchy")
     workspace.refresh()
     check(bool(workspace._instructionLabel.text().strip()),
           "Hierarchy shows an instruction line (%r)"
@@ -993,6 +1004,7 @@ def run(appController):
     check(radiusWidget is not None and
           abs(radiusWidget.value() - state.brushRadiusPx) < 0.5,
           "the dock's Brush radius shows the new radius")
+    captureUi(appController, "pomade-09-sculpt")
 
     # ------------------------------------------------------------------
     section("Output (6): Build hair description, Show amplified hair")
@@ -1020,6 +1032,7 @@ def run(appController):
         check(built, "/PomadeGroom/Output committed after Build")
     workspace.refresh()
     amplified = workspace._amplifiedCheck
+    captureUi(appController, "pomade-10-build-output")
 
     def modelAmplified():
         return bool(session.dll.Pomade_GetAmplifiedHair(session.model))
@@ -1047,6 +1060,7 @@ def run(appController):
     save = workspace.button("file", "save")
     check(save is not None and save.isEnabled(),
           "the dock's Save button is live")
+    captureUi(appController, "pomade-11-save-groom")
     try:
         chosen["path"] = os.path.join(tmpdir, "walkGroom")
         watcher = ModalWatcher()
@@ -1191,6 +1205,7 @@ def run(appController):
     wait(20)
     check(state.activeMode == "graph",
           "hotkeys work straight after the reopen (%r)" % state.activeMode)
+    captureUi(appController, "pomade-12-reopen-workspace")
 
     # ------------------------------------------------------------------
     section("idle: the pill reads Synced")

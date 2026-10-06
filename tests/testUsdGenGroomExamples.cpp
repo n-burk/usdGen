@@ -267,6 +267,21 @@ void CheckClump(UsdStageRefPtr const &stage)
           "clumpId_0 is published per strand");
     Check(level1 && level1->i.size() == c.out.totalCurves, "clumpId_1 is published per strand");
     if (!level0 || !level1) return;
+    for (int level = 0; level != 2; ++level) {
+        std::string const suffix = std::to_string(level);
+        UsdGenPlane const *center = Plane(c.out, ("clumpCenter_" + suffix).c_str());
+        UsdGenPlane const *centerId = Plane(c.out, ("clumpCenterId_" + suffix).c_str());
+        UsdGenPlane const *weight = nullptr;
+        for (UsdGenPlane const &plane : c.out.extraCv)
+            if (plane.name == TfToken("clumpWeight_" + suffix)) weight = &plane;
+        Check(center && center->type == TfToken("float") && center->arity == 3 &&
+              center->f.size() == size_t(c.out.totalCurves) * 3 &&
+              centerId && centerId->type == TfToken("int") && centerId->arity == 2 &&
+              centerId->i.size() == size_t(c.out.totalCurves) * 2 &&
+              weight && weight->interpolation == TfToken("vertex") &&
+              weight->f.size() == c.out.totalCvs,
+              "Clump publishes a complete native motion quartet");
+    }
 
     std::map<int, std::vector<size_t>> clumps;
     for (size_t s = 0; s < c.out.totalCurves; ++s)
@@ -312,12 +327,79 @@ void CheckClump(UsdStageRefPtr const &stage)
     Check(mask && mask.Set(0.0f), "author usdGen:mask = 0 on the clump");
     Cooked off = Cook(stage, kClumpDescription, "clump muted by its mask");
     if (off.ok && off.out.totalCvs == c.out.totalCvs) {
+        for (UsdGenPlane const &plane : off.out.extraCv)
+            if (plane.name == TfToken("clumpWeight_0") ||
+                plane.name == TfToken("clumpWeight_1"))
+                Check(std::all_of(plane.f.begin(), plane.f.end(),
+                                  [](float w) { return w == 0.0f; }),
+                      "mask zero publishes zero effective cohesion");
         size_t moved = 0;
         for (size_t i = 0; i < c.out.totalCvs; ++i)
             if (Cv(off.out, i) != Cv(c.out, i)) ++moved;
         Check(moved > c.out.totalCvs / 4, "mask 0 leaves the input unclumped");
     }
     mask.Set(1.0f);
+    mask.Set(0.5f);
+    Cooked half = Cook(stage, kClumpDescription, "clump with half mask");
+    if (half.ok && half.out.totalCvs == c.out.totalCvs) {
+        auto weightPlane = [](UsdGenCurveBuffer const &buffer, char const *name)
+            -> UsdGenPlane const * {
+            for (UsdGenPlane const &plane : buffer.extraCv)
+                if (plane.name == TfToken(name)) return &plane;
+            return nullptr;
+        };
+        auto const *full0 = weightPlane(c.out, "clumpWeight_0");
+        auto const *full1 = weightPlane(c.out, "clumpWeight_1");
+        auto const *half0 = weightPlane(half.out, "clumpWeight_0");
+        auto const *half1 = weightPlane(half.out, "clumpWeight_1");
+        bool matchesGeometryMask = full0 && full1 && half0 && half1;
+        if (matchesGeometryMask)
+            for (size_t cv = 0; cv < c.out.totalCvs; ++cv) {
+                float const fullCohesion = 1.0f -
+                    (1.0f - full0->f[cv]) * (1.0f - full1->f[cv]);
+                float const halfCohesion = 1.0f -
+                    (1.0f - half0->f[cv]) * (1.0f - half1->f[cv]);
+                if (std::fabs(halfCohesion - 0.5f * fullCohesion) > 1e-5f) {
+                    matchesGeometryMask = false;
+                    break;
+                }
+            }
+        Check(matchesGeometryMask,
+              "two-level native cohesion applies a partial mask once");
+    }
+    mask.Set(1.0f);
+    // Stray attenuation is part of the native motion weight, not merely the
+    // positional Clump output. Every strand becomes a stray at rate one.
+    SdfPath const clumpPath("/World/Groom/Fur/Ops/clump");
+    UsdAttribute strayRate = stage->GetAttributeAtPath(
+        clumpPath.AppendProperty(TfToken("usdGen:clump:stray:rate")));
+    UsdAttribute strayAmount = stage->GetAttributeAtPath(
+        clumpPath.AppendProperty(TfToken("usdGen:clump:stray:amount")));
+    UsdAttribute strayFalloff = stage->GetAttributeAtPath(
+        clumpPath.AppendProperty(TfToken("usdGen:clump:stray:falloff")));
+    float oldRate = 0.0f, oldAmount = 0.0f, oldFalloff = 0.0f;
+    bool const haveStray = strayRate && strayAmount && strayFalloff &&
+        strayRate.Get(&oldRate) && strayAmount.Get(&oldAmount) &&
+        strayFalloff.Get(&oldFalloff);
+    Check(haveStray, "clump example authors stray controls");
+    if (haveStray) {
+        strayRate.Set(1.0f); strayAmount.Set(1.0f); strayFalloff.Set(0.0f);
+        Cooked stray = Cook(stage, kClumpDescription, "all strands stray");
+        if (stray.ok) {
+            int checked = 0;
+            for (UsdGenPlane const &plane : stray.out.extraCv) {
+                if (plane.name != TfToken("clumpWeight_0") &&
+                    plane.name != TfToken("clumpWeight_1")) continue;
+                ++checked;
+                Check(std::all_of(plane.f.begin(), plane.f.end(),
+                                  [](float w) { return w == 0.0f; }),
+                      "fully stray strands publish zero effective cohesion");
+            }
+            Check(checked == 2, "stray test observes both native clump levels");
+        }
+        strayRate.Set(oldRate); strayAmount.Set(oldAmount);
+        strayFalloff.Set(oldFalloff);
+    }
 }
 
 // --- dirty propagation through the scene index --------------------------------------

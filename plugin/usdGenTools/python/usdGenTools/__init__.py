@@ -107,6 +107,8 @@ class UsdGenToolsPluginContainer(PluginContainer):
         # honour USDGEN_USDVIEW_SUPERSAMPLE from the launcher.
         from .supersample import Install, AddFactorObserver
         Install()
+        from .playback import Install as InstallPlayback
+        InstallPlayback(plugCtx)
         self._supersampleActions = {}
         AddFactorObserver(self._onSupersampleFactorChanged)
 

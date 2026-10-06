@@ -18,10 +18,23 @@
 // the scheduler's own finite/positive guard (scheduler.cpp), so gusts animate
 // yet stay deterministic per time + seed.
 //
-// Capture pins only time-independent data (per-curve rest roots); the gust is
+// Optional coherent billow adds two traveling waves. Each samples the CV's
+// rest position projected onto the normalized direction, with a seed-wide
+// phase; strengths default to zero for the legacy result. Low and high use
+// t^2 and t^3 envelopes to curve shafts while holding their roots.
+// When an upstream Clump supplies the native ID/center/weight quartet, Wind
+// blends its animated field with stable center-seeded group fields according
+// to the Clump's effective per-CV weight. Gust and low billow resolve from
+// coarse to fine; high billow resolves from fine to coarse. Each component's
+// unclaimed fraction keeps the independent strand field. Constant deflection
+// remains authored per strand; strength, direction, mask and stiffness remain
+// per-strand/per-CV where authored. Missing quartets or zero weights take the
+// exact legacy arithmetic path, including older clumpId-only sources.
+//
+// Capture pins only time-independent data (per-CV rest positions and roots); the gust is
 // re-sampled every Evaluate from the live time. That is the readsTime/rebuild
 // split of cpuParameters' SamplerState: time-dependent state is never pinned
-// in the capture, so no time term enters the capture digest. All six schema
+// in the capture, so no time term enters the capture digest. All Wind schema
 // parameters are value-class (C1); TopologyParameters is the base triple.
 // CPU-only: the CUDA capability matrix has no UsdGenWind row, so the planner
 // rejects a Wind graph exactly like a Clump graph. TopologyEffect = None.
@@ -42,6 +55,7 @@ public:
 
     TfToken Type() const override { return TfToken("UsdGenWind"); }
     UsdGenTopoFx TopologyEffect() const override { return UsdGenTopoFx::None; }
+    bool ReadsTime() const override { return true; }
 
     TfSpan<const TfToken> TopologyParameters() const override;
     TfSpan<const TfToken> ValueParameters() const override;
@@ -60,6 +74,9 @@ public:
 private:
     const TfToken sDirection{"direction"}, sConst{"constStrength"};
     const TfToken sGust{"gustStrength"}, sStiffness{"stiffness"};
+    const TfToken sLowStrength{"billowLowStrength"}, sHighStrength{"billowHighStrength"};
+    const TfToken sLowFrequency{"billowLowFrequency"}, sHighFrequency{"billowHighFrequency"};
+    const TfToken sLowRate{"billowLowRate"}, sHighRate{"billowHighRate"};
     const TfToken sKnots{"stiffness:knots"}, sInterp{"stiffness:interpolation"};
     const TfToken sLinear{"linear"}, sCatmullRom{"catmullRom"};
     const TfToken sBspline{"bspline"}, sConstant{"constant"};

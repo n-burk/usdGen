@@ -429,7 +429,7 @@ class UsdGenClump "UsdGenClump" (
         customData = { dictionary usdGen = { string evaluation = "groom" } }
     )
     uniform int usdGen:clump:level = -1 (
-        doc = """Index of the first clumpId_<n> plane this operator publishes. -1 numbers it by its position among the description's Clump operators. Expression evaluation: groom (once per operator)."""
+        doc = """Index of the first clump metadata level this operator publishes. -1 allocates the next free contiguous range in compiled order, reserving levels from preceding Clump operators (including disabled nodes) and imported C3 clump planes. An explicit nonnegative index must not overlap an occupied range. Expression evaluation: groom (once per operator)."""
         customData = { dictionary usdGen = { string evaluation = "groom" } }
     )
     int usdGen:clump:levels = 1 (
@@ -1036,10 +1036,22 @@ class UsdGenCollide "UsdGenCollide" (
         doc = """How the push-out moves the strand: "flexible" corrects each CV independently, "stiff" hinges the strand about the last clean CV. Expression evaluation: groom (once per operator)."""
         allowedTokens = ["flexible", "stiff"]
     )
+    uniform token usdGen:deepPenetrationMode = "collide" (
+        doc = """Handling for deep closed-collider penetration: "collide" preserves the ordinary solver, while "cutThenCollide" statelessly and smoothly removes remaining source arc beyond a deep contact before collision. Flexible cut-mode collision projects entry and endpoint constraints from current geometry; stiff resolution retains its established strategy. Source length recovers when penetration clears. Below the threshold no pre-cut is applied; flexible collision may still change segment lengths. Expression evaluation: groom (once per operator)."""
+        allowedTokens = ["collide", "cutThenCollide"]
+    )
+    float usdGen:cutDepthThreshold = 0.0 (
+        doc = """Closed-collider penetration depth allowed before cutThenCollide shortens the strand. Depth excludes usdGen:offset. Must be finite and nonnegative. Expression evaluation: primitive (once per curve root)."""
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:cutBlendDepth = 0.02 (
+        doc = """Positive penetration-depth range over which cutThenCollide smoothly activates remaining-arc removal. Stage units; must be finite and greater than zero. Expression evaluation: primitive (once per curve root)."""
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
 }
 
 # UsdGenWind (v3) — 02 §2.8; direction/strength defaults adopted
-# (recorded in C1.md §7).
+# (recorded in C1.md §7). Billow controls are zero-strength opt-in.
 class UsdGenWind "UsdGenWind" (
     inherits = </UsdGenDeformer>
     customData = {
@@ -1048,27 +1060,51 @@ class UsdGenWind "UsdGenWind" (
 )
 {
     vector3f usdGen:direction = (0, 0, 1) (
-        doc = """Authored Wind control "direction". Declared for the frozen v1-v3 vocabulary; no kernel implements Wind yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root)."""
+        doc = """Direction of Wind displacement and billow travel, normalized by the operator. Expression evaluation: primitive (once per curve root)."""
         customData = { dictionary usdGen = { string evaluation = "primitive" } }
     )
     float usdGen:constStrength = 0.0 (
-        doc = """Authored Wind control "constStrength". Declared for the frozen v1-v3 vocabulary; no kernel implements Wind yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root)."""
+        doc = """Constant displacement amplitude along direction, scaled from anchored root to tip. Expression evaluation: primitive (once per curve root)."""
         customData = { dictionary usdGen = { string evaluation = "primitive" } }
     )
     float usdGen:gustStrength = 0.0 (
-        doc = """Authored Wind control "gustStrength". Declared for the frozen v1-v3 vocabulary; no kernel implements Wind yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root)."""
+        doc = """Amplitude of animated gust motion. Without effective clump cohesion, the field varies by strand; cohesive CVs share motion sampled at their clump rest anchor to the extent of their surviving weights. Expression evaluation: primitive (once per curve root)."""
         customData = { dictionary usdGen = { string evaluation = "primitive" } }
     )
+    float usdGen:billowLowStrength = 0.0 (
+        doc = """Displacement amplitude for a coherent, low-frequency traveling billow. Zero preserves the legacy Wind result. Applied along direction with a root-anchored hairT-squared envelope. Expression evaluation: primitive (once per curve root)."""
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:billowLowFrequency = 0.25 (
+        doc = """Low billow spatial frequency in cycles per stage distance unit along direction. The field samples individual rest positions and, where effective cohesion survives, clump rest anchors. Must be nonnegative. Expression evaluation: groom (once per operator)."""
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:billowLowRate = 0.2 (
+        doc = """Low billow temporal rate in cycles per second; negative values reverse travel. Expression evaluation: groom (once per operator)."""
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:billowHighStrength = 0.0 (
+        doc = """Displacement amplitude for a coherent, high-frequency traveling billow. Zero preserves the legacy Wind result. Applied along direction with a root-anchored hairT-cubed envelope. Expression evaluation: primitive (once per curve root)."""
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:billowHighFrequency = 1.25 (
+        doc = """High billow spatial frequency in cycles per stage distance unit along direction. The field samples individual rest positions and, where effective cohesion survives, clump rest anchors. Must be nonnegative. Expression evaluation: groom (once per operator)."""
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:billowHighRate = 0.8 (
+        doc = """High billow temporal rate in cycles per second; negative values reverse travel. Expression evaluation: groom (once per operator)."""
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     float usdGen:stiffness = 0.0 (
-        doc = """Authored Wind control "stiffness". Declared for the frozen v1-v3 vocabulary; no kernel implements Wind yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."""
+        doc = """Resistance to all Wind displacement, modulated by the stiffness ramp. Expression evaluation: groom (once per operator)."""
         customData = { dictionary usdGen = { string evaluation = "groom" } }
     )
     float2[] usdGen:stiffness:knots = [(0, 1), (1, 1)] (
-        doc = """(position, value) ramp knots with position in [0, 1] for Wind. Declared for the frozen v1-v3 vocabulary; no kernel implements Wind yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."""
+        doc = """(hairT, value) ramp knots with hairT in [0, 1] for Wind stiffness. Expression evaluation: groom (once per operator)."""
         customData = { dictionary usdGen = { string evaluation = "groom" } }
     )
     uniform token usdGen:stiffness:interpolation = "catmullRom" (
-        doc = """Interpolation token for Wind. Declared for the frozen v1-v3 vocabulary; no kernel implements Wind yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."""
+        doc = """Interpolation token for the Wind stiffness ramp. Expression evaluation: groom (once per operator)."""
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
     )
 }

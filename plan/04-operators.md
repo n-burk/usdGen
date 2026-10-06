@@ -2,6 +2,184 @@
 
 Date: 2026-09-04. Status: plan v1 (draft, pending review).
 
+### Native Collide limit-surface addendum — 2026-10-04
+
+The current `UsdGenCollide` reads the collider Mesh's authored
+`subdivisionScheme` at the evaluated frame. Valid Catmull-Clark, Loop and
+bilinear targets use their posed OpenSubdiv limit surface; the Catmull-Clark
+path also accepts non-quad faces. The polygonal collision path remains
+authoritative for `subdivisionScheme = "none"`. A proxy BVH narrows candidate
+faces, while limit patch evaluation refines the contact and curved segment
+checks. Face subsets restrict collision to their selected faces, and an empty
+subset remains an error.
+
+Otherwise-valid unsupported or rejected subdivision topology emits a warning
+with collider path, scheme and reason before polygon fallback. Unsafe geometry,
+failed evaluation and unmet precision bounds can fail the cook instead. This
+does not add a schema control: artists author the Mesh subdivision token.
+Viewport complexity changes display refinement, not native collision.
+The historical v3 waiting statement in §4 below is retained as design history;
+it no longer describes the implemented Collide operator.
+
+### Cut-before-collision addendum — 2026-10-04
+
+`UsdGenCollide` may apply a deterministic, stateless prefix cut before its
+ordinary collision sweeps. `usdGen:deepPenetrationMode` is the uniform token
+`collide` or `cutThenCollide`, defaulting to `collide`; the default runs the
+existing collision path without the pre-cut. Flexible resolution may change
+segment lengths, while stiff resolution preserves them through collision.
+After the optional pre-cut, flexible `cutThenCollide` resolution projects
+entry and endpoint corrections from the curve's current geometry on each
+iteration. It does not reuse a facet anchor from an earlier iteration. Flexible
+resolution may change segment lengths during collision; below the threshold
+means only that no pre-cut was applied. Stiff resolution retains its established
+collision strategy. The default `collide` mode remains unchanged. Experimental
+local-hinge, mirror-choice and all-lateral variants are not part of this
+contract, and this mode makes no general continuity promise for multi-collider
+solutions.
+`usdGen:cutDepthThreshold` is a finite nonnegative distance in stage units.
+`usdGen:cutBlendDepth` is a finite positive distance in stage units. Both are
+sampled once at the strand root. Signed solid-interior depth is measured from
+the collider boundary and excludes collision offset. Let `L` be the current
+upstream arc length and `s` a source-arc coordinate. The whole-strand cut is
+
+`C = max_s(envelope(s) * (L - s) * smoothstep(clamp((interiorDepth(s) - cutDepthThreshold) / cutBlendDepth, 0, 1)))`.
+
+Depth and the objective are evaluated on the original curve with adaptive
+samples between its control points. The nonnegative envelope includes the
+resolved mask. A contact just beyond the threshold therefore produces a small,
+continuous cut, while deep contact can remove the remaining tail beyond the
+contact coordinate. The target retained length is `max(0, L - C)`. That target
+is derived from the current frame's upstream arc, and the prepared result enters
+the cut-aware collision solver exactly once. No shorter length is carried from
+another frame, so the original length returns as contact clears.
+
+The cut is a true prefix-arc operation with fixed curve topology. It preserves
+the root and scales the original arc stations onto the retained prefix; it
+does not uniformly resample a newly constructed polyline or trim the result
+after collision. The mapping is continuous as the cut amount approaches zero.
+Current points, widths and arbitrary typed `extraCv` fields follow that same
+source-arc remap. Generator-owned `rest` and `hairT` retain their original
+values. Uniform curve identities, native clump membership and clump anchors
+also remain unchanged.
+
+The resolved mask participates in the envelope that selects one whole-strand
+shortening amount. A CV whose individual mask weight is zero may
+therefore still move when the strand's source arc is remapped. An all-zero
+resolved mask, or `pushAmount = 0`, remains an exact identity and performs no
+cut or collision correction.
+
+Flexible mode recomputes projected entry and endpoint corrections from the
+current curve after each accepted correction and may compress or stretch
+segments after the pre-cut. Stiff mode continues to use its established stiff
+strategy. Neither strategy promises that every downstream multi-collider solve
+varies continuously as contact topology changes.
+
+The retained target length identifies a coordinate on the source arc. Chords
+connecting the remapped samples may sum to less than that source-arc length,
+so validation compares each remapped value with its expected source-arc
+coordinate rather than requiring the resampled output chord sum to equal the
+target. The subsequent collision may move the retained prefix. Stiff-mode
+validation therefore proves preservation of those resampled-prefix chord
+lengths through collision and distinguishes the pre-collision cut target from
+final corrected positions.
+
+Temporal validation compares all 100 canonical poses with the prior runtime,
+normalizing each adjacent displacement by the incoming curve length. It
+reports maximum, RMS and p99 CV motion, tip motion, per-curve RMS motion,
+instantaneous retained-length changes, collision clearance, roots and native
+metadata. Fractional diagnostics include the worst transitions across those
+metrics and any curve whose adjacent displacement exceeds both 0.1 times its
+incoming length and three times the collider surface's corresponding frame
+step. This selection catches visible sub-length pops while distinguishing
+them from a fast but continuous response to collider travel; it is a
+diagnostic selector, not a playback-speed acceptance cap. Selected intervals
+are cooked at quarter, half and three-quarter subframes. A continuous fast
+response must converge as the time step is subdivided; a branch flip that
+retains a finite jump does not pass. Cheap fractional fixtures may isolate the
+exact worst curves when the upstream groom is static, but must preserve their
+vertex and uniform fields and use the actual collider poses. The 100-frame
+gate still evaluates the whole groom. Repeated and reverse-order cooks must
+reproduce the same geometry and fields. Final media remains blocked until the
+complete sequence, fractional probes and a low-cost preview pass.
+
+### Native clump motion addendum — 2026-10-03
+
+This addendum supersedes older independent stochastic-motion assumptions for
+native clump data. Each numeric level `L` carries four typed planes:
+`clumpId_L` (uniform int), `clumpCenter_L` (uniform float3 rest anchor),
+`clumpCenterId_L` (uniform int2 encoding the exact stable 64-bit center identity),
+and `clumpWeight_L` (vertex float effective cohesion). Weight includes the Clump
+amount, profile, strays and live mask. The rest anchor is captured independently
+of subsequent deformation. The quartet travels through typed copy-on-write
+buffer operations, resampling, compaction, Freeze and import. Legacy ID-only
+data remains available but does not imply cohesion: membership identity and
+effective following weight are distinct. Malformed native quartets fail
+validation instead of silently inventing group motion. GuideInterpolate takes
+authored or baked C3 guide CurveSets; a live Clump operator result is not a
+guide-curve relationship target. Commit or bake that result as BasisCurves
+before feeding it to GuideInterpolate.
+
+Wind samples shared fields at the clump rest anchor. Gust and low billow consume
+surviving cohesion from coarse to fine levels, while high billow consumes it from
+fine to coarse. Each level takes only the weight left after earlier levels;
+fully cohesive fine motion can leave zero coarse contribution at a CV. The
+remaining weight uses the original individual per-CV field. Shared
+low/high waves then use normalized squared/cubed root-to-tip envelopes.
+Constant wind retains its authored per-curve strength. Curl and Bend share
+stochastic draws from fine to coarse while retaining authored root frames and
+parameter variation. Noise blends field outputs sampled at group anchors while
+retaining per-CV frequency, correlation and detail. Deterministic Wave is
+unchanged and passes the metadata through. Collision still resolves actual
+strand geometry; it does not average a clump's collisions.
+
+These are native operator semantics, not expression substitutions or renderer
+deformation. Active weighted clump-aware Noise is unsupported on CUDA and Vulkan;
+both device planners reject that execution request explicitly. Unclumped and
+legacy ID-only Noise retain their existing device admission.
+
+The shared capture mapping is immutable after construction. A level owns CoW
+snapshots of its membership, rest-anchor and stable-center-ID source planes so
+the previous capture keeps their allocations alive. On recapture, matching
+level, layout and source-allocation identities reuse read-only dense
+curve-to-group indices and group records. A changed plane detaches its CoW
+allocation and rebuilds the mapping; changed effective CV weights still flow
+through the new capture. Capture clones share the read-only mapping instead
+of copying its dense vectors.
+
+Maintainer validation used `tests/perf/benchUsdGenClumpMotion.cpp` with 100,000
+curves, eight CVs each and two clump levels. The local median for value
+recapture plus warm evaluation changed from 60.913 ms to 46.332 ms (about 24%
+faster); final capture clone time was below 0.001 ms. This is a CPU fixture measurement,
+not a renderer, scene-index or general groom-performance claim. The isolated
+T0/T1 run had 139 passes, 11 skips and one `PomadeSoakSmoke` device-total-memory
+failure. The unchanged prior main binaries also failed that soak check, so the
+run does not attribute it to clump motion. The historical measurements below
+do not establish the new behavior or its cost.
+
+The final native playback contract declares Wind as a `ReadsTime` consumer and
+Collide as a `SamplesFrameInputs` consumer. Frame or time-rate changes schedule
+an enabled Wind node and its descendants while keeping static upstream source
+captures reusable. Collide instead refreshes its authored collider input at
+the current frame, including the composed affine transform, before cooking
+the affected groom. The Hydra scene-index frame notice must admit both native
+consumers even when no expression reads `$frame` or `$time`. Focused scheduler,
+scene-publication and actual Storm Play probes validate this behavior; the
+historical test table below is not a claim that those current gates existed
+when the original plan was written.
+
+For async scene-index Play, temporal admission keeps one native cook in flight
+and the latest compatible frame descriptor. When that cook completes, the latest
+captured frame starts even if Play has since stopped, so Stop can settle on its
+selected frame. Authored edits at the same frame and structural changes use
+immediate commit/cancel; a structural revision fences stale completion,
+publication and progress. Compatibility conservatively compares the graph,
+topology and static values, including imported C3 clump planes, while allowing
+time-sampled positions, transforms and parameters to vary. Ingress reads the
+upstream Stage time before the scene-globals notice advances, and a duplicate
+globals notice for an already captured frame does not cancel its cook. This is
+a correctness and bounded-work contract, not a frame-rate or throughput claim.
+
 This document is the catalogue of usdGen's grooming operators. It states the model every operator
 obeys (the base property block, the mask block, seed salting, the blend envelope, `usdGen:enabled`,
 `usdGen:algorithmVersion`, and the three declarations `Space` / `ReadPhase` / `TopologyEffect`), the

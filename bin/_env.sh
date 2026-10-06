@@ -34,9 +34,10 @@ export DYLD_LIBRARY_PATH="$LD_LIBRARY_PATH"
 
 # Python tools: usdGen build-tree python package + OpenUSD's site-packages.
 PY_SITE="$(ls -d "$USD"/lib/python*/site-packages 2>/dev/null | head -1 || true)"
-if [ -n "$PY_SITE" ]; then
-    export PYTHONPATH="$GENBUILD/python:$PY_SITE${PYTHONPATH:+:$PYTHONPATH}"
+if [ -z "$PY_SITE" ] && [ -d "$USD/lib/python" ]; then
+    PY_SITE="$USD/lib/python"
 fi
+export PYTHONPATH="$GENBUILD/python${PY_SITE:+:$PY_SITE}${PYTHONPATH:+:$PYTHONPATH}"
 
 # Plugin discovery: build-tree usdGen resources win (the generated,
 # LibraryPath-carrying plugInfo.json), then the stock OpenUSD plugin roots.
@@ -46,6 +47,10 @@ for _d in \
     "$GENBUILD/usd/usdGenSchema/resources" \
     "$GENBUILD/usd/usdGenImaging/resources" \
     "$GENBUILD/usd/usdGenShaders/resources" \
+    "$GENBUILD/usd/usdGenTools/resources" \
+    "$GENBUILD/usd/usdGenPomade/resources" \
+    "$GENBUILD/usd/usdGenPomadeTools/resources" \
+    "$GENBUILD/usd/usdNoodles/resources" \
     "$GENBUILD/python/usdgen" \
     "$USD/plugin/usd" \
     "$USD/lib/usd"

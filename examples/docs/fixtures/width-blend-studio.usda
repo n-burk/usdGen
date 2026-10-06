@@ -1,0 +1,80 @@
+#usda 1.0
+# Copyright (c) 2026 Nick Burkard
+# SPDX-License-Identifier: MIT
+(
+    defaultPrim = "World"
+    upAxis = "Z"
+    subLayers = [@./width-blend-fixture.usda@]
+)
+over "World" {
+    def Camera "FixtureCam" {
+        matrix4d xformOp:transform = ( (1.00000000, 0.00000000, -0.00000000, 0.00000000), (0.00000000, 0.35599533, 0.93448773, 0.00000000), (0.00000000, -0.93448773, 0.35599533, 0.00000000), (0.00000000, -1.05000000, 0.48000000, 1.00000000) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+        float2 clippingRange = (0.01, 50)
+        float focalLength = 49
+        float horizontalAperture = 36
+        float verticalAperture = 24
+    }
+    def DistantLight "Key" {
+        color3f inputs:color = (1, 0.92, 0.81)
+        float inputs:intensity = 1.5
+        bool inputs:normalize = true
+        float3 xformOp:rotateXYZ = (36, -28, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+    def DistantLight "Fill" {
+        color3f inputs:color = (0.76, 0.89, 1)
+        float inputs:intensity = 0.65
+        bool inputs:normalize = true
+        float3 xformOp:rotateXYZ = (-36, 48, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+    def DomeLight "Sky" {
+        asset inputs:texture:file = @../../maps/StinsonBeach.hdr@
+        float inputs:intensity = 0.35
+    }
+    def Scope "Looks" {
+        def Material "Hair" {
+            token outputs:surface.connect = </World/Looks/Hair/Surface.outputs:surface>
+            def Shader "Surface" {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </World/Looks/Hair/Color.outputs:result>
+                color3f inputs:diffuseColor = (0.68, 0.53, 0.35)
+                float inputs:roughness = 0.83
+                token outputs:surface
+            }
+            def Shader "Color" {
+                uniform token info:id = "UsdPrimvarReader_float3"
+                token inputs:varname = "displayColor"
+                color3f inputs:fallback = (0.68, 0.53, 0.35)
+                color3f outputs:result
+            }
+        }
+        def Material "Backdrop" {
+            token outputs:surface.connect = </World/Looks/Backdrop/Surface.outputs:surface>
+            def Shader "Surface" {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.055, 0.066, 0.076)
+                float inputs:roughness = 0.9
+                token outputs:surface
+            }
+        }
+    }
+    def Mesh "Backdrop" (prepend apiSchemas = ["MaterialBindingAPI"]) {
+        rel material:binding = </World/Looks/Backdrop>
+        uniform token subdivisionScheme = "none"
+        bool doubleSided = true
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-3, 0.42, -3), (3, 0.42, -3), (3, 0.42, 3), (-3, 0.42, 3)]
+    }
+    over "Width_A" (prepend apiSchemas = ["MaterialBindingAPI"]) {
+        rel material:binding = </World/Looks/Hair>
+    }
+    over "Width_Blend" (prepend apiSchemas = ["MaterialBindingAPI"]) {
+        rel material:binding = </World/Looks/Hair>
+    }
+    over "Width_B" (prepend apiSchemas = ["MaterialBindingAPI"]) {
+        rel material:binding = </World/Looks/Hair>
+    }
+}

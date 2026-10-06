@@ -1,0 +1,14 @@
+#usda 1.0
+# Copyright (c) 2026 Nick Burkard
+# SPDX-License-Identifier: MIT
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    startTimeCode = 0
+    endTimeCode = 99
+    timeCodesPerSecond = 24
+    framesPerSecond = 24
+    doc = "Dense upright fur for a native Wind billow demonstration."
+    subLayers = [@wind-clumped.usda@]
+)

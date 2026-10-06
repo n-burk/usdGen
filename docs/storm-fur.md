@@ -31,6 +31,61 @@ the safe boundary for the stage scene index. A host other than usdview must set
 for asynchronous updates itself. This is currently a CPU publication path;
 there is no stock-Storm GPU-resident tile handoff.
 
+The timeline **Play** button waits for every enabled groom's complete current
+generation in Storm and for the viewport to present its converged image before advancing.
+Playback slows to the cook rate when necessary. **Stop** stays responsive, and
+manual timeline scrubbing continues to show progressively arriving tiles.
+
+Use **Playblast**, next to Play, to save the displayed timeline range as an MP4.
+Choose the output with the file dialog. The tool captures each actual viewport
+frame after the same publication and presentation checks, then encodes it at the
+timeline FPS. Each timeline sample contributes one movie frame, including both
+ends of the displayed range. Keep the viewport size fixed during capture.
+Cancel stops capture or encoding and restores the previous frame and playback
+state; a failed or cancelled capture preserves any existing output movie.
+`ffmpeg` must be on `PATH`, or set `USDGEN_FFMPEG` to its executable. Native frame
+readiness support must be present in `usdGenImaging`; an unavailable or ambiguous
+scene-index binding reports an error instead of advancing or capturing stale hair.
+Scenes without groom roots, and viewers launched with `USDGEN_ENABLE=0`, use
+the authored frame and converged viewport presentation checks for Playblast.
+Other render delegates retain stock usdview Play behavior. Groom publication
+gating is supported for Storm; ordinary USD scenes can be playblasted with
+other delegates when their viewport converges.
+`USDGEN_USDVIEW_FRAME_TIMEOUT` controls the per-frame wait limit in seconds
+(default 900; `0` waits until completion or cancellation).
+
+## Collide practice frames
+
+The Collide practice scene uses `cutThenCollide`, flexible resolution,
+`cutDepthThreshold=0.15` and `cutBlendDepth=0.02`. The threshold is a signed
+inset depth in stage units from the Shield's evaluated Catmull-Clark limit.
+Collision correction continues to use the outer evaluated boundary; shallow
+contact bends the fur without triggering temporary shortening. The blend
+gradually turns shortening on beyond the inset depth. These are practice-scene
+settings; operator defaults are unchanged.
+
+The temporary cut is recalculated from the incoming strand at every frame.
+When deep contact clears, the full incoming length is available again.
+Flexible correction can still change final segment lengths, so final
+control-polygon chord lengths cannot identify the prepared retained prefix.
+Use the incoming and prepared geometry for that measurement.
+
+Choose `Camera > Select Camera > CamMotion` and compare held frames 0, 27 and
+99 after the hair settles. Storm Play waits for the complete current-frame
+groom and its converged viewport presentation; scrubbing remains progressive.
+Use Playblast to capture the displayed range at timeline FPS when slow cooks
+make interactive playback take longer.
+
+To inspect the fur response without the sphere covering it, open
+`Window > Layer Editor` and choose **Session Layer** as the edit target. Select
+`/World/Shield` in the Scene Graph and choose `Edit > Make Invisible`
+(`Ctrl+H`). Hold frame 27 or 99 until the hair settles; select the Shield
+`visibility` property to see its `invisible` value. The hidden Shield still
+collides: keep both `/World/Shield` and `/World/ScalpVolume` in
+`usdGen:colliders`. Choose `Edit > Remove Session Visibility` (`Ctrl+U`)
+to show the sphere again, then restore the previous edit target. This
+comparison uses a session opinion and requires no source-layer save.
+
 An active diagnostic preview waits for its whole-output colour pass, and
 whole-groom occlusion plus the scalp-shadow cap settle with the final complete
 generation. Progressive tiles therefore expose completed curve geometry early

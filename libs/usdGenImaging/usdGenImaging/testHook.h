@@ -66,6 +66,9 @@ public:
         HdSceneIndexBase const &index, SdfPath const &groom);
     static uint64_t groomCaptureCount(HdSceneIndexBase const &index);
     static uint64_t groomCookCount(HdSceneIndexBase const &index);
+    /// Replay a prior-revision tile callback after a structural cook commits.
+    static bool staleGroomProgressRejected(HdSceneIndexBase const &index,
+                                           SdfPath const &groom);
     static void groomOwnerCommandBarrier(HdSceneIndexBase const &index);
     static uint64_t groomSequenceLastIssued(HdSceneIndexBase const &index);
     static uint64_t groomSequenceCompletedThrough(HdSceneIndexBase const &index);

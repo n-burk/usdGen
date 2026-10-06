@@ -1,0 +1,51 @@
+<!-- Copyright (c) 2026 Nick Burkard -->
+<!-- SPDX-License-Identifier: MIT -->
+
+# Authoring an operator stack
+
+An `UsdGenDescription` binds a surface and owns one `Ops` scope. Place operator
+prims beneath that scope. The composed hierarchy supplies the execution order:
+children run before parents, and lower siblings run before upper siblings. The
+first sibling is the terminal result that usdGen publishes. The small
+[`Scatter → Grow` scene](../../examples/scatter-grow-plane.usda) authors
+`Grow` above `Scatter` for this reason. There is no authored
+`usdGen:input` wire for an ordinary stack.
+
+Most stacks begin with `Scatter` followed by `Grow` or `GuideInterpolate`.
+`CurveSource` and `ReferenceSource` can begin with authored curves instead.
+Modifiers then refine shape, width, and movement. A source that is disabled
+produces an empty curve set; a disabled modifier passes its upstream curves
+through. On schema-authored operators, `usdGen:enabled` defaults to `true`.
+
+On schema-authored operators, `usdGen:seed` defaults to `0`. Random draws use stable curve
+IDs, so keeping the seed and IDs fixed makes random variation repeatable.
+Stylers and deformers inherit `usdGen:mask`, a weight from 0 to 1 that
+defaults to 1. A mask of zero preserves the upstream result; a value between
+zero and one blends the effect. Put an authored number on the attribute for
+uniform strength, or connect a typed `UsdGenExpression` result to vary it
+across roots or CVs. Evaluation metadata determines whether an expression
+runs once for the groom, each strand, or each CV. The
+[`expression-width-plane` scene](../../examples/expression-width-plane.usda)
+shows a connected width and frizz mask. `UsdGenExprOp` is different: it
+evaluates a program as a geometry or width operation in the stack.
+
+Schema defaults describe attributes, not guaranteed visible results. For
+example, `Collide` has `usdGen:pushAmount = 0`, so its default correction is
+zero, and `Wind` starts with zero strengths. A relationship needs a valid
+target before its related effect can appear. The reference pages call out
+declared options that the current kernel refuses, such as vector Displace.
+`UsdGenInstance` is declared in the schema but has no registered kernel.
+`UsdGenWidthBlend` has a runtime kernel but no generated USD schema type.
+
+The CPU example scenes render through stock Storm. Some operators are on the
+CPU reference lane only; CUDA admission rejects those types. A groom whose
+`UsdGenGroom` prim selects CUDA may cook device curves, but the stock Storm
+device-resident handoff is not available. For an interactive display example,
+start with the plain `Xform` groom parent in
+[`scatter-grow-plane.usda`](../../examples/scatter-grow-plane.usda) and the
+[examples guide](../../examples/README.md).
+
+Pomade's viewport Scale gizmo calls its helper `scaleFactor`; that is an
+authoring gesture for scaling selected tube parts. It is not a `UsdGenScale`
+operator attribute. The operator's authored scalar is `usdGen:scale`. See
+[Pomade](../pomade-tool.md) for the tool and its commit workflow.

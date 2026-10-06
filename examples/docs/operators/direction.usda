@@ -1,0 +1,134 @@
+#usda 1.0
+# Copyright (c) 2026 Nick Burkard
+# SPDX-License-Identifier: MIT
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Live usdGen macro fur patch for the operator manual."
+)
+def Xform "World" {
+    def Camera "Cam" {
+        matrix4d xformOp:transform = ( (0.74115395, 0.00000000, -0.67133510, 0.00000000), (-0.34490382, 0.85793511, -0.38077382, 0.00000000), (0.57596195, 0.51375806, 0.63586200, 0.00000000), (1.75000000, 1.18000000, 1.88000000, 1.00000000) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+        float2 clippingRange = (0.02, 50)
+        float focalLength = 44
+        float horizontalAperture = 36
+        float verticalAperture = 24
+    }
+    def DistantLight "Key" {
+        color3f inputs:color = (1, 0.79, 0.60)
+        float inputs:intensity = 1.4
+        bool inputs:normalize = true
+        float3 xformOp:rotateXYZ = (-20, -35, -15)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+    def DistantLight "Rim" {
+        color3f inputs:color = (0.59, 0.79, 1)
+        float inputs:intensity = 0.45
+        bool inputs:normalize = true
+        float3 xformOp:rotateXYZ = (55, 148, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+    def DistantLight "Fill" {
+        color3f inputs:color = (0.84, 0.90, 1)
+        float inputs:intensity = 0.85
+        bool inputs:normalize = true
+        float3 xformOp:rotateXYZ = (-50, 15, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+    def DomeLight "Sky" {
+        asset inputs:texture:file = @../../maps/StinsonBeach.hdr@
+        color3f inputs:color = (0.82, 0.88, 1)
+        float inputs:intensity = 0.5
+    }
+    def Scope "Looks" {
+        def Material "Base" {
+            token outputs:surface.connect = </World/Looks/Base/Surface.outputs:surface>
+            def Shader "Surface" {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.035, 0.043, 0.051)
+                float inputs:roughness = 0.92
+                token outputs:surface
+            }
+        }
+        def Material "Fur" {
+            token outputs:surface.connect = </World/Looks/Fur/Surface.outputs:surface>
+            def Shader "Surface" {
+                uniform token info:id = "UsdGenHairStrands"
+                color3f inputs:baseColor = (0.63, 0.40, 0.20)
+                color3f inputs:tipColor = (0.85, 0.65, 0.36)
+                float inputs:roughness = 0.55
+                float inputs:specular = 0.35
+                float inputs:scatter = 0.36
+                float inputs:selfShadow = 0.48
+                float inputs:randomRoughness = 0.12
+                token outputs:surface
+            }
+        }
+    }
+    def Mesh "Patch" (prepend apiSchemas = ["UsdGenRestAPI", "MaterialBindingAPI"]) {
+        rel material:binding = </World/Looks/Base>
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 3, 2, 1]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1)]
+        point3f[] primvars:rest = [(0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1)] (interpolation = "vertex")
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "vertex")
+    }
+    def Mesh "Backdrop" (prepend apiSchemas = ["MaterialBindingAPI"]) {
+        rel material:binding = </World/Looks/Base>
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 3, 2, 1]
+        point3f[] points = [(-3, -0.055, -3), (4, -0.055, -3), (4, -0.055, 4), (-3, -0.055, 4)]
+    }
+
+    def Xform "Groom" {
+        def UsdGenDescription "Fur" (prepend apiSchemas = ["UsdGenLookAPI", "MaterialBindingAPI"]) {
+            rel material:binding = </World/Looks/Fur>
+            rel usdGen:surface = </World/Patch>
+            token usdGen:curve:basis = "bspline"
+            float usdGen:width:default = 0.0012
+            int usdGen:look:jitterSeed = 113
+            color3f usdGen:look:rootColor = (0.63, 0.40, 0.20)
+            color3f usdGen:look:tipColor = (0.85, 0.65, 0.36)
+            float usdGen:look:valueJitter = 0.055
+
+            def Scope "Ops" {
+            def UsdGenWidth "width" {
+                float usdGen:width = 0.0011
+                float2[] usdGen:width:knots = [(0, 1), (0.5, 0.62), (1, 0.018)]
+            }
+            def UsdGenDirection "direction" {
+                vector3f usdGen:direction = (0, 1, 0)
+                float usdGen:amount = 0.9
+                float2[] usdGen:direction:knots = [(0, 0.08), (1, 1)]
+            }
+            def UsdGenNoise "baseNoise" {
+                int usdGen:seed = 37
+                float usdGen:noise:magnitude = 0.0018
+                float usdGen:noise:frequency = 3.5
+                float2[] usdGen:noise:magnitude:knots = [(0, 0), (0.5, 0.24), (1, 1)]
+            }
+            def UsdGenBend "baseBend" {
+                float usdGen:angle = 11
+                float2[] usdGen:angle:knots = [(0, 0), (0.45, 0.35), (1, 1)]
+                float2 usdGen:angleRandom = (0.68, 1.18)
+            }
+            def UsdGenGrow "grow" {
+                int usdGen:seed = 19
+                int usdGen:segments = 18
+                float usdGen:length = 0.18
+                float2 usdGen:lengthRandom = (0.84, 1.05)
+                token usdGen:direction = "vector"
+                vector3f usdGen:directionVector = (0.62, 0.56, 0.27)
+            }
+            def UsdGenScatter "scatter" {
+                int usdGen:seed = 41
+                float usdGen:density = 11000
+            }
+            }
+        }
+    }
+}

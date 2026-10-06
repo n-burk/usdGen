@@ -4,6 +4,7 @@ The product introduction is the [repository README](../README.md). This page is 
 
 ## Using usdGen
 
+- [Visual manual](site/index.html) — illustrated grooming workflow and operator reference. Open the generated `site/index.html` in a browser; see [the manual build guide](../tools/docs/README.md) to rebuild it from source.
 - [pomade-tool.md](pomade-tool.md) — Pomade, the usdview hierarchical groom tool
 - [storm-fur.md](storm-fur.md) — Storm hair shading, self-shadowing, and how to launch a groom
 - [moonray-fur.md](moonray-fur.md) — Instanced fur through the MoonRay Hydra delegate (`hdMoonray`)
@@ -11,6 +12,7 @@ The product introduction is the [repository README](../README.md). This page is 
 - [limit-scatter.md](limit-scatter.md) — Scatter limits
 - [workstation-protocol.md](workstation-protocol.md) — Manual display checks (tier T4). Not run in CI
 - [../examples/README.md](../examples/README.md) — Example scenes
+- [../examples/alab/README.md](../examples/alab/README.md) — ALab stoat source, license, consolidation, and groom recipe
 
 ## Design record
 

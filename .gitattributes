@@ -1,2 +1,38 @@
 # Baked Ptex maps (examples/maps) are binary; never convert line endings.
 *.ptx binary
+
+# Preserve checkout bytes of hash-bound manual sources.
+# These files are identified by SHA-256 in docs/reference; mixed endings
+# remain unconverted, while uniform endings are explicit across platforms.
+examples/docs/fixtures/freeze-studio.usda text eol=crlf
+examples/docs/fixtures/part-studio.usda text eol=crlf
+examples/docs/fixtures/width-blend-studio.usda text eol=crlf
+examples/docs/operators/bend.usda text eol=crlf
+examples/docs/operators/clump.usda text eol=crlf
+examples/docs/operators/collide-slide.usda -text
+examples/docs/operators/collide.usda -text
+examples/docs/operators/curl.usda text eol=crlf
+examples/docs/operators/curve-source.usda text eol=crlf
+examples/docs/operators/direction.usda text eol=crlf
+examples/docs/operators/displace.usda text eol=crlf
+examples/docs/operators/expr-op.usda text eol=crlf
+examples/docs/operators/grow.usda text eol=crlf
+examples/docs/operators/length.usda text eol=crlf
+examples/docs/operators/noise.usda text eol=crlf
+examples/docs/operators/reference-source.usda text eol=crlf
+examples/docs/operators/resample.usda text eol=crlf
+examples/docs/operators/scale.usda text eol=crlf
+examples/docs/operators/scatter.usda text eol=crlf
+examples/docs/operators/sculpt-layer.usda text eol=crlf
+examples/docs/operators/smooth.usda text eol=crlf
+examples/docs/operators/straighten.usda text eol=crlf
+examples/docs/operators/wave.usda text eol=crlf
+examples/docs/operators/width.usda text eol=crlf
+examples/docs/operators/wind-clumped.usda text eol=lf
+examples/docs/operators/wind-unclumped.usda text eol=lf
+examples/guide-interpolate-plane.usda text eol=crlf
+examples/rbf-guides-plane.usda text eol=crlf
+libs/usdGen/usdGen/ops/collide.cpp -text
+tools/docs/capture_collide_slide_ui.py text eol=crlf
+tools/docs/encode_collide_gif.py text eol=lf
+tools/docs/render_collide_cut_accepted.py text eol=crlf

@@ -880,6 +880,16 @@ float Normalise(float value, float lo, float hi)
 }  // namespace
 
 extern "C" {
+size_t usdGenImaging_copy_playback_status_json(
+    const char* selectorJson, double requestedFrame, char* buffer, size_t capacity) {
+    try {
+        std::string const status = UsdGenGroomSceneIndex::PlaybackStatusJson(
+            selectorJson ? selectorJson : "", requestedFrame);
+        size_t const required = status.size() + 1;
+        if (buffer && capacity >= required) std::memcpy(buffer, status.c_str(), required);
+        return required;
+    } catch (...) { return 0; }
+}
 
 int UsdGenBrush_ApiVersion(void) { return USDGEN_BRUSH_API_VERSION; }
 

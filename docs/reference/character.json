@@ -1,0 +1,64 @@
+{
+  "_copyright": "Copyright (c) 2026 Nick Burkard",
+  "_license": "SPDX-License-Identifier: MIT (documentation metadata only; ALab asset license below)",
+  "hero_approved": true,
+  "title": "Groom the ALab stoat",
+  "source": "Netflix Animation Studios ALab / ASWF Digital Production Example Library",
+  "source_version": "ALab v2.3.0 structure and v2.2.0 Techvar assets",
+  "license": "ASWF Digital Assets License v1.1",
+  "copyright_notice": "Netflix Animation Studios ALab Copyright 2025 Netflix, Inc. All rights reserved.",
+  "scene": "examples/alab/stoat-groom.usda",
+  "baked_curve_count": 188914,
+  "bare_scene": "examples/alab/stoat-bare.usda",
+  "guide_scene": "examples/alab/stoat-guides.usda",
+  "images": {
+    "bare": {
+      "path": "media/stoat-bare.png",
+      "caption": "The ALab character before fur, with its native rigid tail tuft visible.",
+      "renderer": "MoonRay",
+      "provenance": "Rendered from examples/alab/stoat-bare.usda and the locally consolidated ALab stoat01.usdc, using the same HeroCam and studio light/floor settings as the groom image."
+    },
+    "guides": {
+      "path": "media/stoat-guides.png",
+      "caption": "Sparse cyan guides establish the coat's comb direction before the dense fur is grown.",
+      "renderer": "Storm",
+      "provenance": "Rendered from the authored guide curves in examples/alab/stoat-guides.usda."
+    },
+    "groom": {
+      "path": "media/stoat-groom.png",
+      "caption": "Guide-driven usdGen fur on the ALab skin; the study uses a fitted smooth tail emitter to replace the visible native tuft spikes.",
+      "renderer": "MoonRay",
+      "provenance": "Rendered from 188,914 native BasisCurves baked from the six usdGen descriptions in examples/alab/stoat-groom.usda, with the matching ALab geometry, skeleton and materials. Studio lighting is authored in renders/docs/operators/stoat_final_studio.usda."
+    },
+    "detail": {
+      "path": "media/stoat-detail.png",
+      "caption": "A closer view of the short facial fur and tapered fibres around the muzzle and ears.",
+      "renderer": "MoonRay",
+      "provenance": "Rendered from the same 188,914 cooked native usdGen BasisCurves as the approved groom image, through /World/DetailCam and the matching MoonRay studio lighting."
+    }
+  },
+  "steps": [
+    {
+      "title": "Prepare the asset",
+      "body": "Run tools/prepare_alab.py prepare to fetch the official ALab stoat and consolidate its render geometry, materials, skin bindings and 44-joint skeleton into out/alab/stoat01.usdc."
+    },
+    {
+      "title": "Build the study",
+      "body": "Run python -S tools/make_stoat_groom.py to write the bare, sparse-guide and groom USD layers. The groom layer references the local ALab asset."
+    },
+    {
+      "title": "Shape the coat",
+      "body": "Face subsets divide the ALab skin into brown back, cream belly, brown head and short cream face. Sparse curves guide Scatter, Guide Interpolate, Noise and Width. Mouth faces stay bare."
+    },
+    {
+      "title": "Compare the results",
+      "body": "Use the matching HeroCam in the bare and groom stages; DetailCam shows individual facial fibres. The groom is static and does not claim skeleton-driven deformation."
+    }
+  ],
+  "notes": [
+    "The ALab source asset and its license remain outside the MIT-licensed source tree.",
+    "The outfit and backpack are preserved in the consolidated asset but hidden in the groom study to expose the body.",
+    "The visible groom tail tuft uses a smooth proxy fitted to the ALab tuft bounds; the original mesh is preserved and shown in the bare comparison.",
+    "The study overrides eye presentation materials but does not alter the consolidated source asset."
+  ]
+}

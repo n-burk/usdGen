@@ -15,6 +15,7 @@
 #include "usdGen/compiler.h"
 
 #include "usdGen/expressionTargets.h"
+#include "usdGen/ops/clump.h"
 
 #include "usdGen/opRegistry.h"
 #include "usdGen/cudaExecution.h"
@@ -1037,6 +1038,82 @@ void UsdGenCompiler::_Build(
     std::vector<int> topoOfDesc(n, -1);
     for (int pos = 0; pos < n; ++pos) topoOfDesc[order[pos]] = pos;
 
+    // Allocate auto Clump levels in compiled topological order. Reserve every
+    // emitted level, including disabled nodes, and reject pinned collisions
+    // before moving any reusable graph state.
+    std::vector<int> clumpBase(size_t(n), -1);
+    std::map<int, SdfPath> clumpOwner;
+    // CurveSource can import an existing Clump quartet. Its level names are
+    // already part of the graph namespace, so a following auto Clump must
+    // allocate around them rather than replace those authored planes.
+    for (UsdGenCurveSetDesc const &curves : desc.curveSets) {
+        for (UsdGenAuthoredPlaneDesc const &plane : curves.authoredPlanes) {
+            std::string const name = plane.name.GetString();
+            constexpr char prefix[] = "clumpId_";
+            if (name.compare(0, sizeof(prefix) - 1, prefix) != 0) continue;
+            std::string const suffix = name.substr(sizeof(prefix) - 1);
+            if (suffix.empty() || (suffix.size() > 1 && suffix.front() == '0')) continue;
+            int level = 0;
+            bool valid = true;
+            for (char digit : suffix) {
+                if (digit < '0' || digit > '9' ||
+                    level > (std::numeric_limits<int>::max() - (digit - '0')) / 10) {
+                    valid = false;
+                    break;
+                }
+                level = level * 10 + (digit - '0');
+            }
+            if (valid) clumpOwner.emplace(level, curves.path);
+        }
+    }
+    int nextAutoLevel = 0;
+    for (int di : order) {
+        UsdGenNodeDesc const &nd = desc.nodes[di];
+        if (nd.type != tok::Clump()) continue;
+        UsdGenParamView p;
+        p.desc = &desc;
+        p.node = &nd;
+        int const levels = p.GetInt(tok::ClumpLevels(), 1);
+        int const pinned = p.GetInt(tok::ClumpLevel(), -1);
+        if (levels < 1 || levels > 4 || pinned < -1 ||
+            (pinned >= 0 && pinned > std::numeric_limits<int>::max() - levels) ||
+            nextAutoLevel > std::numeric_limits<int>::max() - levels) {
+            result.errors.push_back("UsdGenCompiler: invalid Clump level range on '" +
+                                    nd.path.GetString() + "'");
+            return;
+        }
+        int base = pinned >= 0 ? pinned : nextAutoLevel;
+        if (pinned < 0) {
+            // Find the first contiguous run of free level names. Each node's
+            // multilevel output remains consecutive even around imports.
+            for (;;) {
+                if (base > std::numeric_limits<int>::max() - levels) {
+                    result.errors.push_back("UsdGenCompiler: no free Clump level range on '" +
+                                            nd.path.GetString() + "'");
+                    return;
+                }
+                bool occupied = false;
+                for (int offset = 0; offset < levels; ++offset)
+                    occupied = occupied || clumpOwner.count(base + offset) != 0;
+                if (!occupied) break;
+                ++base;
+            }
+        }
+        clumpBase[size_t(di)] = base;
+        nextAutoLevel = std::max(nextAutoLevel, base + levels);
+        for (int offset = 0; offset < levels; ++offset) {
+            int const level = base + offset;
+            auto const inserted = clumpOwner.emplace(level, nd.path);
+            if (!inserted.second) {
+                result.errors.push_back("UsdGenCompiler: clumpId_" +
+                    std::to_string(level) + " is emitted by both '" +
+                    inserted.first->second.GetString() + "' and '" +
+                    nd.path.GetString() + "'");
+                return;
+            }
+        }
+    }
+
     UsdGenNodeId const terminalId =
         static_cast<UsdGenNodeId>(topoOfDesc[termIt->second]);
 
@@ -1434,6 +1511,15 @@ void UsdGenCompiler::_Build(
     for (int pos = 0; pos < n; ++pos) {
         int const di = order[pos];
         UsdGenNodeDesc const &nd = desc.nodes[di];
+        bool const clumpSlotsChanged = nd.type == tok::Clump() &&
+            oldNodeForNewDesc[di] >= 0 &&
+            oldNodes[size_t(oldNodeForNewDesc[di])] &&
+            (oldNodes[size_t(oldNodeForNewDesc[di])]->outputPrimvars.empty() ||
+             oldNodes[size_t(oldNodeForNewDesc[di])]->outputPrimvars.front() !=
+                 TfToken("clumpId_" + std::to_string(clumpBase[size_t(di)])) ||
+             oldNodes[size_t(oldNodeForNewDesc[di])]->outputPrimvars.size() !=
+                 size_t(4 * UsdGenParamView{out->_desc.get(), &out->_desc->nodes[di]}
+                              .GetInt(tok::ClumpLevels(), 1)));
         // Change propagation (plan §3.5): a node whose desc entry is
         // byte-identical AND whose inputs' digests all survived keeps its
         // old digest verbatim — no FNV, no path vectors, no GetHash. Only
@@ -1445,6 +1531,7 @@ void UsdGenCompiler::_Build(
         for (int k = e0; !inputChanged && k < e1; ++k)
             inputChanged = digestChanged[topoOfDesc[edgeIds[size_t(k)]]] != 0;
         if (!oldNodes.empty() && !descChanged[di] && !inputChanged &&
+            !clumpSlotsChanged &&
             oldNodeForNewDesc[di] >= 0) {
             UsdGenCompiledNode &oldS = *oldNodes[size_t(oldNodeForNewDesc[di])];
             if (oldS.type == nd.type) {
@@ -1512,7 +1599,7 @@ void UsdGenCompiler::_Build(
                     nd, nd.type,
                     TfSpan<const TfToken>(tbl0.digestParams.data(), tbl0.digestParams.size()),
                     inputPaths0, refPaths0, bindings0, childDigests0);
-                if (dg0 == old0.structuralDigest &&
+                if (dg0 == old0.structuralDigest && !clumpSlotsChanged &&
                     old0.topoFx == old0.op->TopologyEffect() &&
                     old0.role == old0.op->Role()) {
                     // Stable: move whole, refresh desc-owned fields only.
@@ -1571,6 +1658,8 @@ void UsdGenCompiler::_Build(
         node->paramView.desc = out->_desc.get();
         node->paramView.node = &out->_desc->nodes[di];
         node->paramView.expressions = &node->expressions;
+        if (nd.type == tok::Clump())
+            static_cast<UsdGenClumpOp *>(node->op.get())->SetLevelBase(clumpBase[size_t(di)]);
         node->op->Configure(node->paramView);
         if (!BindExtraPlaneSlots(*node->op, node.get(), &result)) return;
 
@@ -1666,7 +1755,7 @@ void UsdGenCompiler::_Build(
         // is NOT a rebuild: the capture installs lazily on the next commit.
         if (!oldNodes.empty() && oldNodeForNewDesc[di] >= 0) {
             UsdGenCompiledNode const &oldRef = *oldNodes[size_t(oldNodeForNewDesc[di])];
-            bool const stable =
+            bool const stable = !clumpSlotsChanged &&
                 oldRef.structuralDigest == node->structuralDigest &&
                 oldRef.type == node->type &&
                 oldRef.topoFx == node->topoFx &&

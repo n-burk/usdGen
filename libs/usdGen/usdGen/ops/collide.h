@@ -7,11 +7,18 @@
 // §1's "out of colliders and the skin" with no boundary marker and no change
 // to root-surface/front semantics. Only deformed points are read.
 //
-// Per iteration, per CV p: closest point q over all collider triangles
-// (node order, ascending faces, fan triangulation, first-win ties),
-// penetration pen = offset - |p - q|; no push when pen <= 0. The push is
-// dir * pen * pushAmount * mask with dir = (p - q)/|p - q| (the winning
-// triangle's unit normal when p == q), computed in double precision.
+// Per iteration, per CV p: closest point q over all colliders. Supported
+// subdivision schemes evaluate the limit surface and its derivative normal;
+// polygon fallback uses ascending-face fan triangles. Node/face ties are
+// deterministic first wins.
+// On an open mesh, penetration pen = offset - |p - q|. A consistently
+// oriented watertight mesh also ejects interior CVs: pen = offset + |p - q|
+// and direction points from p toward q. Interior closed-mesh hits take
+// precedence over nearer open surfaces. No push when pen <= 0. The push is
+// dir * pen * pushAmount * mask, computed in double precision. At p == q,
+// dir is the winning surface normal. Flexible strands keep later
+// interior CVs on the first closed face entered from the root, so adjacent
+// CVs do not flip to opposite sides of a solid.
 // resolveType = flexible pushes each CV independently (A7 S10: "push CVs to
 // closest surface point"); stiff finds the first penetrating CV and moves
 // the strand rigidly — a translation when the root penetrates, otherwise a
@@ -26,6 +33,8 @@
 #define USDGEN_OP_COLLIDE_H
 
 #include "usdGen/op.h"
+#include <array>
+#include <atomic>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -39,9 +48,12 @@ public:
 
     TfToken Type() const override { return TfToken("UsdGenCollide"); }
     UsdGenTopoFx TopologyEffect() const override { return UsdGenTopoFx::None; }
+    bool SamplesFrameInputs() const override { return true; }
 
     TfSpan<const TfToken> TopologyParameters() const override;
     TfSpan<const TfToken> ValueParameters() const override;
+    void Configure(UsdGenParamView const &params) override;
+    bool RemapsVertexPlanes() const override { return _cutThenCollide; }
 
     bool Bind(UsdGenParamView const &params, UsdGenDiagnostics *diag) override;
     UsdGenEpoch CaptureDigest(UsdGenCaptureContext const &ctx) const override;
@@ -54,6 +66,14 @@ public:
                   UsdGenChunkView *view) const override;
     std::unique_ptr<UsdGenCapture> CreateCapture() const override;
     uint32_t PlanesTouched() const override;
+private:
+    bool _cutThenCollide = false;
+    // Warning identity is topology-based, so posed animation and transforms
+    // cannot flood Play with the same polygon fallback diagnostic.
+    mutable std::array<std::atomic<uint64_t>, 256> _warned{};
+    void WarnOnce(UsdGenDiagnostics *, SdfPath const &,
+                  UsdGenSurfaceDesc const &, std::vector<int> const &,
+                  std::string const &) const;
 };
 
 }  // namespace usdGen

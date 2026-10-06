@@ -29,6 +29,9 @@ namespace usdGen {
 
 /// One named extra plane (03 §1.2). R24 pins type/arity per emitted name:
 ///   clumpId_<level> : uniform int,       arity 1
+///   clumpCenter_<level> : uniform float,  arity 3 (rest anchor)
+///   clumpCenterId_<level> : uniform int,  arity 2 (exact uint64 words)
+///   clumpWeight_<level> : vertex float,   arity 1 (effective cohesion)
 ///   guideIndex      : uniform int[],     arity 3
 ///   guideWeight     : uniform float[],   arity 3
 /// `int[3]`/`float[3]` are not USD type names. Exactly one of `f`/`i` holds
@@ -419,6 +422,13 @@ struct UsdGenChunkView
     const float **inF;                       // upstream planes this node reads
     const int   **inI;
     uint32_t      outCount, inCount;
+    UsdGenPlane *extraCv = nullptr;
+    UsdGenPlane const *inExtraCv = nullptr;
+    uint32_t extraCvCount = 0;
+    // Commit-thread-sized transient storage for operators that remap a
+    // strand before their iterative solve. Slices are chunk-disjoint.
+    GfVec3d *pointScratch = nullptr;
+    double *scalarScratch = nullptr;
     uint32_t curveCount, cvCount;            // cvCount == 0 on the ragged path
     uint32_t inCvCount = 0;                  // upstream's CVs per curve (in* base + c*inCvCount + i)
     // Upstream ragged offsets for this chunk, shifted to firstCurve but still

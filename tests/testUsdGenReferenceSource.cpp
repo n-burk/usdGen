@@ -57,7 +57,7 @@ VtVec3fArray BakedPoints()
 
 // A description whose stack is ReferenceSource -> Width. |withTarget| false
 // leaves usdGen:reference unauthored (the fail-closed case).
-UsdStageRefPtr MakeStage(bool withTarget)
+UsdStageRefPtr MakeStage(bool withTarget, bool malformedClump = false)
 {
     UsdStageRefPtr stage = UsdStage::CreateInMemory("referenceSource");
     UsdGeomXform::Define(stage, SdfPath("/World"));
@@ -92,6 +92,25 @@ UsdStageRefPtr MakeStage(bool withTarget)
     bakedPv.CreatePrimvar(TfToken("hierarchyLevel"), SdfValueTypeNames->IntArray,
                           UsdGeomTokens->uniform)
         .Set(VtIntArray{1, 2});
+    bakedPv.CreatePrimvar(TfToken("clumpId_0"), SdfValueTypeNames->IntArray,
+                          UsdGeomTokens->uniform)
+        .Set(VtIntArray{0, 0});
+    bakedPv.CreatePrimvar(TfToken("clumpCenter_0"), SdfValueTypeNames->Float3Array,
+                          UsdGeomTokens->uniform)
+        .Set(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(0, 0, 0)});
+    if (malformedClump) {
+        bakedPv.CreatePrimvar(TfToken("clumpCenterId_0"), SdfValueTypeNames->Float2Array,
+                              UsdGeomTokens->uniform)
+            .Set(VtVec2fArray{GfVec2f(7, 0), GfVec2f(7, 0)});
+    } else {
+        bakedPv.CreatePrimvar(TfToken("clumpCenterId_0"), SdfValueTypeNames->Int2Array,
+                              UsdGeomTokens->uniform)
+            .Set(VtVec2iArray{GfVec2i(-1, 0x76543210),
+                               GfVec2i(-1, 0x76543210)});
+    }
+    bakedPv.CreatePrimvar(TfToken("clumpWeight_0"), SdfValueTypeNames->FloatArray,
+                          UsdGeomTokens->vertex)
+        .Set(VtFloatArray{0, .2f, .6f, 0, .3f, .8f});
 
     UsdGeomXform::Define(stage, SdfPath("/World/Groom"));
     UsdPrim description =
@@ -191,7 +210,40 @@ void CheckBuilderRouting(char const *which, UsdGenGraphDesc const &desc)
     CheckOwnershipPlane(which, *set, TfToken("hierarchyLevel"), VtIntArray{1, 2});
 }
 
-void CheckCook(UsdGenGraphDesc const &desc)
+void CheckNativeClumpImport(UsdGenGraphDesc const &desc)
+{
+    UsdGenCurveSetDesc const *set = FindCurveSet(desc, kBaked);
+    Check(set != nullptr, "stage builder retains baked native Clump planes");
+    if (!set) return;
+    auto check = [&](char const *name, UsdGenAuthoredPlaneType type,
+                     UsdGenAuthoredPlaneDomain domain, uint8_t arity) {
+        UsdGenAuthoredPlaneDesc const *plane = FindAuthoredPlane(*set, TfToken(name));
+        Check(plane && plane->type == type && plane->domain == domain &&
+                  plane->arity == arity,
+              std::string("stage builder preserves typed ") + name);
+        return plane;
+    };
+    auto const *id = check("clumpId_0", UsdGenAuthoredPlaneType::Int32,
+                           UsdGenAuthoredPlaneDomain::Primitive, 1);
+    auto const *anchor = check("clumpCenter_0", UsdGenAuthoredPlaneType::Float32,
+                               UsdGenAuthoredPlaneDomain::Primitive, 3);
+    auto const *centerId = check("clumpCenterId_0", UsdGenAuthoredPlaneType::Int32,
+                                 UsdGenAuthoredPlaneDomain::Primitive, 2);
+    auto const *weight = check("clumpWeight_0", UsdGenAuthoredPlaneType::Float32,
+                               UsdGenAuthoredPlaneDomain::Point, 1);
+    Check(id && id->intValues == VtIntArray{0, 0},
+          "Clump membership values survive Stage import");
+    Check(anchor && anchor->floatValues == VtFloatArray{0, 0, 0, 0, 0, 0},
+          "Clump rest anchors survive Stage import");
+    Check(centerId && centerId->intValues ==
+          VtIntArray{-1, 0x76543210, -1, 0x76543210},
+          "int2 center ID words survive Stage import bit-exactly");
+    Check(weight && weight->floatValues ==
+          VtFloatArray{0, .2f, .6f, 0, .3f, .8f},
+          "vertex cohesion values survive Stage import");
+}
+
+void CheckCook(UsdGenGraphDesc const &desc, bool checkNative = false)
 {
     UsdGenCompiler compiler;
     UsdGenGraph graph;
@@ -228,6 +280,21 @@ void CheckCook(UsdGenGraphDesc const &desc)
     Check(pointsVerbatim, "pulled points equal the baked points verbatim");
     Check(source.curveId == VtArray<uint64_t>{7, 9},
           "pulled ids equal the baked ids");
+    if (checkNative) {
+        auto find = [&](std::vector<UsdGenPlane> const &planes, char const *name) {
+            for (UsdGenPlane const &plane : planes)
+                if (plane.name == TfToken(name)) return &plane;
+            return static_cast<UsdGenPlane const *>(nullptr);
+        };
+        UsdGenPlane const *centerId = find(source.extraCurve, "clumpCenterId_0");
+        UsdGenPlane const *weight = find(source.extraCv, "clumpWeight_0");
+        Check(centerId && centerId->type == TfToken("int") && centerId->arity == 2 &&
+                  centerId->i == VtIntArray{-1, 0x76543210, -1, 0x76543210},
+              "CurveSource preserves baked int2 center identity exactly");
+        Check(weight && weight->type == TfToken("float") && weight->arity == 1 &&
+                  weight->f == VtFloatArray{0, .2f, .6f, 0, .3f, .8f},
+              "CurveSource preserves baked vertex cohesion");
+    }
     // Epsilon, not ==: the width ramp LUT multiplies by ~1.0, not exactly 1.0.
     bool widthApplied = output.totalCvs == 6;
     for (size_t i = 0; widthApplied && i < output.width.size(); ++i)
@@ -257,9 +324,20 @@ int main()
     UsdGenGraphDesc const fromHydra = BuildFromHydra(stage);
     CheckBuilderRouting("stage builder", fromStage);
     CheckBuilderRouting("Hydra builder", fromHydra);
+    CheckNativeClumpImport(fromStage);
     Check(fromStage.validationErrors.empty() && fromHydra.validationErrors.empty(),
           "no builder validation errors");
     CheckCook(fromHydra);
+    CheckCook(fromStage, /*checkNative=*/true);
+
+    UsdGenGraphDesc const malformed = BuildFromStage(
+        MakeStage(/*withTarget=*/true, /*malformedClump=*/true));
+    Check(!malformed.validationErrors.empty(),
+          "malformed baked Clump int2 metadata reports a builder error");
+    UsdGenCompiler malformedCompiler;
+    UsdGenGraph malformedGraph;
+    Check(!malformedCompiler.Compile(malformed, &malformedGraph).ok,
+          "malformed baked Clump metadata fails closed at compile");
 
     // Fail closed: no reference target, no silent empty stack.
     UsdGenGraphDesc const missing = BuildFromStage(MakeStage(/*withTarget=*/false));

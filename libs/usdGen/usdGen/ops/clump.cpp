@@ -42,6 +42,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <string>
@@ -69,6 +70,9 @@ struct UsdGenClumpCapture final : public UsdGenCapture
 {
     std::vector<float> result;                    // 3 * totalCvs
     std::vector<std::vector<int32_t>> clumpId;    // per level, per strand; -1 = none
+    std::vector<std::vector<float>> centerRest; // per level, xyz per group
+    std::vector<std::vector<int32_t>> centerId; // per level, 2 exact ID words per group
+    std::vector<std::vector<float>> weight; // per level, per CV, before live mask
     uint64_t upstreamTopologyVersion = 0;
     uint64_t upstreamValueVersion = 0;
     uint32_t upstreamCurves = 0;
@@ -260,19 +264,30 @@ void UsdGenClumpOp::Configure(UsdGenParamView const &params)
     // UsdGenClump of the description, disabled ones included, so toggling a
     // node never renumbers another's published planes (04 §2.8).
     int base = params.GetInt(sLevel, -1);
+    if (base < 0 && _levelBaseOverride >= 0) base = _levelBaseOverride;
     if (base < 0) {
         base = 0;
         if (params.desc && params.node) {
             for (UsdGenNodeDesc const &node : params.desc->nodes) {
                 if (&node == params.node || node.path == params.node->path) break;
-                if (node.type == TfToken("UsdGenClump")) ++base;
+                if (node.type == TfToken("UsdGenClump")) {
+                    UsdGenParamView prior;
+                    prior.desc = params.desc;
+                    prior.node = &node;
+                    base += std::clamp(prior.GetInt(sLevels, 1), 1, 4);
+                }
             }
         }
     }
     int const levels = std::clamp(params.GetInt(sLevels, 1), 1, 4);
     _outputs.clear();
-    for (int l = 0; l < levels; ++l)
-        _outputs.push_back(TfToken("clumpId_" + std::to_string(base + l)));
+    for (int l = 0; l < levels; ++l) {
+        std::string const suffix = std::to_string(base + l);
+        _outputs.push_back(TfToken("clumpId_" + suffix));
+        _outputs.push_back(TfToken("clumpCenter_" + suffix));
+        _outputs.push_back(TfToken("clumpCenterId_" + suffix));
+        _outputs.push_back(TfToken("clumpWeight_" + suffix));
+    }
 }
 
 bool UsdGenClumpOp::Bind(UsdGenParamView const &params, UsdGenDiagnostics *diag)
@@ -315,6 +330,9 @@ bool UsdGenClumpOp::Capture(
     cap.upstreamCurves = upstream.totalCurves;
     cap.upstreamCvs = upstream.totalCvs;
     cap.clumpId.assign(size_t(s.levels), std::vector<int32_t>(R, -1));
+    cap.centerRest.assign(size_t(s.levels), {});
+    cap.centerId.assign(size_t(s.levels), {});
+    cap.weight.assign(size_t(s.levels), std::vector<float>(totalCvs, 0.0f));
     cap.result.clear();
     if (R == 0) return true;
 
@@ -475,12 +493,27 @@ bool UsdGenClumpOp::Capture(
             if (dx * dx + dy * dy + dz * dz > reach * reach) member[c] = -1;
         }
 
+        // Capture one immutable rest anchor and exact stable ID per group.
+        // Evaluate expands it to each member's named plane without storing
+        // redundant per-strand copies in this capture.
+        auto &anchors = cap.centerRest[size_t(level)];
+        auto &stableIds = cap.centerId[size_t(level)];
+        anchors.resize(centreOf.size() * 3);
+        stableIds.resize(centreOf.size() * 2);
+        for (size_t group = 0; group < centreOf.size(); ++group) {
+            uint32_t const centre = centreOf[group];
+            for (int d = 0; d < 3; ++d)
+                anchors[group * 3 + d] = roots[size_t(centre) * 3 + d];
+            uint64_t const stable = ids ? ids[centre] : uint64_t(centre);
+            uint32_t const words[2] = {uint32_t(stable), uint32_t(stable >> 32)};
+            std::memcpy(&stableIds[group * 2], words, sizeof(words));
+        }
+
         // --- pull (centre shapes are this level's input: goal feedback) -----
         std::vector<float> const before = shape;
         ParallelFor(ctx.dispatcher, R, [&](size_t c) {
             if (member[c] < 0) return;
             uint32_t const centre = centreOf[size_t(member[c])];
-            if (centre == c) return;
             size_t const first = spans[c], n = spans[c + 1] - spans[c];
             size_t const cFirst = spans[centre], cN = spans[centre + 1] - spans[centre];
             if (n == 0 || cN == 0) return;
@@ -502,7 +535,8 @@ bool UsdGenClumpOp::Capture(
                 if (stray[c] > 0.0f)
                     w *= 1.0f - stray[c] * float(std::pow(double(t), s.strayFalloff));
                 w = std::clamp(w, 0.0f, 1.0f);
-                if (w == 0.0f) continue;
+                cap.weight[size_t(level)][cv] = w;
+                if (w == 0.0f || centre == c) continue;
                 for (int d = 0; d < 3; ++d) {
                     float const target = before[(cFirst + lo) * 3 + d] +
                         (before[(cFirst + hi) * 3 + d] - before[(cFirst + lo) * 3 + d]) * f +
@@ -564,6 +598,22 @@ void UsdGenClumpOp::Evaluate(
             float const in[3] = {view->inPx[o], view->inPy[o], view->inPz[o]};
             float const m = ready
                 ? std::clamp(float(maskField.Value(curve, cv)), 0.0f, 1.0f) : 0.0f;
+            // Geometry is blended with the mask once, after all Clump
+            // levels. Publish conditional per-level weights whose composed
+            // cohesion matches that same final blend. Multiplying each raw
+            // level by m would overstate cohesion for partial masks.
+            float laterResidual = 1.0f;
+            for (size_t level = cap.weight.size(); level-- > 0;) {
+                size_t const slot = level * 4 + 3;
+                float const w = cv < cap.weight[level].size()
+                    ? cap.weight[level][cv] : 0.0f;
+                float const denominator = 1.0f - m + m * laterResidual;
+                float const effective = denominator > 0.0f
+                    ? (m * w * laterResidual) / denominator : 0.0f;
+                if (view->outF && slot < view->outCount && view->outF[slot])
+                    view->outF[slot][o] = effective;
+                laterResidual *= 1.0f - w;
+            }
             if (m == 0.0f || cv * 3 + 2 >= cap.result.size()) {
                 view->px[o] = in[0]; view->py[o] = in[1]; view->pz[o] = in[2];
                 continue;
@@ -573,10 +623,26 @@ void UsdGenClumpOp::Evaluate(
             view->py[o] = m == 1.0f ? r[1] : in[1] + (r[1] - in[1]) * m;
             view->pz[o] = m == 1.0f ? r[2] : in[2] + (r[2] - in[2]) * m;
         }
-        for (uint32_t slot = 0; slot < view->outCount && slot < cap.clumpId.size(); ++slot) {
-            if (!view->outI || !view->outI[slot]) continue;
-            auto const &ids = cap.clumpId[slot];
-            view->outI[slot][c] = curve < ids.size() ? ids[curve] : -1;
+        for (size_t level = 0; level < cap.clumpId.size(); ++level) {
+            size_t const slot = level * 4;
+            if (slot + 3 >= view->outCount) break;
+            if (view->outI && view->outI[slot])
+                view->outI[slot][c] = curve < cap.clumpId[level].size()
+                    ? cap.clumpId[level][curve] : -1;
+            int32_t const group = curve < cap.clumpId[level].size()
+                ? cap.clumpId[level][curve] : -1;
+            if (view->outF && view->outF[slot + 1]) {
+                float *dst = view->outF[slot + 1] + size_t(c) * 3;
+                if (group >= 0 && size_t(group) * 3 + 2 < cap.centerRest[level].size())
+                    std::copy_n(&cap.centerRest[level][size_t(group) * 3], 3, dst);
+                else std::fill_n(dst, 3, 0.0f);
+            }
+            if (view->outI && view->outI[slot + 2]) {
+                int *dst = view->outI[slot + 2] + size_t(c) * 2;
+                if (group >= 0 && size_t(group) * 2 + 1 < cap.centerId[level].size())
+                    std::copy_n(&cap.centerId[level][size_t(group) * 2], 2, dst);
+                else std::fill_n(dst, 2, 0);
+            }
         }
     }
 }

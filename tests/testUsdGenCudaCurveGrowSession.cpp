@@ -888,6 +888,22 @@ int main() {
     // rest, so Noise must use the retained rest snapshot rather than silently
     // treating the generated current points as its rest input.
     auto growNoise=Desc(false,true,false,true);
+    auto importedClumpNoise = growNoise;
+    UsdGenAuthoredPlaneDesc clumpWeight;
+    clumpWeight.name = TfToken("clumpWeight_2");
+    clumpWeight.type = UsdGenAuthoredPlaneType::Float32;
+    clumpWeight.domain = UsdGenAuthoredPlaneDomain::Point;
+    clumpWeight.arity = 1;
+    clumpWeight.floatValues = {0.f, 1.f, 1.f, 0.f, 1.f};
+    importedClumpNoise.curveSets.front().authoredPlanes.push_back(clumpWeight);
+    UsdGenDiagnostics importedClumpDiagnostics;
+    CHECK(!CompileCudaGraph(importedClumpNoise, &importedClumpDiagnostics));
+    CHECK(std::any_of(importedClumpDiagnostics.errors.begin(),
+                      importedClumpDiagnostics.errors.end(),
+        [](std::string const &error) {
+            return error.find("CUDA Noise does not support imported clump motion planes") !=
+                std::string::npos;
+        }));
     UsdGenCurveBuffer growNoiseReference;
     CHECK(GrowNoiseReference(growNoise,&growNoiseReference));
     UsdGenDiagnostics growNoiseDiagnostics;

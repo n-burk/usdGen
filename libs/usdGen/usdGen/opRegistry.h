@@ -34,6 +34,9 @@ public:
     std::unique_ptr<UsdGenOp> Create(TfToken const &type) const;
 
     bool HasKernel(TfToken const &type) const;
+    /// Native per-frame dependency declared by the registered kernel.
+    bool ReadsTime(TfToken const &type) const;
+    bool SamplesFrameInputs(TfToken const &type) const;
     /// Read the complete static operator contract without allocating an
     /// operator during graph compilation. The metadata is captured from the
     /// registration-time probe.
@@ -56,6 +59,8 @@ private:
         size_t geometryInputArity;
         size_t referenceInputArity;
         UsdGenRole role;
+        bool readsTime;
+        bool samplesFrameInputs;
     };
     std::vector<Entry> _entries;
 };

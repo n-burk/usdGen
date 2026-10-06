@@ -108,6 +108,8 @@ def run(appController):
         sys.path.insert(0, here)
         sys.path.insert(0, os.path.normpath(os.path.join(here, "..",
                                                          "python")))
+        sys.path.insert(0, os.path.normpath(os.path.join(here, "..", "..",
+                                                         "..", "tools", "docs")))
     try:
         import usdGenPomadeTools
         from pxr import Sdf, Usd, UsdGeom
@@ -117,6 +119,7 @@ def run(appController):
                              guideCount, info, isolateSettings, openAndBind,
                              pumpUntilCommitted, realSettingsSnapshot,
                              statusRecorder, typeKey, wait)
+        from pomade_ui_capture import capture as captureUi
     except ImportError as exc:
         print("FAIL: cannot import usdGenPomadeTools/pomadeT3: %s" % exc)
         return 1
@@ -287,6 +290,9 @@ def run(appController):
     resume = workspace.button("file", "resume")
     check(resume is not None and resume.isVisible() and resume.isEnabled(),
           "the dock shows Resume groom")
+    check(frameScalp(stage, view, eye=(0.0, 7.0, 0.0)),
+          "the reopened scalp is framed for the resume screenshot")
+    captureUi(appController, "pomade-13-resume-offered")
     session.setStatusSink(messages)
     del messages[:]
     if resume is not None:
@@ -306,6 +312,7 @@ def run(appController):
           "the resumed groom is bound to /Scalp (%r)" % session.scalpPath)
     check(viewport is not None and viewport.installed,
           "Resume puts the viewport tool back")
+    captureUi(appController, "pomade-14-resumed-groom")
     check(pumpUntilCommitted(viewport, session),
           "the resumed model commits over the saved groom")
     prims = guidesPrims(stage)

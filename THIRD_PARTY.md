@@ -61,8 +61,38 @@ under the root MIT license (`SPDX-License-Identifier: MIT`), not Meta's:
 - `usdNoodles/usd/ExpressionConnections.h`
 - `usdNoodles/usd/api.h`
 
+## `plugin/usdNoodles/` usdview editor
+
+This localized usdview Noodles plugin was ported from
+[usdRig commit `8dafce7d6d6299e6f79f9c4fb22c17145d96359e`](https://github.com/n-burk/usdRig/commit/8dafce7d6d6299e6f79f9c4fb22c17145d96359e),
+which adapts [OpenUSD PR #4156](https://github.com/PixarAnimationStudios/OpenUSD/pull/4156).
+The Python, binding, and editor code retains Meta/OpenUSD copyright headers
+and the Tomorrow Open Source Technology License 1.0 in
+[`plugin/usdNoodles/LICENSE.txt`](plugin/usdNoodles/LICENSE.txt). The native
+noodles code and copied GLSL retain Meta's MIT license in
+[`plugin/usdNoodles/NOODLES_LICENSE.txt`](plugin/usdNoodles/NOODLES_LICENSE.txt).
+The native source is pinned to
+[`facebookexperimental/noodles` commit `ff5d473f10e8c37ceaf0da11ea7cb80805bc8314`](https://github.com/facebookexperimental/noodles/commit/ff5d473f10e8c37ceaf0da11ea7cb80805bc8314).
+
+The imported Poppins font atlases remain under SIL Open Font License 1.1;
+their terms and the other dependency notices are in
+[`plugin/usdNoodles/THIRD_PARTY_LICENSES.txt`](plugin/usdNoodles/THIRD_PARTY_LICENSES.txt).
+The local port removes usdRig-only TouchPose references and adapts build,
+installation, and launcher paths for usdGen. These changes do not alter the
+licenses or copyright notices on the upstream files.
+
 ## Optional host renderer
 
 Scripts and comments can talk to a MoonRay Hydra plugin (`hdMoonray`,
 `moonray:sceneVariable`). That renderer is not vendored. The plugin names
 are the host API, so they are unchanged.
+
+## ALab-derived manual images
+
+`docs/site/media/stoat-*.png` and `docs/site/media/ui/alab-*.png` show the ALab
+stoat from the ASWF Digital Production Example Library. These images are derived from assets under the
+ASWF Digital Assets License v1.1, not usdGen's MIT license. The full license,
+required Netflix Animation Studios ALab copyright notice, source versions,
+and modification summary are in
+[`docs/site/media/README.md`](docs/site/media/README.md) and
+[`docs/site/media/ALab-LICENSE.md`](docs/site/media/ALab-LICENSE.md).

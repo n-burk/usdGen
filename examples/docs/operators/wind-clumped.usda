@@ -1,0 +1,165 @@
+#usda 1.0
+# Copyright (c) 2026 Nick Burkard
+# SPDX-License-Identifier: MIT
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    startTimeCode = 0
+    endTimeCode = 99
+    timeCodesPerSecond = 24
+    framesPerSecond = 24
+    doc = "Dense upright fur for a native Wind billow demonstration."
+)
+def Xform "World" {
+    def Camera "Cam" {
+        matrix4d xformOp:transform = ( (0.82090520, 0.00000000, -0.57106449, 0.00000000), (-0.43532569, 0.64721718, -0.62578068, 0.00000000), (0.36960275, 0.76230566, 0.53130395, 0.00000000), (1.51000000, 2.08000000, 1.88000000, 1.00000000) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+        float2 clippingRange = (0.02, 50)
+        float focalLength = 44
+        float horizontalAperture = 36
+        float verticalAperture = 24
+    }
+    def DistantLight "Key" {
+        color3f inputs:color = (1, 0.79, 0.60)
+        float inputs:intensity = 1.4
+        bool inputs:normalize = true
+        float3 xformOp:rotateXYZ = (-20, -35, -15)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+    def DistantLight "Rim" {
+        color3f inputs:color = (0.59, 0.79, 1)
+        float inputs:intensity = 0.45
+        bool inputs:normalize = true
+        float3 xformOp:rotateXYZ = (55, 148, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+    def DistantLight "Fill" {
+        color3f inputs:color = (0.84, 0.90, 1)
+        float inputs:intensity = 0.85
+        bool inputs:normalize = true
+        float3 xformOp:rotateXYZ = (-50, 15, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+    def DomeLight "Sky" {
+        asset inputs:texture:file = @../../maps/StinsonBeach.hdr@
+        color3f inputs:color = (0.82, 0.88, 1)
+        float inputs:intensity = 0.5
+    }
+    def Scope "Looks" {
+        def Material "Base" {
+            token outputs:surface.connect = </World/Looks/Base/Surface.outputs:surface>
+            def Shader "Surface" {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.035, 0.043, 0.051)
+                float inputs:roughness = 0.92
+                token outputs:surface
+            }
+        }
+        def Material "Wall" {
+            token outputs:surface.connect = </World/Looks/Wall/Surface.outputs:surface>
+            def Shader "Surface" {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.065, 0.075, 0.085)
+                float inputs:roughness = 0.95
+                token outputs:surface
+            }
+        }
+        def Material "Fur" {
+            token outputs:surface.connect = </World/Looks/Fur/Surface.outputs:surface>
+            def Shader "Surface" {
+                uniform token info:id = "UsdGenHairStrands"
+                color3f inputs:baseColor = (0.63, 0.40, 0.20)
+                color3f inputs:tipColor = (0.85, 0.65, 0.36)
+                float inputs:roughness = 0.55
+                float inputs:specular = 0.35
+                float inputs:scatter = 0.36
+                float inputs:selfShadow = 0.48
+                float inputs:randomRoughness = 0.12
+                token outputs:surface
+            }
+        }
+    }
+    def Mesh "Patch" (prepend apiSchemas = ["UsdGenRestAPI", "MaterialBindingAPI"]) {
+        rel material:binding = </World/Looks/Base>
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 3, 2, 1]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1)]
+        point3f[] primvars:rest = [(0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1)] (interpolation = "vertex")
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "vertex")
+    }
+    def Mesh "Backdrop" (prepend apiSchemas = ["MaterialBindingAPI"]) {
+        rel material:binding = </World/Looks/Base>
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 3, 2, 1]
+        point3f[] points = [(-3, -0.055, -3), (4, -0.055, -3), (4, -0.055, 4), (-3, -0.055, 4)]
+    }
+    def Mesh "StudioWall" (prepend apiSchemas = ["MaterialBindingAPI"]) {
+        rel material:binding = </World/Looks/Wall>
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-3, -0.06, -0.5), (4, -0.06, -0.5), (4, 2, -0.5), (-3, 2, -0.5)]
+    }
+
+    def Xform "Groom" {
+        def UsdGenDescription "Fur" (prepend apiSchemas = ["UsdGenLookAPI", "MaterialBindingAPI"]) {
+            rel material:binding = </World/Looks/Fur>
+            rel usdGen:surface = </World/Patch>
+            token usdGen:curve:basis = "bspline"
+            float usdGen:width:default = 0.0018
+            int usdGen:look:jitterSeed = 113
+            color3f usdGen:look:rootColor = (0.63, 0.40, 0.20)
+            color3f usdGen:look:tipColor = (0.85, 0.65, 0.36)
+            float usdGen:look:valueJitter = 0.055
+
+            def Scope "Ops" {
+            def UsdGenWidth "width" {
+                float usdGen:width = 0.0018
+                float2[] usdGen:width:knots = [(0, 1), (0.5, 0.62), (1, 0.018)]
+            }
+            def UsdGenWind "wind" {
+                bool usdGen:enabled = true
+                vector3f usdGen:direction = (1, 0, 0)
+                float usdGen:constStrength = 0.08
+                float usdGen:gustStrength = 0
+                float usdGen:stiffness = 0.12
+                float usdGen:billowLowStrength = 0.10
+                float usdGen:billowHighStrength = 0.045
+                float usdGen:billowLowFrequency = 0.75
+                float usdGen:billowHighFrequency = 3
+                float usdGen:billowLowRate = 0.24
+                float usdGen:billowHighRate = 0.96
+            }
+            def UsdGenClump "clump" {
+                bool usdGen:enabled = true
+                int usdGen:seed = 47
+                float usdGen:clump:amount = 0.85
+                float usdGen:clump:density = 36
+                float usdGen:clump:size = 0.12
+                float2[] usdGen:clump:profile:knots = [(0, 0), (0.3, 0.3), (1, 1)]
+            }
+            def UsdGenNoise "baseNoise" {
+                int usdGen:seed = 37
+                float usdGen:noise:magnitude = 0.0014
+                float usdGen:noise:frequency = 3.5
+                float2[] usdGen:noise:magnitude:knots = [(0, 0), (0.5, 0.24), (1, 1)]
+            }
+            def UsdGenGrow "grow" {
+                int usdGen:seed = 19
+                int usdGen:segments = 18
+                float usdGen:length = 0.31
+                float2 usdGen:lengthRandom = (0.90, 1.10)
+                token usdGen:direction = "vector"
+                vector3f usdGen:directionVector = (0, 1, 0)
+            }
+            def UsdGenScatter "scatter" {
+                int usdGen:seed = 41
+                float usdGen:density = 6500
+            }
+            }
+        }
+    }
+}

@@ -7,9 +7,11 @@
 #include "usdGenImaging/usdGenEnable.h"
 #include "usdGenImaging/testHook.h"
 #include "usdGen/debugCodes.h"
+#include "usdGen/opRegistry.h"
 #include "usdGen/executionSequenceWindow.h"
 #include "pxr/base/trace/trace.h"
 #include "pxr/imaging/hd/sceneIndexPluginRegistry.h"
+#include "pxr/imaging/hd/filteringSceneIndex.h"
 #include "pxr/imaging/hd/sceneGlobalsSchema.h"
 #include "pxr/imaging/hd/legacyDisplayStyleSchema.h"
 #include "pxr/imaging/hd/materialBindingSchema.h"
@@ -23,7 +25,11 @@
 #include "pxr/imaging/hdsi/extComputationPrimvarPruningSceneIndex.h"
 #include "pxr/base/tf/envSetting.h"
 #include "pxr/base/tf/refPtr.h"
+#include "pxr/base/js/json.h"
+#include <sstream>
+#include <cstring>
 #include "pxr/imaging/hd/systemMessages.h"
+#include "pxr/usdImaging/usdImaging/stageSceneIndex.h"
 #include <tbb/flow_graph.h>
 #include <algorithm>
 #include <chrono>
@@ -31,6 +37,7 @@
 #include <exception>
 #include <map>
 #include <limits>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <utility>
@@ -300,14 +307,148 @@ HdContainerDataSourceHandle const& HiddenOverlay() {
     return hidden;
 }
 
-// Whether any expression of the description reads the frame or the time
-// (SeExpr $frame / $time, sampler element expressions included).
+// Whether an expression or native operator reads the live frame/time.
 bool DescReadsTime(Desc const& desc) {
+    auto const& registry = usdGen::UsdGenOpRegistry::Get();
+    for (auto const& node : desc.nodes)
+        if ((node.enabled || !node.expressionBindings.empty()) &&
+            (registry.ReadsTime(node.type) ||
+            registry.SamplesFrameInputs(node.type))) return true;
     for (auto const& expression : desc.expressions)
         if (expression.source.find("$frame") != std::string::npos ||
             expression.source.find("$time") != std::string::npos)
             return true;
     return false;
+}
+
+// The stage dirties animated prims before the scene-globals index advances
+// currentFrame. Read its time as well so that first notice is recognized as
+// part of playback, rather than an authored edit at the previous frame.
+std::optional<double> StageFrame(HdSceneIndexBaseRefPtr const& input) {
+    std::set<HdSceneIndexBase const*> visited;
+    std::vector<HdSceneIndexBaseRefPtr> stack{input};
+    while (!stack.empty()) {
+        auto current = std::move(stack.back());
+        stack.pop_back();
+        if (!current || !visited.insert(current.operator->()).second) continue;
+        if (auto const* stage = dynamic_cast<UsdImagingStageSceneIndex const*>(current.operator->())) {
+            UsdTimeCode const time = stage->GetTime();
+            if (!time.IsDefault() && std::isfinite(time.GetValue())) return time.GetValue();
+        }
+        if (auto const* filter = dynamic_cast<HdFilteringSceneIndexBase const*>(current.operator->())) {
+            auto inputs = filter->GetInputScenes();
+            stack.insert(stack.end(), inputs.begin(), inputs.end());
+        }
+        if (auto const* enclosing = dynamic_cast<HdEncapsulatingSceneIndexBase const*>(current.operator->())) {
+            auto inputs = enclosing->GetEncapsulatedScenes();
+            stack.insert(stack.end(), inputs.begin(), inputs.end());
+        }
+    }
+    return std::nullopt;
+}
+
+// A time-only capture may replace an in-flight cook without invalidating its
+// structural assumptions. An authored graph or topology edit must retain the
+// existing immediate-cancel path. Deliberately ignored value changes are
+// sampled points/transforms and params marked animated by the builder.
+bool PlaybackCompatible(Desc const& a, Desc const& b) {
+    if (a.description != b.description || a.terminal != b.terminal ||
+        a.executionBackend != b.executionBackend || a.nodes.size() != b.nodes.size() ||
+        a.surfaces.size() != b.surfaces.size() || a.curveSets.size() != b.curveSets.size() ||
+        a.maps.size() != b.maps.size() || a.expressions.size() != b.expressions.size() ||
+        a.geometries.size() != b.geometries.size() ||
+        a.defaultWidth != b.defaultWidth || a.tileTarget != b.tileTarget ||
+        a.curveBasis != b.curveBasis || a.timeCodesPerSecond != b.timeCodesPerSecond ||
+        a.purpose != b.purpose || a.visibility != b.visibility ||
+        a.materialPath != b.materialPath ||
+        a.look.rootColor != b.look.rootColor || a.look.tipColor != b.look.tipColor ||
+        a.look.rampColors != b.look.rampColors ||
+        a.look.rampPositions != b.look.rampPositions ||
+        a.look.rampInterpolation != b.look.rampInterpolation ||
+        a.look.rampExponent != b.look.rampExponent ||
+        a.look.bakeMode != b.look.bakeMode ||
+        a.look.bakeTarget != b.look.bakeTarget ||
+        a.look.bakePrimvar != b.look.bakePrimvar ||
+        a.look.hueJitter != b.look.hueJitter ||
+        a.look.valueJitter != b.look.valueJitter ||
+        a.look.jitterSeed != b.look.jitterSeed ||
+        a.preview.source != b.preview.source ||
+        a.preview.colorMap != b.preview.colorMap ||
+        a.preview.range != b.preview.range ||
+        a.preview.evaluation != b.preview.evaluation ||
+        a.preview.shading != b.preview.shading ||
+        !a.validationErrors.empty() || !b.validationErrors.empty()) return false;
+    // Map/expression payloads have their own sampled inputs. Until their
+    // authored controls can be compared independently, use immediate commits.
+    if (!a.maps.empty() || !a.expressions.empty() || !a.geometries.empty()) return false;
+    for (size_t i = 0; i != a.nodes.size(); ++i) {
+        auto const& x = a.nodes[i]; auto const& y = b.nodes[i];
+        if (x.path != y.path || x.type != y.type || x.mode != y.mode ||
+            x.enabled != y.enabled || x.seed != y.seed || x.inputs != y.inputs ||
+            x.references != y.references || x.curves != y.curves ||
+            x.surfaces != y.surfaces || x.maps != y.maps ||
+            x.mapBindings.size() != y.mapBindings.size() ||
+            x.expressionBindings.size() != y.expressionBindings.size() ||
+            x.params.size() != y.params.size() || x.ramps.size() != y.ramps.size()) return false;
+        if (!x.expressionBindings.empty()) return false;
+        for (size_t j = 0; j != x.params.size(); ++j) {
+            auto const& p = x.params[j]; auto const& q = y.params[j];
+            if (p.name != q.name || p.animated != q.animated ||
+                (!p.animated && p.value != q.value)) return false;
+        }
+        for (size_t j = 0; j != x.mapBindings.size(); ++j)
+            if (x.mapBindings[j].map != y.mapBindings[j].map ||
+                x.mapBindings[j].relationship != y.mapBindings[j].relationship) return false;
+        for (size_t j = 0; j != x.ramps.size(); ++j)
+            if (x.ramps[j].knots != y.ramps[j].knots ||
+                x.ramps[j].positions != y.ramps[j].positions ||
+                x.ramps[j].colors != y.ramps[j].colors ||
+                x.ramps[j].interpolation != y.ramps[j].interpolation) return false;
+    }
+    for (size_t i = 0; i != a.surfaces.size(); ++i) {
+        auto const& x = a.surfaces[i]; auto const& y = b.surfaces[i];
+        if (x.path != y.path || x.id != y.id ||
+            x.faceVertexCounts != y.faceVertexCounts ||
+            x.faceVertexIndices != y.faceVertexIndices ||
+            x.points.size() != y.points.size() || x.subsetFaces != y.subsetFaces ||
+            x.isSubset != y.isSubset || x.restPoints != y.restPoints ||
+            x.restNormals != y.restNormals || x.restNormalDomain != y.restNormalDomain ||
+            x.densityMultiplier != y.densityMultiplier ||
+            x.subdivisionScheme != y.subdivisionScheme ||
+            x.orientation != y.orientation ||
+            x.interpolateBoundary != y.interpolateBoundary ||
+            x.faceVaryingLinearInterpolation != y.faceVaryingLinearInterpolation ||
+            x.triangleSubdivisionRule != y.triangleSubdivisionRule ||
+            x.creaseMethod != y.creaseMethod ||
+            x.holeIndices != y.holeIndices || x.creaseIndices != y.creaseIndices ||
+            x.creaseLengths != y.creaseLengths ||
+            x.cornerIndices != y.cornerIndices ||
+            x.creaseSharpnesses != y.creaseSharpnesses ||
+            x.cornerSharpnesses != y.cornerSharpnesses) return false;
+        if (x.uv != y.uv || x.restFromCurrentPoints != y.restFromCurrentPoints ||
+            x.velocities != y.velocities) return false;
+    }
+    for (size_t i = 0; i != a.curveSets.size(); ++i) {
+        auto const& x = a.curveSets[i]; auto const& y = b.curveSets[i];
+        if (x.path != y.path || x.role != y.role || x.curveRole != y.curveRole ||
+            x.type != y.type || x.basis != y.basis || x.wrap != y.wrap ||
+            x.widthsInterpolation != y.widthsInterpolation ||
+            x.curveVertexCounts != y.curveVertexCounts || x.curveId != y.curveId ||
+            x.skinPrim != y.skinPrim || x.points.size() != y.points.size() ||
+            x.authoredPlanes.size() != y.authoredPlanes.size() ||
+            x.surfaceCage != y.surfaceCage || x.rest != y.rest ||
+            x.restFromCurrentPoints != y.restFromCurrentPoints ||
+            x.widths != y.widths || x.skinPrimUv != y.skinPrimUv ||
+            x.rootFrame != y.rootFrame || x.frozenEpoch != y.frozenEpoch) return false;
+        for (size_t j = 0; j != x.authoredPlanes.size(); ++j)
+            if (x.authoredPlanes[j].name != y.authoredPlanes[j].name ||
+                x.authoredPlanes[j].type != y.authoredPlanes[j].type ||
+                x.authoredPlanes[j].domain != y.authoredPlanes[j].domain ||
+                x.authoredPlanes[j].arity != y.authoredPlanes[j].arity ||
+                x.authoredPlanes[j].floatValues != y.authoredPlanes[j].floatValues ||
+                x.authoredPlanes[j].intValues != y.authoredPlanes[j].intValues) return false;
+    }
+    return true;
 }
 
 // Records actual builder reads, including missing targets and GeomSubset
@@ -367,6 +508,7 @@ struct UsdGenGroomSceneIndex::_Ingress {
     uint64_t sequence = 0;
     int device = -2;
     double frame = 0;
+    std::optional<double> stageFrame;
     bool initial = false, failed = false;
     // A pressure-deferred ingress intentionally re-discovers the complete
     // synthetic catalog; it must not take the dependency-only fast path.
@@ -436,6 +578,15 @@ struct UsdGenSceneService {
     tbb::flow::graph registryGraph;
     tbb::flow::function_node<std::function<void()>> registry;
     std::map<RetirementRecord*, Entry> states;
+    std::shared_ptr<const std::vector<Entry>> playbackEntries =
+        std::make_shared<const std::vector<Entry>>();
+    std::atomic<uint64_t> playbackLifecycle{0}, playbackLive{0};
+    void PublishPlaybackEntries() {
+        auto next = std::make_shared<std::vector<Entry>>();
+        for (auto const& entry : states) next->push_back(entry.second);
+        std::atomic_store(&playbackEntries,
+            std::shared_ptr<const std::vector<Entry>>(std::move(next)));
+    }
     UsdGenSceneService() : cleanup(retirement, tbb::flow::unlimited,
         [](std::function<void()> action) { action(); return tbb::flow::continue_msg{}; }),
         registry(registryGraph, 1,
@@ -450,11 +601,13 @@ struct UsdGenSceneService {
             // this retains the final-reference -> cleanup-enqueue gap.
             if (entry.retirement->pending.load(std::memory_order_acquire))
                 states[entry.retirement.get()] = std::move(entry);
+            PublishPlaybackEntries();
         })) std::terminate();
     }
     void Erase(std::shared_ptr<RetirementRecord> record) {
         if (!registry.try_put([this, record=std::move(record)] {
             states.erase(record.get());
+            PublishPlaybackEntries();
             // A Drain wait returning now also guarantees a following
             // registry snapshot cannot retain this completed entry.
             record->Done();
@@ -535,10 +688,10 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         Pipeline::CommandTicket sourceRegister;
         Pipeline::CommandTicket sourceUnregister;
         Pipeline::CommandMailbox republish;
-        Pipeline::CommandMailbox progress;
+        Pipeline::CommandMailbox directProgress;
         explicit operator bool() const noexcept {
             return attachAck && detachAck && unregisterAck && sourceAttach &&
-                sourceDetach && republish;
+                sourceDetach && republish && directProgress;
         }
     };
     struct Groom {
@@ -563,6 +716,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         // with the newest immutable snapshot rather than growing a queue.
         std::shared_ptr<AttachmentReplies> replies;
         double frame = 0;
+        std::optional<double> stageFrame;
         std::shared_ptr<const Desc> desc;
         std::shared_ptr<const SdfPathVector> dependencies;
         std::shared_ptr<const CaptureCache> cache;
@@ -585,15 +739,28 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         // BasisCurves tiles while unimplemented device publication is rejected.
         int64_t generation = -1;
         int64_t sessionGeneration = -1;
+        double publishedFrame = 0;
+        // Async playback retains one running cook and one latest requested
+        // frame. A frame ingress never repeatedly supersedes the running
+        // result; edits and structural changes still use immediate commits.
+        uint32_t activeCooks = 0;
+        uint64_t deferredCook = 0;
+        // An edit that is incompatible with the in-flight descriptor fences
+        // both its completion and the session's independent republish relay.
+        uint64_t structuralRevision = 0;
+        bool structuralPending = false;
+        bool playbackFailed = false;
     };
     struct View {
         uint64_t id = 0;
         SdfPath root, description;
         std::shared_ptr<const TileMap> tiles;
         int64_t generation;
+        double publishedFrame = 0;
         std::shared_ptr<const SdfPathVector> dependencies;
         std::shared_ptr<const CaptureCache> cache;
         double frame = 0;
+        std::optional<double> stageFrame;
         // The description's expressions read $frame or $time, so a change of
         // the scene globals' current frame alone changes its result.
         bool readsTime = true;
@@ -607,11 +774,17 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         HdContainerDataSourceHandle scalpShadow;
         uint64_t scalpDigest = 0;
         bool dormant = false, hidden = false;
+        uint32_t activeCooks = 0;
+        uint64_t deferredCook = 0;
+        bool structuralPending = false, progressActive = false, playbackFailed = false;
     };
     struct Snapshot {
         std::vector<View> members;
         uint64_t capturedThrough = 0;
         bool captureTrusted = true;
+        bool populationInitialized = false;
+        uint64_t publicationSerial = 0, outstandingHolds = 0;
+        double sceneFrame = 0;
         struct SourceValue {
             TfToken type;
             uint64_t stamp = 0;
@@ -686,6 +859,10 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
     std::shared_ptr<const std::map<SdfPath, Snapshot::SourceValue>> source =
         std::make_shared<const std::map<SdfPath, Snapshot::SourceValue>>();
     bool sourceKnown = false;
+    bool populationInitialized = false;
+    uint64_t publicationSerial = 0;
+    uint64_t sceneFrameSequence = 0;
+    double sceneFrame = 0;
     uint64_t sourceThrough = 0;
     Snapshot::SourceValue rootValue;
     std::atomic<uint64_t> captureCount{0};
@@ -723,15 +900,22 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         auto next = std::make_shared<Snapshot>();
         next->capturedThrough = completedPrefix;
         next->captureTrusted = captureTrusted;
+        next->populationInitialized = populationInitialized;
+        next->publicationSerial = ++publicationSerial;
+        next->sceneFrame = sceneFrame;
+        for (auto const& hold : holds) next->outstandingHolds += hold.second;
         next->source = source;
         next->rootValue = rootValue;
         for (auto const& item : members) {
             auto const& g = *item.second;
             next->members.push_back({g.id, g.root, g.description, g.tiles, g.generation,
-                                     g.dependencies, g.cache, g.frame,
+                                     g.publishedFrame,
+                                     g.dependencies, g.cache, g.frame, g.stageFrame,
                                      !g.desc || DescReadsTime(*g.desc),
                                      g.desc ? g.desc->look : usdGen::UsdGenLookDesc(),
-                                     g.scalpShadow, g.scalpDigest, g.dormant, g.hidden});
+                                     g.scalpShadow, g.scalpDigest, g.dormant, g.hidden,
+                                     g.activeCooks, g.deferredCook, g.structuralPending,
+                                     g.progressActive, g.playbackFailed});
         }
         auto result = std::shared_ptr<const Snapshot>(std::move(next));
         std::atomic_store(&catalog, result);
@@ -765,6 +949,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         auto it = holds.find(seq);
         if (it == holds.end() || it->second == 0) std::terminate();
         if (--it->second == 0) holds.erase(it);
+        QueuePublication();
         CheckWaiters();
     }
     void CompleteIngress(uint64_t seq) {
@@ -856,10 +1041,20 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
             std::terminate();
         return ++g.attachmentEpoch;
     }
+    void DropDeferredCook(std::shared_ptr<Groom> const& g) {
+        if (!g->deferredCook) return;
+        uint64_t const seq = g->deferredCook;
+        g->deferredCook = 0;
+        Release(seq);
+    }
     void ReleaseSession(std::shared_ptr<Groom> const& g, uint64_t seq) {
         // This also invalidates an AttachAsync that has not acquired a
         // session yet.  It deliberately does not clear last-good display.
         AdvanceAttachmentEpoch(*g);
+        DropDeferredCook(g);
+        // Old callbacks carry their attachment epoch and cannot decrement a
+        // replacement session's cook count or schedule its deferred frame.
+        g->activeCooks = 0;
         if (g->progressActive) {
             g->tiles = g->progressBaseline;
             if (g->progressWasHidden) g->hidden = true;
@@ -929,21 +1124,23 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
     }
     void Publish(std::shared_ptr<Groom> const& g, SessionHandle const& sourceSession,
                  uint64_t attachmentEpoch,
-                 Session::CommitPayload const& payload) {
+                 Session::CommitPayload const& payload,
+                 bool currentCook = false) {
         if (closing.load() || !Current(g) ||
             !sourceSession || g->session != sourceSession ||
-            g->attachmentEpoch != attachmentEpoch) return;
+            g->attachmentEpoch != attachmentEpoch ||
+            (g->structuralPending && !currentCook)) return;
         if (payload.progressEpoch && payload.progressEpoch < g->progressEpoch)
             return;
         if (!payload.published || !payload.generation) {
-            if (payload.generation &&
+            if (!g->structuralPending && payload.generation &&
                 payload.generation->id > g->sessionGeneration) {
                 // A newer attempt can begin previewing before an older
                 // successful terminal reaches this owner. The core's failed
                 // snapshot still carries that last complete generation.
                 auto complete = payload;
                 complete.published = true;
-                Publish(g, sourceSession, attachmentEpoch, complete);
+                Publish(g, sourceSession, attachmentEpoch, complete, currentCook);
                 return;
             }
             if (g->progressActive && payload.progressEpoch == g->progressEpoch) {
@@ -1022,6 +1219,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         g->router = std::move(router);
         g->sessionGeneration = generation.id;
         g->generation = generation.id;
+        g->publishedFrame = generation.frame;
         g->tiles = std::move(fresh);
         g->progressBaseline.reset();
         g->progressScalpBaseline = nullptr;
@@ -1035,9 +1233,11 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
     void PublishProgress(std::shared_ptr<Groom> const& g,
                          SessionHandle const& sourceSession,
                          uint64_t attachmentEpoch,
-                         Session::ProgressPayload const& payload) {
+                         Session::ProgressPayload const& payload,
+                         uint64_t cookStructuralRevision) {
         if (closing.load() || !Current(g) || g->dormant || !sourceSession ||
             g->session != sourceSession || g->attachmentEpoch != attachmentEpoch ||
+            cookStructuralRevision != g->structuralRevision ||
             !payload.epoch || !payload.tiles || payload.tiles->empty() ||
             payload.epoch < g->progressEpoch) return;
         if (payload.epoch != g->progressEpoch) {
@@ -1090,15 +1290,43 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         g->hidden = false;
         Notify({}, {}, {});
     }
-    void Cook(std::shared_ptr<Groom> const& g, uint64_t seq) {
+    void FinishCook(std::shared_ptr<Groom> const& g,
+                    SessionHandle const& sourceSession,
+                    uint64_t attachmentEpoch, uint64_t seq) {
+        if (g->attachmentEpoch == attachmentEpoch && g->session == sourceSession) {
+            if (!g->activeCooks) std::terminate();
+            --g->activeCooks;
+            if (!g->activeCooks && g->deferredCook) {
+                uint64_t const next = g->deferredCook;
+                g->deferredCook = 0;
+                Cook(g, next, false, true);
+            }
+        }
+        Release(seq);
+    }
+    void Cook(std::shared_ptr<Groom> const& g, uint64_t seq,
+              bool deferIfBusy = false, bool alreadyHeld = false) {
         // An Attach reply can land after its groom went dormant again.
-        if (g->dormant) return;
-        if (!g->session || !g->desc || closing.load() || !Current(g)) { Reveal(g); return; }
+        if (g->dormant) { if (alreadyHeld) Release(seq); return; }
+        if (!g->session || !g->desc || closing.load() || !Current(g)) {
+            Reveal(g); if (alreadyHeld) Release(seq); return;
+        }
+        if (deferIfBusy && g->activeCooks) {
+            DropDeferredCook(g);
+            if (!alreadyHeld) Hold(seq);
+            g->deferredCook = seq;
+            TF_DEBUG(USDGEN_INGRESS).Msg(
+                "usdGen ingress   defer playback cook %s frame %g (running %u)\n",
+                g->description.GetText(), g->frame, g->activeCooks);
+            return;
+        }
+        if (!deferIfBusy) DropDeferredCook(g);
         // A hidden groom that is awake is waiting for exactly this cook.
         bool const reveals = g->hidden;
         cookCount.fetch_add(1, std::memory_order_acq_rel);
         ProcessCooks().fetch_add(1, std::memory_order_acq_rel);
         uint64_t const attachmentEpoch = g->attachmentEpoch;
+        uint64_t const structuralRevision = g->structuralRevision;
         Session::CommitRequest request;
         request.reason = usdGen::UsdGenCommitReason::NoticeBatchEnd;
         request.desc = g->desc;
@@ -1114,29 +1342,58 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         auto self = shared_from_this();
         auto ticket = std::make_shared<Pipeline::CommandTicket>(
             owner->ReserveCommandTicket());
-        if (!*ticket) { Reveal(g); return; }
-        Hold(seq);
+        if (!*ticket) { Reveal(g); if (alreadyHeld) Release(seq); return; }
+        if (!alreadyHeld) Hold(seq);
+        ++g->activeCooks;
         bool accepted = false;
         try {
             SessionHandle const sourceSession = g->session;
+            Session::ProgressCallback directProgress;
+            if (request.progressive && g->replies && g->replies->directProgress) {
+                Pipeline::CommandMailbox progressMailbox = g->replies->directProgress;
+                directProgress = [self, g, sourceSession, attachmentEpoch,
+                                  structuralRevision, progressMailbox](
+                    Session::ProgressPayload const& payload) {
+                    (void)self->owner->PostLatestCommand(progressMailbox,
+                        [self, g, sourceSession, attachmentEpoch,
+                         structuralRevision, payload] {
+                            self->PublishProgress(g, sourceSession,
+                                attachmentEpoch, payload, structuralRevision);
+                        });
+                };
+            }
             accepted = sourceSession->CommitAsync(std::move(request),
-                [self, g, sourceSession, attachmentEpoch, seq, ticket, reveals](
-                    Session::CommitPayload const& payload, Pipeline::Outcome) {
-                    (void)self->Post(std::move(*ticket), [self, g, sourceSession, attachmentEpoch, seq, payload, reveals] {
+                [self, g, sourceSession, attachmentEpoch, structuralRevision,
+                 seq, ticket, reveals](
+                     Session::CommitPayload const& payload, Pipeline::Outcome outcome) {
+                    (void)self->Post(std::move(*ticket), [self, g, sourceSession,
+                        attachmentEpoch, structuralRevision, seq, payload, reveals, outcome] {
                         try {
-                            self->Publish(g, sourceSession, attachmentEpoch, payload);
+                            if (g->structuralRevision == structuralRevision) {
+                                self->Publish(g, sourceSession, attachmentEpoch, payload, true);
+                                if (g->attachmentEpoch == attachmentEpoch && g->session == sourceSession)
+                                    g->playbackFailed = outcome != Pipeline::Outcome::Published ||
+                                        !payload.generation || payload.generation->device ||
+                                        g->sessionGeneration != payload.generation->id;
+                                if (payload.published && payload.generation &&
+                                    g->sessionGeneration == payload.generation->id)
+                                    g->structuralPending = false;
+                            }
                             // Whether or not it published: an unchanged
                             // groom keeps tiles that are already current.
                             if (reveals) self->Reveal(g);
                         }
-                        catch (...) { TF_WARN("usdGen scene publication failed"); }
-                        self->Release(seq);
-                    }, [self, seq] { self->Release(seq); });
-                });
+                        catch (...) { g->playbackFailed = true; TF_WARN("usdGen scene publication failed"); }
+                            self->FinishCook(g, sourceSession, attachmentEpoch, seq);
+                    }, [self, g, sourceSession, attachmentEpoch, seq] {
+                        self->FinishCook(g, sourceSession, attachmentEpoch, seq);
+                    });
+                }, std::move(directProgress));
         } catch (...) { TF_WARN("usdGen scene cook request failed"); }
         if (!accepted) {
+            g->playbackFailed = true;
             Reveal(g);
-            Release(seq);
+            FinishCook(g, g->session, attachmentEpoch, seq);
             return;
         }
         // Rejected cook admission leaves the descriptor latch intact for the
@@ -1156,7 +1413,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         replies->sourceDetach = ::usdGenImaging::UsdGenSessionStore::GetInstance()
             .ReserveLifecycleCommand();
         replies->republish = owner->ReserveCommandMailbox();
-        if (progressiveRenderer) replies->progress = owner->ReserveCommandMailbox();
+        replies->directProgress = owner->ReserveCommandMailbox();
         // Every path that gives up on the attachment reveals: no cook is
         // coming to do it, and a later ingress retries the attachment.
         if (!*replies) { Reveal(g); return; }
@@ -1197,24 +1454,6 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
                             std::weak_ptr<Groom> groom(g);
                             TfWeakPtr<Session> weakSession(session);
                             Pipeline::CommandMailbox mailbox = replies->republish;
-                            Pipeline::CommandMailbox progressMailbox = replies->progress;
-                            Session::ProgressCallback progressCallback;
-                            if (self->progressiveRenderer && progressMailbox) progressCallback =
-                                [weak, groom, weakSession, attachmentEpoch,
-                                 progressMailbox](Session::ProgressPayload const& payload) {
-                                    auto state = weak.lock();
-                                    auto member = groom.lock();
-                                    SessionHandle sourceSession =
-                                        TfCreateRefPtrFromProtectedWeakPtr(weakSession);
-                                    if (!state || !member || !sourceSession ||
-                                        state->closing.load()) return;
-                                    (void)state->owner->PostLatestCommand(progressMailbox,
-                                        [state, member, sourceSession,
-                                         attachmentEpoch, payload] {
-                                            state->PublishProgress(member, sourceSession,
-                                                                   attachmentEpoch, payload);
-                                        });
-                                };
                             g->callback = session->RegisterRepublishCallback(
                                 std::move(replies->sourceRegister),
                                 [weak, groom, weakSession, attachmentEpoch, mailbox](
@@ -1231,7 +1470,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
                                         state->Publish(member, sourceSession,
                                                        attachmentEpoch, payload);
                                     });
-                                }, {}, std::move(progressCallback));
+                                });
                             self->Cook(g, seq);
                             self->Release(seq);
                         } catch (...) { std::terminate(); }
@@ -1247,8 +1486,13 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
             captureTrustSequence = seq;
         }
         if (closing.load() || packet.failed) { CompleteIngress(seq); return; }
+        if (seq >= sceneFrameSequence) {
+            sceneFrame = packet.stageFrame.value_or(packet.frame);
+            sceneFrameSequence = seq;
+        }
         if (packet.fullPopulation && seq >= captureTrustSequence) {
             captureTrusted = true;
+            populationInitialized = true;
             captureTrustSequence = seq;
         }
         Added forwardAdded;
@@ -1386,7 +1630,8 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
             if (changed)
                 source = std::static_pointer_cast<const std::map<SdfPath, Snapshot::SourceValue>>(next);
         }
-        std::vector<std::shared_ptr<Groom>> startAttach, startCook;
+        std::vector<std::shared_ptr<Groom>> startAttach;
+        std::vector<std::pair<std::shared_ptr<Groom>, bool>> startCook;
         // A Hydra Added notice can resync an existing groom to a non-groom
         // type without an explicit Removed. Retire roots absent from this
         // authoritative capture, but never overwrite a newer ingress.
@@ -1443,7 +1688,38 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
                     groom->sessionGeneration = -1;
                     startAttach.push_back(groom);
                 } else if (groom->session) {
-                    startCook.push_back(groom);
+                    bool const movedTime = (packet.stageFrame && groom->stageFrame &&
+                        *packet.stageFrame != *groom->stageFrame) ||
+                        packet.frame != groom->frame;
+                    bool const rootGlobalsOnly = !packet.dirtied.empty() &&
+                        std::all_of(packet.dirtied.begin(), packet.dirtied.end(),
+                            [](auto const& dirty) {
+                                return dirty.primPath.IsAbsoluteRootPath() &&
+                                    OnlySceneGlobals(dirty.dirtyLocators);
+                            });
+                    bool const dirtiedGroom = std::any_of(packet.dirtied.begin(),
+                        packet.dirtied.end(), [&](auto const& dirty) {
+                            return !dirty.primPath.IsAbsoluteRootPath() &&
+                                (dirty.primPath.HasPrefix(groom->root) ||
+                                 groom->root.HasPrefix(dirty.primPath));
+                        });
+                    bool const compatible = groom->desc && input.desc &&
+                        PlaybackCompatible(*groom->desc, *input.desc);
+                    // Stage SetTime already captured the animated inputs and
+                    // their matching frame. Its following scene-globals notice
+                    // carries no new values and must not cancel that cook.
+                    bool const duplicateGlobals = !movedTime && rootGlobalsOnly &&
+                        packet.added.empty() && packet.removed.empty() &&
+                        !packet.forceFullDiscovery && compatible;
+                    bool const temporal = asyncAllowed.load(std::memory_order_acquire) &&
+                        movedTime && packet.added.empty() && packet.removed.empty() &&
+                        !packet.forceFullDiscovery && !packet.recoverSourceNamespace &&
+                        !dirtiedGroom && compatible;
+                    if (!duplicateGlobals && !temporal) {
+                        ++groom->structuralRevision;
+                        groom->structuralPending = true;
+                    }
+                    if (!duplicateGlobals) startCook.emplace_back(groom, temporal);
                 } else {
                     startAttach.push_back(groom);
                 }
@@ -1459,6 +1735,8 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
             }
             groom->device = packet.device;
             groom->frame = packet.frame;
+            groom->stageFrame = packet.stageFrame;
+            if (groom->dormant) DropDeferredCook(groom);
         }
         // A recovered source type-change can remove an ancestor of a groom
         // while the groom and its retained synthetic render subtree survive.
@@ -1500,7 +1778,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         forwardRemoved = std::move(uniqueRemoved);
         Notify(forwardAdded, forwardRemoved, forwardDirtied);
         for (auto const& groom : startAttach) Attach(groom, seq);
-        for (auto const& groom : startCook) Cook(groom, seq);
+        for (auto const& request : startCook) Cook(request.first, seq, request.second);
         CompleteIngress(seq);
     }
 };
@@ -1612,6 +1890,8 @@ UsdGenGroomSceneIndex::UsdGenGroomSceneIndex(HdSceneIndexBaseRefPtr const& input
     // The accepted serial registration precedes any later external snapshot
     // causally issued by this caller.  It retains the record through the
     // final-reference -> cleanup-enqueue gap.
+    service.playbackLive.fetch_add(1, std::memory_order_acq_rel);
+    service.playbackLifecycle.fetch_add(1, std::memory_order_acq_rel);
     service.Register(UsdGenSceneService::Entry{_state, record});
 }
 HdSceneIndexBaseRefPtr UsdGenGroomSceneIndex::New(HdSceneIndexBaseRefPtr const& input, int id) {
@@ -1635,6 +1915,8 @@ HdSceneIndexBaseRefPtr UsdGenGroomSceneIndex::New(HdSceneIndexBaseRefPtr const& 
 }
 UsdGenGroomSceneIndex::~UsdGenGroomSceneIndex() {
     _state->Close();
+    SceneService().playbackLive.fetch_sub(1, std::memory_order_acq_rel);
+    SceneService().playbackLifecycle.fetch_add(1, std::memory_order_acq_rel);
     if (!_state->quiesced.load()) UsdGenImagingTestHook::_UnregisterIndex(this);
 }
 void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explicitWait) {
@@ -1922,6 +2204,17 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                     return a.primPath.GetPathElementCount() < b.primPath.GetPathElementCount();
                 });
                 std::atomic_store(&_state->visible, target);
+                if (TfDebug::IsEnabled(USDGEN_INGRESS))
+                    for (auto const& current : target->members) {
+                        auto prior = std::find_if(before->members.begin(), before->members.end(),
+                            [&](auto const& item) { return item.root == current.root; });
+                        if (prior == before->members.end() ||
+                            prior->generation != current.generation)
+                            TF_DEBUG(USDGEN_INGRESS).Msg(
+                                "usdGen present   %s cooked frame %g, latest captured frame %g, generation %lld\n",
+                                current.description.GetText(), current.publishedFrame,
+                                current.frame, static_cast<long long>(current.generation));
+                    }
                 try { if (!removed.empty()) index->_SendPrimsRemoved(removed); }
                 catch (...) { TF_WARN("usdGen removal observer threw"); }
                 try { if (!added.empty()) index->_SendPrimsAdded(added); }
@@ -2062,6 +2355,7 @@ void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
         }
 
         auto input = _GetInputSceneIndex();
+        packet.stageFrame = StageFrame(input);
         // GetPrim projects empty primType groom records through __usdPrimInfo.
         // Project corresponding Added records at this caller boundary so
         // frontend notices and queries use the same type.
@@ -2089,13 +2383,25 @@ void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
                 sourceStack.insert(sourceStack.end(), children.begin(), children.end());
             }
         }
-        if (input && !stack.empty()) {
+        // The scene-time fence also advances when all grooms are static or
+        // dormant and the dependency router therefore selected no roots.
+        if (input) {
             auto frame = HdSceneGlobalsSchema::GetFromParent(
                 input->GetPrim(SdfPath::AbsoluteRootPath()).dataSource).GetCurrentFrame();
             if (frame) {
                 double value = frame->GetTypedValue(0);
                 if (std::isfinite(value)) packet.frame = value;
             }
+            // UsdImaging emits animated-prim dirties from SetTime before
+            // HdsiSceneGlobals advances currentFrame. Pair the captured
+            // geometry and native time consumers to the same stage sample;
+            // a later scene-global-only edit can still drive Wind alone.
+            if (packet.stageFrame && std::any_of(catalog->members.begin(),
+                    catalog->members.end(), [&](auto const& member) {
+                        return member.stageFrame &&
+                            *member.stageFrame != *packet.stageFrame;
+                    }))
+                packet.frame = *packet.stageFrame;
             while (!stack.empty()) {
                 const auto path = stack.back(); stack.pop_back();
                 const auto prim = input->GetPrim(path);
@@ -2455,6 +2761,112 @@ uint64_t UsdGenGroomSceneIndex::ProcessPublishCount() noexcept {
 }
 uint64_t UsdGenGroomSceneIndex::_TestCookCount() const noexcept {
     return _state->cookCount.load(std::memory_order_acquire);
+}
+std::string UsdGenGroomSceneIndex::PlaybackStatusJson(std::string const& selector, double frame) {
+    auto reply = [](char const* state, std::string const& error, std::string const& signature = {}) {
+        return JsWriteToString(JsValue(JsObject{{"state", JsValue(state)},
+            {"ready", JsValue(std::string(state) == "ready")},
+            {"error", JsValue(error)}, {"signature", JsValue(signature)}}));
+    };
+    JsValue parsed = JsParseString(selector);
+    if (!parsed.IsObject() || !std::isfinite(frame))
+        return reply("unavailable", "Invalid playback selector or frame");
+    auto const& object = parsed.GetJsObject();
+    auto renderer = object.find("renderer"), rootsValue = object.find("roots");
+    if (renderer == object.end() || !renderer->second.IsString() ||
+        rootsValue == object.end() || !rootsValue->second.IsArray())
+        return reply("unavailable", "Playback selector requires renderer and roots");
+    std::string const rendererName = renderer->second.GetString();
+    if (rendererName != "GL" && rendererName != "Storm" && rendererName != "HdStormRendererPlugin")
+        return reply("unavailable", "Playback publication binding supports the Storm viewer");
+    std::set<SdfPath> roots;
+    for (auto const& value : rootsValue->second.GetJsArray()) {
+        if (!value.IsString() || !SdfPath::IsValidPathString(value.GetString()))
+            return reply("unavailable", "Invalid expected groom root");
+        SdfPath path(value.GetString());
+        if (!path.IsAbsolutePath() || !path.IsPrimPath())
+            return reply("unavailable", "Expected groom roots must be absolute prim paths");
+        roots.insert(path);
+    }
+    auto& service = SceneService();
+    uint64_t const lifecycle = service.playbackLifecycle.load(std::memory_order_acquire);
+    uint64_t const liveCount = service.playbackLive.load(std::memory_order_acquire);
+    auto entries = std::atomic_load(&service.playbackEntries);
+    std::vector<std::shared_ptr<_State>> live, relevant;
+    for (auto const& entry : *entries) if (auto state = entry.state.lock()) {
+        if (state->closing.load(std::memory_order_acquire)) continue;
+        live.push_back(state);
+        if (state->progressiveRenderer) relevant.push_back(state);
+    }
+    if (lifecycle != service.playbackLifecycle.load(std::memory_order_acquire) || live.size() != liveCount)
+        return reply("pending", "Scene-index population or lifecycle registration is pending");
+    if (relevant.empty()) return reply("unavailable", "No live Storm groom scene index");
+    if (relevant.size() != 1) return reply("ambiguous", "Multiple live Storm groom scene indexes cannot be bound to this viewer");
+    auto const& state = relevant.front();
+    uint64_t const issued = state->sequences.LastIssued();
+    auto catalog = state->SnapshotValue(), visible = state->VisibleSnapshot();
+    if (!catalog->populationInitialized || !catalog->captureTrusted ||
+        state->deferredFullCapture.load(std::memory_order_acquire) || catalog->capturedThrough != issued)
+        return reply("pending", "Current groom population and input capture are incomplete");
+    std::set<SdfPath> actual;
+    for (auto const& groom : catalog->members) actual.insert(groom.root);
+    if (actual != roots) return reply("unavailable", "Viewer groom roots do not match the sole Storm scene index");
+    if (catalog != visible || catalog->outstandingHolds)
+        return reply("pending", "Current groom work or Hydra publication is pending");
+    if (catalog->sceneFrame != frame)
+        return reply("pending", "Scene index has not captured the requested frame");
+    for (auto const& groom : catalog->members) {
+        if (groom.dormant) continue;
+        if (groom.activeCooks || groom.deferredCook || groom.progressActive)
+            return reply("pending", "Current groom cook is incomplete");
+        if (groom.playbackFailed || groom.structuralPending || groom.generation < 0)
+            return reply("failed", "Current groom request has no complete successful publication");
+        if (groom.hidden) return reply("pending", "Current groom visibility publication is pending");
+        if (groom.readsTime && groom.publishedFrame != frame)
+            return reply("pending", "Time-dependent groom publication belongs to another frame");
+    }
+    if (issued != state->sequences.LastIssued() ||
+        state->deferredFullCapture.load(std::memory_order_acquire) ||
+        state->closing.load(std::memory_order_acquire) ||
+        catalog != state->SnapshotValue() || visible != state->VisibleSnapshot() ||
+        lifecycle != service.playbackLifecycle.load(std::memory_order_acquire))
+        return reply("pending", "Publication changed during the readiness snapshot");
+    std::ostringstream signature;
+    signature.precision(17);
+    signature << lifecycle << ':' << state.get() << ':' << catalog->publicationSerial << ':' << issued << ':' << frame;
+    return reply("ready", "", signature.str());
+}
+bool UsdGenGroomSceneIndex::_TestStaleProgressRejected(SdfPath const& root) const {
+    bool rejected = false;
+    _state->owner->InvokeOwner([&] {
+        for (auto const& item : _state->members) {
+            auto const& g = item.second;
+            if (g->root != root || !g->session || !g->structuralRevision ||
+                g->structuralPending) continue;
+            auto tile = std::make_shared<usdGen::UsdGenSession::TileProgress>();
+            tile->epoch = (std::max)(uint64_t{1}, g->progressEpoch + 1);
+            tile->sequence = 1;
+            tile->tile.primPath = RenderPath(g->description).AppendChild(
+                TfToken("tile_0000"));
+            Session::ProgressPayload payload;
+            payload.epoch = tile->epoch;
+            payload.sequence = tile->sequence;
+            payload.tiles = std::make_shared<const std::vector<Session::TileProgressPtr>>(
+                std::vector<Session::TileProgressPtr>{tile});
+            auto const tiles = g->tiles;
+            uint64_t const epoch = g->progressEpoch;
+            uint64_t const publishes = _State::ProcessPublishes().load(
+                std::memory_order_acquire);
+            // This is the queued direct callback from before an edit, replayed
+            // after the new terminal has cleared structuralPending.
+            _state->PublishProgress(g, g->session, g->attachmentEpoch,
+                payload, g->structuralRevision - 1);
+            rejected = g->tiles == tiles && g->progressEpoch == epoch &&
+                _State::ProcessPublishes().load(std::memory_order_acquire) == publishes;
+            break;
+        }
+    });
+    return rejected;
 }
 void UsdGenGroomSceneIndex::_TestOwnerCommandBarrier() const {
     _state->owner->InvokeOwner([] {});

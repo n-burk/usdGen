@@ -286,6 +286,20 @@ int main()
     scene.groom->SystemMessage(HdSystemMessageTokens->asyncAllow, nullptr);
     Check(SetVisibility(scene, "/Groom/hair", "invisible"), "async: hidden");
     scene.Apply();
+    // Apply queues async ingress. Observe its hidden publication before
+    // editing and waking, so the first-visible check starts from dormancy.
+    bool actuallyHidden = false;
+    auto const hideDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < hideDeadline) {
+        scene.groom->SystemMessage(HdSystemMessageTokens->asyncPoll, nullptr);
+        auto const prim = scene.groom->GetPrim(tile);
+        auto const visibility = HdVisibilitySchema::GetFromParent(prim.dataSource).GetVisibility();
+        if (prim.dataSource && visibility && !visibility->GetTypedValue(0.0f)) {
+            actuallyHidden = true; break;
+        }
+        std::this_thread::yield();
+    }
+    Check(actuallyHidden, "async: hide is published before edit and wake");
     Check(width.Set(0.2f, UsdTimeCode(2.0)), "async: width edit while hidden");
     scene.Apply();
     Check(SetVisibility(scene, "/Groom/hair", "inherited"), "async: shown");
@@ -294,9 +308,18 @@ int main()
     auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (std::chrono::steady_clock::now() < deadline) {
         scene.groom->SystemMessage(HdSystemMessageTokens->asyncPoll, nullptr);
-        if (Visible(scene, tile)) {
+        auto const prim = scene.groom->GetPrim(tile);
+        auto const visibility = HdVisibilitySchema::GetFromParent(prim.dataSource).GetVisibility();
+        if (prim.dataSource && (!visibility || visibility->GetTypedValue(0.0f))) {
             revealed = true;
-            staleWhileVisible = !Near(FirstWidth(scene, tile), 0.2f);
+            auto const sampled = HdSampledDataSource::Cast(HdContainerDataSource::Get(
+                prim.dataSource, HdDataSourceLocator(TfToken("primvars"),
+                    TfToken("widths"), TfToken("primvarValue"))));
+            auto const value = sampled ? sampled->GetValue(0.0f) : VtValue();
+            float const observedWidth = value.IsHolding<VtFloatArray>() &&
+                !value.UncheckedGet<VtFloatArray>().empty()
+                ? value.UncheckedGet<VtFloatArray>()[0] : -1.0f;
+            staleWhileVisible = !Near(observedWidth, 0.2f);
             break;
         }
         std::this_thread::yield();

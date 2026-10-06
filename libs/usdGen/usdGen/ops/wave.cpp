@@ -6,6 +6,10 @@
 // unit, sampled per curve root; amplitudes and the mask envelope are sampled
 // per CV. All work is per curve/CV in Evaluate (no capture payload); Capture
 // only validates literals and fails closed on non-finite connected values.
+// There is no per-strand stochastic term to decorrelate: identical authored
+// wave controls and input arc lengths already give identical displacement.
+// Clump motion metadata therefore does not alter this deterministic styler;
+// changing its frequency or root frame would override authored wave shape.
 #include "usdGen/ops/wave.h"
 
 #include "usdGen/opParams.h"

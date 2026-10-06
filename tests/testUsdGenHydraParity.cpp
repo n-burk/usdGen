@@ -23,14 +23,17 @@
 #include "pxr/imaging/hd/sceneIndex.h"
 #include "pxr/usd/sdf/path.h"
 #include "pxr/usd/usd/prim.h"
+#include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/timeCode.h"
 #include "pxr/usdImaging/usdImaging/sceneIndices.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <string>
+#include <utility>
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -367,6 +370,182 @@ def Xform "World" {
         auto b=BuildGraphDescFromHydra(*sis.finalSceneIndex,SdfPath("/World/Coat"),opts);
         CheckDesc(a,b,"authored subdivision opinions");
         Check(a.surfaces.size()==1 && a.surfaces[0].creaseSharpnesses==VtFloatArray{2.5f},"authored sharpness captured");
+        ++opened;
+    }
+    {
+        auto stage = UsdStage::CreateInMemory();
+        Check(stage->GetRootLayer()->ImportFromString(R"USD(#usda 1.0
+def Xform "World" {
+    double3 xformOp:translate = (4, 5, 6)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+    def Mesh "Skin" {
+        point3f[] points = [(0,0,0),(1,0,0),(1,0,1),(0,0,1)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0,1,2,3]
+    }
+    def Xform "Moving" {
+        double3 xformOp:translate.timeSamples = {
+            0: (0, 1.45, 0),
+            1: (0, 0.45, 0)
+        }
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Mesh "Shield" {
+            point3f[] points = [(-0.5,-0.5,-0.5),(0.5,-0.5,-0.5),
+                                (0.5,0.5,-0.5),(-0.5,0.5,-0.5)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0,1,2,3]
+        }
+    }
+    def UsdGenDescription "Coat" {
+        rel usdGen:surface = </World/Skin>
+        def Scope "Ops" {
+            def UsdGenScatter "scatter" {
+                float usdGen:density = 1
+            }
+            def UsdGenCollide "collide" {
+                rel usdGen:colliders = </World/Moving/Shield>
+            }
+        }
+    }
+}
+)USD"), "load animated transformed collider parity fixture");
+        UsdImagingCreateSceneIndicesInfo info; info.stage = stage;
+        auto sis = UsdImagingCreateSceneIndices(info);
+        GfMatrix4d previous(1.0);
+        for (double time : {0.0, 1.0}) {
+            UsdGenGraphDescBuildOptions opts; opts.time = time;
+            auto const a = BuildGraphDescFromStage(stage, SdfPath("/World/Coat"), opts);
+            auto const b = BuildGraphDescFromHydra(*sis.finalSceneIndex,
+                                                   SdfPath("/World/Coat"), opts);
+            CheckDesc(a, b, "animated collider xform");
+            auto const found = std::find_if(a.surfaces.begin(), a.surfaces.end(),
+                [](UsdGenSurfaceDesc const &s) {
+                    return s.path == SdfPath("/World/Moving/Shield");
+                });
+            Check(found != a.surfaces.end(), "animated collider surface is resolved");
+            if (found != a.surfaces.end()) {
+                GfMatrix4d const relative = found->worldMatrix *
+                    a.xformMatrix.GetInverse();
+                Check(std::abs(relative.Transform(GfVec3d(0))[1] -
+                    (time == 0.0 ? 1.45 : 0.45)) < 1e-6,
+                    "collider xform samples editable parent translate at graph time");
+                if (time != 0.0)
+                    Check(previous != found->worldMatrix &&
+                          a.surfaces[0].surfaceGeneration != 0,
+                          "animated collider matrix changes capture input");
+                previous = found->worldMatrix;
+            }
+        }
+        ++opened;
+    }
+    {
+        auto stage = UsdStage::CreateInMemory();
+        Check(stage->GetRootLayer()->ImportFromString(R"USD(#usda 1.0
+def Xform "World" {
+    def BasisCurves "Imported" {
+        int[] curveVertexCounts = [3, 3]
+        point3f[] points = [(0,0,0),(0,0.5,0),(0,1,0),
+                            (2,0,0),(2,0.5,0),(2,1,0)]
+        uniform token type = "linear"
+        custom uniform int[] primvars:clumpId_10 = [7, 7] (
+            interpolation = "uniform")
+        custom uniform float3[] primvars:clumpCenter_10 = [(1,0,0),(1,0,0)] (
+            interpolation = "uniform")
+        custom uniform int2[] primvars:clumpCenterId_10 = [(-1,1073741824),(-1,1073741824)] (
+            interpolation = "uniform")
+        custom float[] primvars:clumpWeight_10 = [0,0.25,1,0,0.5,1] (
+            interpolation = "vertex")
+        custom float2[] primvars:extraF2 = [(1,2),(3,4),(5,6),(7,8),(9,10),(11,12)] (
+            interpolation = "vertex")
+        custom uniform int4[] primvars:extraI4 = [(1,2,3,4),(5,6,7,8)] (
+            interpolation = "uniform")
+        custom float4[] primvars:extraF4 = [(0.1,0.2,0.3,0.4)] (
+            interpolation = "constant")
+    }
+    def UsdGenDescription "Coat" {
+        def Scope "Ops" {
+            def UsdGenCurveSource "source" {
+                rel usdGen:curves = </World/Imported>
+            }
+        }
+    }
+}
+)USD"), "load typed native clump parity fixture");
+        UsdGenGraphDescBuildOptions opts; opts.time = 0;
+        UsdImagingCreateSceneIndicesInfo info; info.stage = stage;
+        auto sis = UsdImagingCreateSceneIndices(info);
+        auto compare = [&](char const *label) {
+            auto a = BuildGraphDescFromStage(stage, SdfPath("/World/Coat"), opts);
+            auto b = BuildGraphDescFromHydra(*sis.finalSceneIndex,
+                                              SdfPath("/World/Coat"), opts);
+            CheckDesc(a, b, label);
+            return std::make_pair(a, b);
+        };
+        auto valid = compare("typed native clump planes");
+        Check(valid.first.curveSets.size() == 1 &&
+              valid.first.curveSets.front().authoredPlanes.size() == 7,
+              "typed native clump and generic planes imported");
+        if (!valid.first.curveSets.empty() && !valid.second.curveSets.empty()) {
+            auto const &planes = valid.first.curveSets.front().authoredPlanes;
+            auto const &hydraPlanes = valid.second.curveSets.front().authoredPlanes;
+            for (char const *name : {"clumpId_10", "clumpCenter_10",
+                                     "clumpCenterId_10", "clumpWeight_10"}) {
+                auto const stagePlane = std::find_if(planes.begin(), planes.end(),
+                    [&](auto const &plane) { return plane.name == TfToken(name); });
+                auto const hydraPlane = std::find_if(hydraPlanes.begin(), hydraPlanes.end(),
+                    [&](auto const &plane) { return plane.name == TfToken(name); });
+                bool equal = stagePlane != planes.end() && hydraPlane != hydraPlanes.end();
+                if (equal)
+                    equal = stagePlane->type == hydraPlane->type &&
+                            stagePlane->domain == hydraPlane->domain &&
+                            stagePlane->arity == hydraPlane->arity &&
+                            stagePlane->floatValues == hydraPlane->floatValues &&
+                            stagePlane->intValues == hydraPlane->intValues;
+                Check(equal, std::string("native clump quartet Stage/Hydra parity: ") + name);
+            }
+            auto centerId = std::find_if(planes.begin(), planes.end(), [](auto const &plane) {
+                return plane.name == TfToken("clumpCenterId_10");
+            });
+            Check(centerId != planes.end() && centerId->arity == 2 &&
+                  centerId->intValues == VtIntArray({-1,1073741824,-1,1073741824}),
+                  "clump center identity retains both exact signed words");
+        }
+        UsdAttribute badWeight = stage->GetPrimAtPath(SdfPath("/World/Imported"))
+            .GetAttribute(TfToken("primvars:clumpWeight_10"));
+        UsdAttribute center = stage->GetPrimAtPath(SdfPath("/World/Imported"))
+            .GetAttribute(TfToken("primvars:clumpCenter_10"));
+        VtFloatArray const editedWeights{0.0f, 0.1f, 0.9f, 0.0f, 0.4f, 0.8f};
+        Check(badWeight && badWeight.Set(editedWeights) &&
+              center && center.Set(VtVec3fArray{GfVec3f(1.25f,0,0),
+                                                 GfVec3f(1.25f,0,0)}),
+              "edit native clump weight and anchor on live stage");
+        auto edited = compare("edited native clump planes on live Hydra index");
+        auto const findPlane = [](UsdGenGraphDesc const &desc, TfToken const &name)
+            -> UsdGenAuthoredPlaneDesc const * {
+            if (desc.curveSets.empty()) return nullptr;
+            for (auto const &plane : desc.curveSets.front().authoredPlanes)
+                if (plane.name == name) return &plane;
+            return nullptr;
+        };
+        auto const *editedHydraWeight = findPlane(edited.second, TfToken("clumpWeight_10"));
+        auto const *editedHydraAnchor = findPlane(edited.second, TfToken("clumpCenter_10"));
+        Check(editedHydraWeight && editedHydraWeight->floatValues == editedWeights &&
+              editedHydraAnchor && editedHydraAnchor->floatValues ==
+                  VtFloatArray({1.25f,0,0,1.25f,0,0}),
+              "Hydra notice rebuild reads edited clump weight and anchor");
+        Check(badWeight && badWeight.Set(VtFloatArray{0.5f}),
+              "author malformed native clump weight");
+        auto malformed = compare("malformed native clump planes");
+        auto hasMalformed = [](UsdGenGraphDesc const &desc) {
+            return std::any_of(desc.validationErrors.begin(),
+                               desc.validationErrors.end(),
+                [](std::string const &error) {
+                    return error.find("malformed native Clump primvar") !=
+                        std::string::npos;
+                });
+        };
+        Check(hasMalformed(malformed.first) && hasMalformed(malformed.second),
+              "both builders fail closed on malformed native clump plane");
         ++opened;
     }
     if (opened == 0) {

@@ -7,6 +7,7 @@
 //       compiles, one wrong-destination and one wrong-domain binding fail);
 //   (3) deterministic CPU cooks over small hand-built topologies (fixed seeds).
 #include "usdGen/compiler.h"
+#include "usdGen/cudaExecution.h"
 #include "usdGen/expressions/context.h"
 #include "usdGen/graph.h"
 #include "usdGen/opRegistry.h"
@@ -495,6 +496,181 @@ static void CheckBendCook()
     Check(tips, "Bend lays the strand along -X");
 }
 
+static void CheckClumpMotionConsumers()
+{
+    auto cookStyle = [](char const *type, int motionMode, float weight,
+                        bool differentFrame, size_t curveCount,
+                        UsdGenCurveBuffer *out) {
+        UsdGenGraphDesc desc;
+        desc.description = SdfPath("/motion");
+        desc.defaultWidth = 0.01f;
+        std::vector<GfVec3f> roots;
+        roots.reserve(curveCount);
+        for (size_t c = 0; c < curveCount; ++c)
+            roots.emplace_back(float(c) * 2.0f, 0, 0);
+        auto curves = StraightStrands(SdfPath("/motion/hair"), roots, 6, 0.2f);
+        if (differentFrame) {
+            curves.rootFrame[1].SetRow3(0, GfVec3d(0, 0, 1));
+            curves.rootFrame[1].SetRow3(2, GfVec3d(-1, 0, 0));
+        }
+        if (motionMode) {
+            UsdGenAuthoredPlaneDesc id;
+            id.name = TfToken("clumpId_2");
+            id.type = UsdGenAuthoredPlaneType::Int32;
+            id.domain = UsdGenAuthoredPlaneDomain::Primitive;
+            id.intValues.assign(curveCount, motionMode == 3 ? -1 : 0);
+            curves.authoredPlanes.push_back(id);
+        }
+        if (motionMode == 1 || motionMode == 3) {
+            UsdGenAuthoredPlaneDesc center;
+            center.name = TfToken("clumpCenter_2");
+            center.domain = UsdGenAuthoredPlaneDomain::Primitive;
+            center.arity = 3;
+            center.floatValues.resize(curveCount * 3);
+            for (size_t c = 0; c < curveCount; ++c)
+                center.floatValues[c * 3] = 1.0f;
+            curves.authoredPlanes.push_back(center);
+            UsdGenAuthoredPlaneDesc centerId;
+            centerId.name = TfToken("clumpCenterId_2");
+            centerId.type = UsdGenAuthoredPlaneType::Int32;
+            centerId.domain = UsdGenAuthoredPlaneDomain::Primitive;
+            centerId.arity = 2;
+            centerId.intValues.resize(curveCount * 2);
+            for (size_t c = 0; c < curveCount; ++c)
+                centerId.intValues[c * 2] = 123;
+            curves.authoredPlanes.push_back(centerId);
+            UsdGenAuthoredPlaneDesc weights;
+            weights.name = TfToken("clumpWeight_2");
+            weights.domain = UsdGenAuthoredPlaneDomain::Point;
+            weights.floatValues.assign(curveCount * 6, weight);
+            for (size_t c = 0; c < curveCount; ++c)
+                weights.floatValues[c * 6] = 0.0f;
+            curves.authoredPlanes.push_back(weights);
+        }
+        desc.curveSets.push_back(std::move(curves));
+        desc.nodes.push_back(SourceNode(SdfPath("/motion/source"), SdfPath("/motion/hair")));
+        auto style = OpNode("/motion/style", type, SdfPath("/motion/source"), 19);
+        if (std::string(type) == "UsdGenCurl") {
+            style.params = {{TfToken("radius"), VtValue(0.2f), false},
+                            {TfToken("frequency"), VtValue(0.5f), false},
+                            {TfToken("phaseRandom"), VtValue(1.0f), false},
+                            {TfToken("axisMode"), VtValue(TfToken("guide")), false}};
+        } else if (std::string(type) == "UsdGenBend") {
+            style.params = {{TfToken("angle"), VtValue(70.0f), false},
+                            {TfToken("angleRandom"), VtValue(GfVec2f(0.2f, 1.8f)), false},
+                            {TfToken("axisMode"), VtValue(TfToken("rootDirection")), false},
+                            {TfToken("axis"), VtValue(GfVec3f(1, 0, 0)), false}};
+        } else if (std::string(type) == "UsdGenNoise") {
+            style.params = {{TfToken("noise:magnitude"), VtValue(0.2f), false},
+                            {TfToken("preserveLength"), VtValue(false), false},
+                            {TfToken("noise:correlation"), VtValue(0.6f), false}};
+        } else {
+            style.params = {{TfToken("amplitudeU"), VtValue(0.2f), false},
+                            {TfToken("frequencyU"), VtValue(0.7f), false}};
+        }
+        desc.nodes.push_back(style);
+        desc.terminal = style.path;
+        return Cook(desc, out);
+    };
+    for (char const *type : {"UsdGenCurl", "UsdGenBend", "UsdGenNoise", "UsdGenWave"}) {
+        UsdGenCurveBuffer legacy, zero, idOnly, unassigned, clumped, variedFrame;
+        bool const cooked = cookStyle(type, 0, 0, false, 2, &legacy) &&
+            cookStyle(type, 1, 0, false, 2, &zero) &&
+            cookStyle(type, 2, 1, false, 2, &idOnly) &&
+            cookStyle(type, 3, 1, false, 2, &unassigned) &&
+            cookStyle(type, 1, 1, false, 2, &clumped) &&
+            cookStyle(type, 1, 1, true, 2, &variedFrame);
+        Check(cooked, std::string(type) + " clump motion fixtures cook");
+        if (!cooked) continue;
+        bool zeroExact = true, idOnlyExact = true, unassignedExact = true;
+        for (size_t i = 0; i < legacy.totalCvs; ++i)
+        {
+            zeroExact = zeroExact && zero.px[i] == legacy.px[i] &&
+                zero.py[i] == legacy.py[i] && zero.pz[i] == legacy.pz[i];
+            idOnlyExact = idOnlyExact && idOnly.px[i] == legacy.px[i] &&
+                idOnly.py[i] == legacy.py[i] && idOnly.pz[i] == legacy.pz[i];
+            unassignedExact = unassignedExact && unassigned.px[i] == legacy.px[i] &&
+                unassigned.py[i] == legacy.py[i] && unassigned.pz[i] == legacy.pz[i];
+        }
+        Check(zeroExact, std::string(type) + " zero cohesion preserves legacy points");
+        Check(idOnlyExact, std::string(type) + " ID-only preserves legacy points");
+        Check(unassignedExact, std::string(type) + " unassigned ID preserves legacy points");
+        auto offset = [](UsdGenCurveBuffer const &b, size_t c, size_t i) {
+            size_t const o = c * 6 + i;
+            return GfVec3f(b.px[o] - float(c) * 2.0f,
+                           b.py[o] - float(i) * 0.2f, b.pz[o]);
+        };
+        bool rootsPreserved = true, coherent = true;
+        for (size_t c = 0; c < 2; ++c)
+            rootsPreserved = rootsPreserved &&
+                offset(clumped, c, 0) == offset(legacy, c, 0);
+        for (size_t i = 1; i < 6; ++i)
+            coherent = coherent && (offset(clumped, 0, i) -
+                offset(clumped, 1, i)).GetLength() < 1e-4f;
+        Check(rootsPreserved, std::string(type) + " root lock preserves legacy root");
+        Check(coherent, std::string(type) + " same-group world offsets agree");
+        if (std::string(type) != "UsdGenWave")
+            Check((offset(legacy, 0, 3) - offset(legacy, 1, 3)).GetLength() >
+                      1e-4f,
+                  std::string(type) + " fixture starts with distinct strand motion");
+        Check((offset(variedFrame, 0, 3) - offset(variedFrame, 1, 3)).GetLength() >
+                  1e-4f,
+              std::string(type) + " keeps distinct authored root frames");
+    }
+    UsdGenCurveBuffer acrossChunks;
+    bool const acrossCooked = cookStyle("UsdGenCurl", 1, 1, false, 513,
+                                       &acrossChunks);
+    Check(acrossCooked, "Curl group across two chunks cooks");
+    if (acrossCooked) {
+        auto displacement = [&](size_t c) {
+            size_t const o = c * 6 + 4;
+            return GfVec3f(acrossChunks.px[o] - float(c) * 2.0f,
+                           acrossChunks.py[o] - 0.8f, acrossChunks.pz[o]);
+        };
+        Check((displacement(0) - displacement(512)).GetLength() < 1e-4f,
+              "Curl shares a clump draw across chunk boundaries");
+    }
+}
+
+static void CheckCudaImportedClumpAdmission()
+{
+    UsdGenGraphDesc desc;
+    desc.description = SdfPath("/cudaClump");
+    auto curves = StraightStrands(SdfPath("/cudaClump/hair"),
+                                  {GfVec3f(0, 0, 0)}, 3, 0.5f);
+    UsdGenAuthoredPlaneDesc weight;
+    weight.name = TfToken("clumpWeight_2");
+    weight.domain = UsdGenAuthoredPlaneDomain::Point;
+    weight.floatValues = {0.0f, 0.5f, 1.0f};
+    curves.authoredPlanes.push_back(weight);
+    desc.curveSets.push_back(curves);
+    desc.nodes.push_back(SourceNode(SdfPath("/cudaClump/source"), curves.path));
+    desc.nodes.push_back(OpNode("/cudaClump/noise", "UsdGenNoise",
+                                SdfPath("/cudaClump/source"), 7));
+    desc.terminal = SdfPath("/cudaClump/noise");
+    UsdGenDiagnostics diagnostics;
+    Check(!ValidateCudaGraph(desc, &diagnostics),
+          "CUDA rejects imported clump-weighted Noise at admission");
+    auto hasClumpError = [](UsdGenDiagnostics const &d) {
+        return std::any_of(d.errors.begin(), d.errors.end(),
+            [](std::string const &error) {
+                return error.find("CUDA Noise does not support imported clump motion planes") !=
+                    std::string::npos;
+            });
+    };
+    Check(hasClumpError(diagnostics),
+          "CUDA reports the unsupported imported clump motion plane");
+    auto &idOnly = desc.curveSets.front().authoredPlanes.front();
+    idOnly.name = TfToken("clumpId_2");
+    idOnly.type = UsdGenAuthoredPlaneType::Int32;
+    idOnly.domain = UsdGenAuthoredPlaneDomain::Primitive;
+    idOnly.floatValues.clear();
+    idOnly.intValues = {0};
+    diagnostics = {};
+    ValidateCudaGraph(desc, &diagnostics);
+    Check(!hasClumpError(diagnostics), "legacy clump IDs do not trigger motion rejection");
+}
+
 static void CheckPartCook()
 {
     UsdGenGraphDesc desc;
@@ -610,6 +786,8 @@ int main()
     CheckWaveCook();
     CheckCurlCook();
     CheckBendCook();
+    CheckClumpMotionConsumers();
+    CheckCudaImportedClumpAdmission();
     CheckPartCook();
     CheckGrowLiftCook();
     std::printf("testUsdGenCurlBendWavePart: %s\n", failures ? "FAILED" : "PASS");

@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -129,6 +130,8 @@ struct UsdGenCompiledNode
     // "nothing else" notice set exact and the sparse path cheap) ---
     uint64_t paramValueDigest = 0;  // hash of the value-class params + enabled
     uint64_t lastParamDigest  = 0;  // the paramValueDigest last evaluated
+    double lastEvalTime = std::numeric_limits<double>::quiet_NaN();
+    double lastEvalRate = std::numeric_limits<double>::quiet_NaN();
 };
 
 class UsdGenGraph

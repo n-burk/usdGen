@@ -7,16 +7,16 @@ class UsdGenGroom "UsdGenGroom"
 {
     rel proxyPrim (
         customData = {
-            string userDocBrief = '''The proxyPrim relationship allows us to link a
-        prim whose purpose is "render" to its (single target)
+            string userDocBrief = '''The proxyPrim relationship allows us to link a\r
+        prim whose purpose is "render" to its (single target)\r
         purpose="proxy" prim.'''
         }
     )
     uniform token purpose = "default" (
         allowedTokens = ["default", "render", "proxy", "guide"]
         customData = {
-            string userDocBrief = """Purpose is a classification of geometry into categories that 
-        can each be independently included or excluded from traversals of prims 
+            string userDocBrief = """Purpose is a classification of geometry into categories that \r
+        can each be independently included or excluded from traversals of prims \r
         on a stage, such as rendering or bounding-box computation traversals."""
         }
     )
@@ -36,7 +36,7 @@ class UsdGenGroom "UsdGenGroom"
     token visibility = "inherited" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
-            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
+            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" \r
         visibility that is supported by most DCC apps.'''
         }
     )
@@ -46,22 +46,22 @@ class UsdGenDescription "UsdGenDescription"
 {
     float3[] extent (
         customData = {
-            string userDocBrief = """Extent is a three dimensional range measuring the geometric
+            string userDocBrief = """Extent is a three dimensional range measuring the geometric\r
         extent of the authored gprim in its own local space (i.e."""
         }
     )
     rel proxyPrim (
         customData = {
-            string userDocBrief = '''The proxyPrim relationship allows us to link a
-        prim whose purpose is "render" to its (single target)
+            string userDocBrief = '''The proxyPrim relationship allows us to link a\r
+        prim whose purpose is "render" to its (single target)\r
         purpose="proxy" prim.'''
         }
     )
     uniform token purpose = "default" (
         allowedTokens = ["default", "render", "proxy", "guide"]
         customData = {
-            string userDocBrief = """Purpose is a classification of geometry into categories that 
-        can each be independently included or excluded from traversals of prims 
+            string userDocBrief = """Purpose is a classification of geometry into categories that \r
+        can each be independently included or excluded from traversals of prims \r
         on a stage, such as rendering or bounding-box computation traversals."""
         }
     )
@@ -141,15 +141,15 @@ class UsdGenDescription "UsdGenDescription"
     token visibility = "inherited" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
-            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
+            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" \r
         visibility that is supported by most DCC apps.'''
         }
     )
     uniform token[] xformOpOrder (
         customData = {
-            string userDocBrief = """Encodes the sequence of transformation operations in the
-        order in which they should be pushed onto a transform stack while
-        visiting a UsdStage's prims in a graph traversal that will effect
+            string userDocBrief = """Encodes the sequence of transformation operations in the\r
+        order in which they should be pushed onto a transform stack while\r
+        visiting a UsdStage's prims in a graph traversal that will effect\r
         the desired positioning for this prim and its descendant prims."""
         }
     )
@@ -159,23 +159,23 @@ class UsdGenGuideSet "UsdGenGuideSet"
 {
     rel proxyPrim (
         customData = {
-            string userDocBrief = '''The proxyPrim relationship allows us to link a
-        prim whose purpose is "render" to its (single target)
+            string userDocBrief = '''The proxyPrim relationship allows us to link a\r
+        prim whose purpose is "render" to its (single target)\r
         purpose="proxy" prim.'''
         }
     )
     uniform token purpose = "default" (
         allowedTokens = ["default", "render", "proxy", "guide"]
         customData = {
-            string userDocBrief = """Purpose is a classification of geometry into categories that 
-        can each be independently included or excluded from traversals of prims 
+            string userDocBrief = """Purpose is a classification of geometry into categories that \r
+        can each be independently included or excluded from traversals of prims \r
         on a stage, such as rendering or bounding-box computation traversals."""
         }
     )
     token visibility = "inherited" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
-            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
+            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" \r
         visibility that is supported by most DCC apps.'''
         }
     )
@@ -723,9 +723,9 @@ class UsdGenClump "UsdGenClump"
             dictionary usdGen = {
                 string evaluation = "groom"
             }
-            string userDocBrief = "Index of the first clumpId_<n> plane this operator publishes."
+            string userDocBrief = "Index of the first clump metadata level this operator publishes."
         }
-        doc = "Index of the first clumpId_<n> plane this operator publishes. -1 numbers it by its position among the description's Clump operators. Expression evaluation: groom (once per operator)."
+        doc = "Index of the first clump metadata level this operator publishes. -1 allocates the next free contiguous range in compiled order, reserving levels from preceding Clump operators (including disabled nodes) and imported C3 clump planes. An explicit nonnegative index must not overlap an occupied range. Expression evaluation: groom (once per operator)."
     )
     int usdGen:clump:levels = 1 (
         customData = {
@@ -2166,6 +2166,31 @@ class UsdGenCollide "UsdGenCollide"
         }
         doc = "Collider Meshes or face GeomSubsets for the push-out solve, appended after the bound surface, which always collides too. A GeomSubset collides with just the parent-mesh faces it names; an empty one is an error. Each of the iterations sweeps moves penetrating CVs out along the closest-point direction, keeping an offset gap and scaling the correction by pushAmount. Expression evaluation: groom (once per operator)."
     )
+    float usdGen:cutBlendDepth = 0.02 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Positive penetration-depth range over which cutThenCollide smoothly activates remaining-arc removal."
+        }
+        doc = "Positive penetration-depth range over which cutThenCollide smoothly activates remaining-arc removal. Stage units; must be finite and greater than zero. Expression evaluation: primitive (once per curve root)."
+    )
+    float usdGen:cutDepthThreshold = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Closed-collider penetration depth allowed before cutThenCollide shortens the strand."
+        }
+        doc = "Closed-collider penetration depth allowed before cutThenCollide shortens the strand. Depth excludes usdGen:offset. Must be finite and nonnegative. Expression evaluation: primitive (once per curve root)."
+    )
+    uniform token usdGen:deepPenetrationMode = "collide" (
+        allowedTokens = ["collide", "cutThenCollide"]
+        customData = {
+            string userDocBrief = 'Handling for deep closed-collider penetration: "collide" preserves the ordinary solver, while "cutThenCollide" statelessly and smoothly removes remaining source arc beyond a deep contact before collision.'
+        }
+        doc = 'Handling for deep closed-collider penetration: "collide" preserves the ordinary solver, while "cutThenCollide" statelessly and smoothly removes remaining source arc beyond a deep contact before collision. Flexible cut-mode collision projects entry and endpoint constraints from current geometry; stiff resolution retains its established strategy. Source length recovers when penetration clears. Below the threshold no pre-cut is applied; flexible collision may still change segment lengths. Expression evaluation: groom (once per operator).'
+    )
     bool usdGen:enabled = 1 (
         customData = {
             dictionary usdGen = {
@@ -2231,23 +2256,77 @@ class UsdGenCollide "UsdGenCollide"
 
 class UsdGenWind "UsdGenWind"
 {
+    float usdGen:billowHighFrequency = 1.25 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "High billow spatial frequency in cycles per stage distance unit along direction."
+        }
+        doc = "High billow spatial frequency in cycles per stage distance unit along direction. The field samples individual rest positions and, where effective cohesion survives, clump rest anchors. Must be nonnegative. Expression evaluation: groom (once per operator)."
+    )
+    float usdGen:billowHighRate = 0.8 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "High billow temporal rate in cycles per second; negative values reverse travel."
+        }
+        doc = "High billow temporal rate in cycles per second; negative values reverse travel. Expression evaluation: groom (once per operator)."
+    )
+    float usdGen:billowHighStrength = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Displacement amplitude for a coherent, high-frequency traveling billow."
+        }
+        doc = "Displacement amplitude for a coherent, high-frequency traveling billow. Zero preserves the legacy Wind result. Applied along direction with a root-anchored hairT-cubed envelope. Expression evaluation: primitive (once per curve root)."
+    )
+    float usdGen:billowLowFrequency = 0.25 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Low billow spatial frequency in cycles per stage distance unit along direction."
+        }
+        doc = "Low billow spatial frequency in cycles per stage distance unit along direction. The field samples individual rest positions and, where effective cohesion survives, clump rest anchors. Must be nonnegative. Expression evaluation: groom (once per operator)."
+    )
+    float usdGen:billowLowRate = 0.2 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Low billow temporal rate in cycles per second; negative values reverse travel."
+        }
+        doc = "Low billow temporal rate in cycles per second; negative values reverse travel. Expression evaluation: groom (once per operator)."
+    )
+    float usdGen:billowLowStrength = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Displacement amplitude for a coherent, low-frequency traveling billow."
+        }
+        doc = "Displacement amplitude for a coherent, low-frequency traveling billow. Zero preserves the legacy Wind result. Applied along direction with a root-anchored hairT-squared envelope. Expression evaluation: primitive (once per curve root)."
+    )
     float usdGen:constStrength = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
-            string userDocBrief = 'Authored Wind control "constStrength".'
+            string userDocBrief = "Constant displacement amplitude along direction, scaled from anchored root to tip."
         }
-        doc = 'Authored Wind control "constStrength". Declared for the frozen v1-v3 vocabulary; no kernel implements Wind yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
+        doc = "Constant displacement amplitude along direction, scaled from anchored root to tip. Expression evaluation: primitive (once per curve root)."
     )
     vector3f usdGen:direction = (0, 0, 1) (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
-            string userDocBrief = 'Authored Wind control "direction".'
+            string userDocBrief = "Direction of Wind displacement and billow travel, normalized by the operator."
         }
-        doc = 'Authored Wind control "direction". Declared for the frozen v1-v3 vocabulary; no kernel implements Wind yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
+        doc = "Direction of Wind displacement and billow travel, normalized by the operator. Expression evaluation: primitive (once per curve root)."
     )
     bool usdGen:enabled = 1 (
         customData = {
@@ -2263,9 +2342,9 @@ class UsdGenWind "UsdGenWind"
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
-            string userDocBrief = 'Authored Wind control "gustStrength".'
+            string userDocBrief = "Amplitude of animated gust motion."
         }
-        doc = 'Authored Wind control "gustStrength". Declared for the frozen v1-v3 vocabulary; no kernel implements Wind yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
+        doc = "Amplitude of animated gust motion. Without effective clump cohesion, the field varies by strand; cohesive CVs share motion sampled at their clump rest anchor to the extent of their surviving weights. Expression evaluation: primitive (once per curve root)."
     )
     float usdGen:mask = 1 (
         customData = {
@@ -2290,25 +2369,25 @@ class UsdGenWind "UsdGenWind"
             dictionary usdGen = {
                 string evaluation = "groom"
             }
-            string userDocBrief = 'Authored Wind control "stiffness".'
+            string userDocBrief = "Resistance to all Wind displacement, modulated by the stiffness ramp."
         }
-        doc = 'Authored Wind control "stiffness". Declared for the frozen v1-v3 vocabulary; no kernel implements Wind yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
+        doc = "Resistance to all Wind displacement, modulated by the stiffness ramp. Expression evaluation: groom (once per operator)."
     )
     uniform token usdGen:stiffness:interpolation = "catmullRom" (
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
         customData = {
-            string userDocBrief = "Interpolation token for Wind."
+            string userDocBrief = "Interpolation token for the Wind stiffness ramp."
         }
-        doc = "Interpolation token for Wind. Declared for the frozen v1-v3 vocabulary; no kernel implements Wind yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
+        doc = "Interpolation token for the Wind stiffness ramp. Expression evaluation: groom (once per operator)."
     )
     float2[] usdGen:stiffness:knots = [(0, 1), (1, 1)] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
-            string userDocBrief = "(position, value) ramp knots with position in [0, 1] for Wind."
+            string userDocBrief = "(hairT, value) ramp knots with hairT in [0, 1] for Wind stiffness."
         }
-        doc = "(position, value) ramp knots with position in [0, 1] for Wind. Declared for the frozen v1-v3 vocabulary; no kernel implements Wind yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
+        doc = "(hairT, value) ramp knots with hairT in [0, 1] for Wind stiffness. Expression evaluation: groom (once per operator)."
     )
 }
 
@@ -3421,16 +3500,16 @@ class UsdGenPomadeGroom "UsdGenPomadeGroom"
 {
     rel proxyPrim (
         customData = {
-            string userDocBrief = '''The proxyPrim relationship allows us to link a
-        prim whose purpose is "render" to its (single target)
+            string userDocBrief = '''The proxyPrim relationship allows us to link a\r
+        prim whose purpose is "render" to its (single target)\r
         purpose="proxy" prim.'''
         }
     )
     uniform token purpose = "default" (
         allowedTokens = ["default", "render", "proxy", "guide"]
         customData = {
-            string userDocBrief = """Purpose is a classification of geometry into categories that 
-        can each be independently included or excluded from traversals of prims 
+            string userDocBrief = """Purpose is a classification of geometry into categories that \r
+        can each be independently included or excluded from traversals of prims \r
         on a stage, such as rendering or bounding-box computation traversals."""
         }
     )
@@ -3455,15 +3534,15 @@ class UsdGenPomadeGroom "UsdGenPomadeGroom"
     token visibility = "inherited" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
-            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
+            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" \r
         visibility that is supported by most DCC apps.'''
         }
     )
     uniform token[] xformOpOrder (
         customData = {
-            string userDocBrief = """Encodes the sequence of transformation operations in the
-        order in which they should be pushed onto a transform stack while
-        visiting a UsdStage's prims in a graph traversal that will effect
+            string userDocBrief = """Encodes the sequence of transformation operations in the\r
+        order in which they should be pushed onto a transform stack while\r
+        visiting a UsdStage's prims in a graph traversal that will effect\r
         the desired positioning for this prim and its descendant prims."""
         }
     )
@@ -3473,22 +3552,22 @@ class UsdGenScalpGraph "UsdGenScalpGraph"
 {
     float3[] extent (
         customData = {
-            string userDocBrief = """Extent is a three dimensional range measuring the geometric
+            string userDocBrief = """Extent is a three dimensional range measuring the geometric\r
         extent of the authored gprim in its own local space (i.e."""
         }
     )
     rel proxyPrim (
         customData = {
-            string userDocBrief = '''The proxyPrim relationship allows us to link a
-        prim whose purpose is "render" to its (single target)
+            string userDocBrief = '''The proxyPrim relationship allows us to link a\r
+        prim whose purpose is "render" to its (single target)\r
         purpose="proxy" prim.'''
         }
     )
     uniform token purpose = "default" (
         allowedTokens = ["default", "render", "proxy", "guide"]
         customData = {
-            string userDocBrief = """Purpose is a classification of geometry into categories that 
-        can each be independently included or excluded from traversals of prims 
+            string userDocBrief = """Purpose is a classification of geometry into categories that \r
+        can each be independently included or excluded from traversals of prims \r
         on a stage, such as rendering or bounding-box computation traversals."""
         }
     )
@@ -3567,15 +3646,15 @@ class UsdGenScalpGraph "UsdGenScalpGraph"
     token visibility = "inherited" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
-            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
+            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" \r
         visibility that is supported by most DCC apps.'''
         }
     )
     uniform token[] xformOpOrder (
         customData = {
-            string userDocBrief = """Encodes the sequence of transformation operations in the
-        order in which they should be pushed onto a transform stack while
-        visiting a UsdStage's prims in a graph traversal that will effect
+            string userDocBrief = """Encodes the sequence of transformation operations in the\r
+        order in which they should be pushed onto a transform stack while\r
+        visiting a UsdStage's prims in a graph traversal that will effect\r
         the desired positioning for this prim and its descendant prims."""
         }
     )
@@ -3585,16 +3664,16 @@ class UsdGenTube "UsdGenTube"
 {
     rel proxyPrim (
         customData = {
-            string userDocBrief = '''The proxyPrim relationship allows us to link a
-        prim whose purpose is "render" to its (single target)
+            string userDocBrief = '''The proxyPrim relationship allows us to link a\r
+        prim whose purpose is "render" to its (single target)\r
         purpose="proxy" prim.'''
         }
     )
     uniform token purpose = "default" (
         allowedTokens = ["default", "render", "proxy", "guide"]
         customData = {
-            string userDocBrief = """Purpose is a classification of geometry into categories that 
-        can each be independently included or excluded from traversals of prims 
+            string userDocBrief = """Purpose is a classification of geometry into categories that \r
+        can each be independently included or excluded from traversals of prims \r
         on a stage, such as rendering or bounding-box computation traversals."""
         }
     )
@@ -3779,15 +3858,15 @@ class UsdGenTube "UsdGenTube"
     token visibility = "inherited" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
-            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
+            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" \r
         visibility that is supported by most DCC apps.'''
         }
     )
     uniform token[] xformOpOrder (
         customData = {
-            string userDocBrief = """Encodes the sequence of transformation operations in the
-        order in which they should be pushed onto a transform stack while
-        visiting a UsdStage's prims in a graph traversal that will effect
+            string userDocBrief = """Encodes the sequence of transformation operations in the\r
+        order in which they should be pushed onto a transform stack while\r
+        visiting a UsdStage's prims in a graph traversal that will effect\r
         the desired positioning for this prim and its descendant prims."""
         }
     )

@@ -1,0 +1,36 @@
+#usda 1.0
+(
+    "Copyright (c) 2026 Nick Burkard; SPDX-License-Identifier: MIT"
+    subLayers = [
+        @./stoat-groom.usda@
+    ]
+)
+
+over "World"
+{
+    over "Groom" (
+        active = false
+    )
+    {
+    }
+
+    over "Character"
+    {
+        over "body_M_hrc"
+        {
+            over "GEO"
+            {
+                over "tailHair_M_geo"
+                {
+                    token visibility = "inherited"
+                }
+            }
+        }
+    }
+
+    over "TailTuftScalp"
+    {
+        token visibility = "invisible"
+    }
+}
+

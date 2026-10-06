@@ -14,6 +14,7 @@
 // per-frame SeExpr FBM over 800 k CVs measures ~100 ms single-thread /
 // ~12.5 ms at 8 threads on this host (MEASURED, fbmbench, M1 integration).
 #include "usdGen/ops/noise.h"
+#include "usdGen/clumpMotion.h"
 
 #include "usdGen/opParams.h"
 #include "usdGenMath/usdGenMath/hash.h"
@@ -52,6 +53,7 @@ VtVec2fArray ReadRampKnots(UsdGenParamView const *p, TfToken const &name)
 
 struct UsdGenNoiseCapture final : public UsdGenCapturePayload
 {
+    UsdGenClumpMotion clumpMotion;
     // perCv[i]      = pinned fBm field value in [-1, 1] at CV i
     // perCurve[c]   = pinned field value at the curve root (recorded for the
     //                 correlation-1 limit and diagnostics)
@@ -196,9 +198,23 @@ bool UsdGenNoiseOp::Capture(
     UsdGenCapture *out,
     UsdGenDiagnostics *diag)
 {
-    TF_UNUSED(diag);
     UsdGenParamView const *p = ctx.params ? &*ctx.params : nullptr;
     auto &cap = *static_cast<UsdGenNoiseCapture *>(out);
+    std::string clumpError;
+    auto const *prior = dynamic_cast<UsdGenNoiseCapture const *>(ctx.previousCapture);
+    auto const *previousMotion = prior ? &prior->clumpMotion :
+        (cap.clumpMotion.levels.empty() ? nullptr : &cap.clumpMotion);
+    if (!UsdGenBuildClumpMotion(upstream, &cap.clumpMotion, &clumpError,
+                                previousMotion)) {
+        if (diag) diag->Error("UsdGenNoise: " + clumpError);
+        return false;
+    }
+    bool const clumpActive = std::any_of(cap.clumpMotion.levels.begin(),
+        cap.clumpMotion.levels.end(), [](auto const &level) {
+            return !level.groups.empty() &&
+                std::any_of(level.weight.begin(), level.weight.end(),
+                    [](float weight) { return weight > 0.0f; });
+        });
 
     cap.upstreamTopologyVersion = upstream.topologyVersion;
     cap.upstreamCvs = upstream.totalCvs;
@@ -262,7 +278,7 @@ bool UsdGenNoiseOp::Capture(
     // with a fixed stride, so ragged buffers take the CPU fill below.
     // Without the !ragged test a ragged buffer passed the old gate with
     // the bogus mean cvCount = nCv/nCurve — false positive, wrong field.
-    if (cvCount > 0 && !ragged && frequencyField.Uniform() && correlationField.Uniform() &&
+    if (!clumpActive && cvCount > 0 && !ragged && frequencyField.Uniform() && correlationField.Uniform() &&
         lacunarityField.Uniform() && gainField.Uniform() && octavesField.Uniform()) {
         const float frequency = static_cast<float>(frequencyField.Value(0, 0));
         const float correlation = std::clamp(
@@ -301,6 +317,8 @@ bool UsdGenNoiseOp::Capture(
     // spatial field, hence "correlated"); correlation = 0 is fully
     // decorrelated per curve by the hash offset.
     auto *field = cap.perCv.data();
+    std::vector<GfVec3f> groupBases(cap.clumpMotion.levels.size());
+    std::vector<bool> groupValid(cap.clumpMotion.levels.size(), false);
     for (size_t c = 0; c < nCurve; ++c) {
         float hvec[3];
         HashVec3(ctx.seed, ids ? ids[c] : 0, hvec);
@@ -317,6 +335,17 @@ bool UsdGenNoiseOp::Capture(
         const float baseX = root[0] * correlation + (1.0f - correlation) * hvec[0];
         const float baseY = root[1] * correlation + (1.0f - correlation) * hvec[1];
         const float baseZ = root[2] * correlation + (1.0f - correlation) * hvec[2];
+        for (size_t li = 0; li < cap.clumpMotion.levels.size(); ++li) {
+            auto const &level = cap.clumpMotion.levels[li];
+            groupValid[li] = !level.weight.empty() && c < level.groupForCurve.size() &&
+                level.groupForCurve[c] != UINT32_MAX;
+            if (!groupValid[li]) continue;
+            auto const &group = level.groups[level.groupForCurve[c]];
+            float hash[3];
+            HashVec3(ctx.seed, group.centerId, hash);
+            groupBases[li] = group.restAnchor * correlation +
+                GfVec3f(hash[0], hash[1], hash[2]) * (1.0f - correlation);
+        }
 
         float rootOut = 0.0f;
         {
@@ -339,7 +368,28 @@ bool UsdGenNoiseOp::Capture(
             float out1 = 0.0f;
             SeExpr2::FBM<3, 1, false, float>(in3, &out1,
                                              octaves, lacunarity, gain);
-            field[g + i] = 2.0f * out1 - 1.0f;
+            float const individual = 2.0f * out1 - 1.0f;
+            float shared = individual;
+            float remaining = 1.0f;
+            // The group re-samples the same field at a stable rest anchor,
+            // with the center's hash offset. Blend FIELD OUTPUTS rather than
+            // sample coordinates: local detail and authored frequency remain.
+            for (size_t li = cap.clumpMotion.levels.size();
+                 li-- > 0 && remaining > 0.0f;) {
+                auto const &level = cap.clumpMotion.levels[li];
+                if (!groupValid[li]) continue;
+                float const portion = remaining * level.weight[g + i];
+                if (portion == 0.0f) continue;
+                auto const &base = groupBases[li];
+                float const groupIn[3] = {
+                    base[0], base[1], base[2] + t * captureFrequency};
+                float groupOut = 0.0f;
+                SeExpr2::FBM<3, 1, false, float>(groupIn, &groupOut,
+                                                 octaves, lacunarity, gain);
+                shared += portion * ((2.0f * groupOut - 1.0f) - individual);
+                remaining -= portion;
+            }
+            field[g + i] = shared;
         }
     }
     return true;

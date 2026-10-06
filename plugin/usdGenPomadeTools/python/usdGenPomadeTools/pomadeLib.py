@@ -119,8 +119,11 @@ def _dllSearchDirs(path):
     # global runtime sweep prepends exactly those entries.
     for entry in os.environ.get("PATH", "").split(os.pathsep):
         entry = entry.strip().strip('"')
+        # Houdini vendors the same core as libpxr_tf.dll; a stock prefix
+        # has no libpxr_* files, so probing both is safe.
         if (entry and os.path.isdir(entry)
-                and os.path.isfile(os.path.join(entry, "usd_tf.dll"))):
+                and (os.path.isfile(os.path.join(entry, "usd_tf.dll"))
+                     or os.path.isfile(os.path.join(entry, "libpxr_tf.dll")))):
             for candidate in (entry,
                               os.path.join(os.path.dirname(entry), "bin")):
                 if (os.path.isdir(candidate) and candidate not in dirs):

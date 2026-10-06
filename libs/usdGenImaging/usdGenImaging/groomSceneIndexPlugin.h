@@ -88,6 +88,8 @@ public:
     // generations published into a scene index.
     static uint64_t ProcessCookCount() noexcept;
     static uint64_t ProcessPublishCount() noexcept;
+    // Nonblocking immutable publication status for the viewer playback gate.
+    static std::string PlaybackStatusJson(std::string const& selector, double frame);
     // -- HdSceneIndexObserver (input observations; 06 §3.2) --------------------
     // HdSingleInputFilteringSceneIndexBase installs a private bridge observer
     // on the input; filter subclasses override the underscore hooks below.
@@ -139,6 +141,7 @@ private:
     int64_t _TestPendingPublishedGeneration(SdfPath const& groom) const;
     uint64_t _TestCaptureCount() const noexcept;
     uint64_t _TestCookCount() const noexcept;
+    bool _TestStaleProgressRejected(SdfPath const& groom) const;
     void _TestOwnerCommandBarrier() const;
     uint64_t _TestSequenceLastIssued() const noexcept;
     uint64_t _TestSequenceCompletedThrough() const noexcept;

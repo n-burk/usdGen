@@ -1,0 +1,1166 @@
+{
+  "version": 1,
+  "copyright": "Copyright (c) 2026 Nick Burkard",
+  "license": "SPDX-License-Identifier: MIT",
+  "screenshots": [
+    {
+      "id": "pomade-01-open-workspace",
+      "image": "docs/site/media/ui/pomade-01-open-workspace.png",
+      "title": "Open the Pomade workspace",
+      "caption": "The usdGen > Pomade workspace opens with the Bind scalp mesh button and a first-run hint; grooming modes are gated until a scalp is bound.",
+      "scene": "examples/pomade-single-quad.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript plugin/usdGenPomadeTools/testenv/testUsdviewPomadeArtistWalkthrough.py",
+      "ui": "usdGen > Pomade > Open workspace"
+    },
+    {
+      "id": "pomade-02-bind-scalp",
+      "image": "docs/site/media/ui/pomade-02-bind-scalp.png",
+      "title": "Bind the scalp mesh",
+      "caption": "Bind scalp mesh selected /Scalp; Graph and Create region are now active in the dock.",
+      "scene": "examples/pomade-single-quad.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript plugin/usdGenPomadeTools/testenv/testUsdviewPomadeArtistWalkthrough.py",
+      "ui": "Bind scalp mesh...; Graph > Create region"
+    },
+    {
+      "id": "pomade-03-first-region",
+      "image": "docs/site/media/ui/pomade-03-first-region.png",
+      "title": "Close the first region",
+      "caption": "Three clicks and Enter close the first triangular region on /Scalp; the exercise intentionally leaves part of the scalp uncovered.",
+      "scene": "examples/pomade-single-quad.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript plugin/usdGenPomadeTools/testenv/testUsdviewPomadeArtistWalkthrough.py",
+      "ui": "Graph > Create region; Enter"
+    },
+    {
+      "id": "pomade-04-two-regions",
+      "image": "docs/site/media/ui/pomade-04-two-regions.png",
+      "title": "Two closed regions",
+      "caption": "The second region closes by clicking its first CV. The two partial-coverage regions have committed and the dock reports Synced.",
+      "scene": "examples/pomade-single-quad.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript plugin/usdGenPomadeTools/testenv/testUsdviewPomadeArtistWalkthrough.py",
+      "ui": "Graph > Create region; Synced"
+    },
+    {
+      "id": "pomade-05-select-tube",
+      "image": "docs/site/media/ui/pomade-05-select-tube.png",
+      "title": "Select a tube",
+      "caption": "Tube mode and Whole tube component selection are active; clicking the tube wall selects the tube and exposes its transform controls.",
+      "scene": "examples/pomade-single-quad.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript plugin/usdGenPomadeTools/testenv/testUsdviewPomadeArtistWalkthrough.py",
+      "ui": "Tube > Whole tube; Move"
+    },
+    {
+      "id": "pomade-06-fill-parameters",
+      "image": "docs/site/media/ui/pomade-06-fill-parameters.png",
+      "title": "Inspect Fill parameters",
+      "caption": "Fill > Params shows the selected tube's Density, CVs per guide, Edge bias, Seed, and Length profile. The warning reflects the intentionally unfinished scalp coverage in this exercise.",
+      "scene": "examples/pomade-single-quad.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript plugin/usdGenPomadeTools/testenv/testUsdviewPomadeArtistWalkthrough.py",
+      "ui": "Fill > Params"
+    },
+    {
+      "id": "pomade-07-fill-density",
+      "image": "docs/site/media/ui/pomade-07-fill-density.png",
+      "title": "Change guide density",
+      "caption": "The selected tube's Density is 40, with 37 guides reported in the dock. This is a partial-coverage practice scalp, not the finished character groom.",
+      "scene": "examples/pomade-single-quad.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript plugin/usdGenPomadeTools/testenv/testUsdviewPomadeArtistWalkthrough.py",
+      "ui": "Fill > Params > Density"
+    },
+    {
+      "id": "pomade-08-hierarchy",
+      "image": "docs/site/media/ui/pomade-08-hierarchy.png",
+      "title": "Open Hierarchy mode",
+      "caption": "Hierarchy mode exposes Navigate, Subdivide, Merge, Group, and Levels before the selected tube is subdivided.",
+      "scene": "examples/pomade-single-quad.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript plugin/usdGenPomadeTools/testenv/testUsdviewPomadeArtistWalkthrough.py",
+      "ui": "Hierarchy > Navigate"
+    },
+    {
+      "id": "pomade-09-sculpt",
+      "image": "docs/site/media/ui/pomade-09-sculpt.png",
+      "title": "Sculpt a guide tube",
+      "caption": "Sculpt > Grab moved the tube centers while keeping the root pinned; Brush radius reflects the F-drag resize.",
+      "scene": "examples/pomade-single-quad.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript plugin/usdGenPomadeTools/testenv/testUsdviewPomadeArtistWalkthrough.py",
+      "ui": "Sculpt > Grab; Brush radius"
+    },
+    {
+      "id": "pomade-10-build-output",
+      "image": "docs/site/media/ui/pomade-10-build-output.png",
+      "title": "Build renderable hair",
+      "caption": "Output mode exposes Build hair description, Strand density multiplier, Strand width, and Show amplified hair. This practice groom still has uncovered scalp and a kink warning.",
+      "scene": "examples/pomade-single-quad.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript plugin/usdGenPomadeTools/testenv/testUsdviewPomadeArtistWalkthrough.py",
+      "ui": "Output > Build hair description; Show amplified hair"
+    },
+    {
+      "id": "pomade-11-save-groom",
+      "image": "docs/site/media/ui/pomade-11-save-groom.png",
+      "title": "Save from the Pomade dock",
+      "caption": "The Save button is available in the Output workspace; the walkthrough next writes a .usdc groom through that button.",
+      "scene": "examples/pomade-single-quad.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript plugin/usdGenPomadeTools/testenv/testUsdviewPomadeArtistWalkthrough.py",
+      "ui": "Save"
+    },
+    {
+      "id": "pomade-12-reopen-workspace",
+      "image": "docs/site/media/ui/pomade-12-reopen-workspace.png",
+      "title": "Reopen the dock",
+      "caption": "Closing and reopening the Pomade dock preserves the live scalp binding and returns to Graph mode. This is a dock reopen, not a saved-file Resume.",
+      "scene": "examples/pomade-single-quad.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript plugin/usdGenPomadeTools/testenv/testUsdviewPomadeArtistWalkthrough.py",
+      "ui": "usdGen > Pomade > Open workspace; Graph"
+    },
+    {
+      "id": "pomade-13-resume-offered",
+      "image": "docs/site/media/ui/pomade-13-resume-offered.png",
+      "title": "Resume a saved groom",
+      "caption": "After reopening a scene that sublayers a saved .usdc groom, the dock offers Resume groom while no live scalp is bound.",
+      "scene": "examples/pomade-single-quad.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript plugin/usdGenPomadeTools/testenv/testUsdviewPomadeFileCommands.py",
+      "ui": "Resume groom"
+    },
+    {
+      "id": "pomade-14-resumed-groom",
+      "image": "docs/site/media/ui/pomade-14-resumed-groom.png",
+      "title": "Saved region restored",
+      "caption": "Resume groom hydrated one tube and 27 guides on /Scalp; the saved Graph region is editable again.",
+      "scene": "examples/pomade-single-quad.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript plugin/usdGenPomadeTools/testenv/testUsdviewPomadeFileCommands.py",
+      "ui": "Resume groom; Graph > Create region"
+    },
+    {
+      "id": "alab-01-open-stoat-hero",
+      "image": "docs/site/media/ui/alab-01-open-stoat-hero.png",
+      "title": "Open the stoat study",
+      "caption": "The prepared ALab stoat-groom.usda is open in usdview with HeroCam active; the Scene Graph shows Guides and Groom under /World.",
+      "scene": "examples/alab/stoat-groom.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript tools/docs/capture_alab_usdview_ui.py",
+      "ui": "Scene Graph; HeroCam"
+    },
+    {
+      "id": "alab-02-select-body-mesh",
+      "image": "docs/site/media/ui/alab-02-select-body-mesh.png",
+      "title": "Inspect the body mesh",
+      "caption": "The Scene Graph selection is the character body mesh at /World/Character/body_M_hrc/GEO/body_M_geo; the path field identifies the prim precisely.",
+      "scene": "examples/alab/stoat-groom.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript tools/docs/capture_alab_usdview_ui.py",
+      "ui": "Scene Graph > body_M_geo"
+    },
+    {
+      "id": "alab-03-sparse-guides",
+      "image": "docs/site/media/ui/alab-03-sparse-guides.png",
+      "title": "Inspect sparse guides",
+      "caption": "The companion stoat-guides.usda stage hides the render groom and shows the authored BasisCurves guides over the character in HeroCam.",
+      "scene": "examples/alab/stoat-guides.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript tools/docs/capture_alab_usdview_ui.py",
+      "ui": "Scene Graph > Guides; HeroCam"
+    },
+    {
+      "id": "alab-04-final-detail",
+      "image": "docs/site/media/ui/alab-04-final-detail.png",
+      "title": "Inspect the coat in DetailCam",
+      "caption": "DetailCam frames the stoat's head and upper coat in the live usdGen Storm viewport; the study is a prepared example scene.",
+      "scene": "examples/alab/stoat-groom.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript tools/docs/capture_alab_usdview_ui.py",
+      "ui": "DetailCam"
+    },
+    {
+      "id": "alab-05-select-noise-in-noodles",
+      "title": "Select the coat Noise operator",
+      "caption": "With BrownBody/Ops/noise selected in usdview's Scene Graph, Noodles Editor shows the prepared operator and its magnitude value, 0.0238. The capture script exercised Add from Prim Tree (A).",
+      "ui": "usdview Scene Graph; Window > Noodles Editor; A: Add from Prim Tree",
+      "image": "docs/site/media/ui/alab-05-select-noise-in-noodles.png",
+      "scene": "examples/alab/stoat-groom.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript tools/docs/capture_alab_noodles_ui.py",
+      "selectedPrim": "/World/Groom/BrownBody/Ops/noise",
+      "editedField": "usdGen:noise:magnitude",
+      "captureExercises": [
+        "Scene Graph selection and A: Add from Prim Tree",
+        "Layer Editor scratch edit-target selection",
+        "Noise magnitude value-cell click, type 0.031, Enter",
+        "Ctrl+S saved the scratch layer"
+      ]
+    },
+    {
+      "id": "alab-08-layer-editor",
+      "title": "Choose a persistent edit target",
+      "caption": "Layer Editor lists the prepared scratch layer stoat-ui-edit.usda. Clicking its row sets that persistent layer as the edit target before changing magnitude; the checked-in example remains untouched.",
+      "ui": "Window > Layer Editor; Edit Target",
+      "image": "docs/site/media/ui/alab-08-layer-editor.png",
+      "scene": "examples/alab/stoat-groom.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript tools/docs/capture_alab_noodles_ui.py",
+      "selectedPrim": "/World/Groom/BrownBody/Ops/noise",
+      "editedField": "usdGen:noise:magnitude",
+      "captureExercises": [
+        "Scene Graph selection and A: Add from Prim Tree",
+        "Layer Editor scratch edit-target selection",
+        "Noise magnitude value-cell click, type 0.031, Enter",
+        "Ctrl+S saved the scratch layer"
+      ]
+    },
+    {
+      "id": "alab-06-edit-noise-magnitude",
+      "title": "Edit coat Noise magnitude",
+      "caption": "In the selected Noise node's usdGen group, a real value-cell click, typing 0.031, and Enter changed usdGen:noise:magnitude from 0.0238 to 0.031 in the scratch edit layer.",
+      "ui": "Noodles Editor; usdGen > noise:magnitude value cell",
+      "image": "docs/site/media/ui/alab-06-edit-noise-magnitude.png",
+      "scene": "examples/alab/stoat-groom.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript tools/docs/capture_alab_noodles_ui.py",
+      "selectedPrim": "/World/Groom/BrownBody/Ops/noise",
+      "editedField": "usdGen:noise:magnitude",
+      "captureExercises": [
+        "Scene Graph selection and A: Add from Prim Tree",
+        "Layer Editor scratch edit-target selection",
+        "Noise magnitude value-cell click, type 0.031, Enter",
+        "Ctrl+S saved the scratch layer"
+      ]
+    },
+    {
+      "id": "alab-07-save-noise-layer",
+      "title": "Save the edited coat layer",
+      "caption": "After Ctrl+S in Noodles Editor, magnitude remains 0.031. The capture script verified that the selected scratch layer was saved and no longer dirty; the original scene was not rewritten.",
+      "ui": "Noodles Editor; Ctrl+S Save Layer",
+      "image": "docs/site/media/ui/alab-07-save-noise-layer.png",
+      "scene": "examples/alab/stoat-groom.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript tools/docs/capture_alab_noodles_ui.py",
+      "selectedPrim": "/World/Groom/BrownBody/Ops/noise",
+      "editedField": "usdGen:noise:magnitude",
+      "captureExercises": [
+        "Scene Graph selection and A: Add from Prim Tree",
+        "Layer Editor scratch edit-target selection",
+        "Noise magnitude value-cell click, type 0.031, Enter",
+        "Ctrl+S saved the scratch layer"
+      ]
+    },
+    {
+      "id": "operator-scatter-noodles",
+      "image": "docs/site/media/ui/operator-scatter-noodles.png",
+      "title": "Scatter in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Scatter selected. The density value cell is visible in its usdGen group.",
+      "scene": "examples/docs/operators/scatter.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenScatter",
+      "selectedPrim": "/World/Groom/Fur/Ops/scatter",
+      "editedField": "usdGen:density",
+      "visibleField": "density",
+      "actions": [
+        "Open examples/docs/operators/scatter.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/scatter; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the density value cell, type the value you want, and press Enter.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "operator-grow-noodles",
+      "image": "docs/site/media/ui/operator-grow-noodles.png",
+      "title": "Grow in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Grow selected. The length value cell is visible in its usdGen group.",
+      "scene": "examples/docs/operators/grow.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenGrow",
+      "selectedPrim": "/World/Groom/Fur/Ops/grow",
+      "editedField": "usdGen:length",
+      "visibleField": "length",
+      "actions": [
+        "Open examples/docs/operators/grow.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/grow; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the length value cell, type the value you want, and press Enter.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "operator-guideinterpolate-noodles",
+      "image": "docs/site/media/ui/operator-guideinterpolate-noodles.png",
+      "title": "Guide Interpolate in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Guide Interpolate selected. The influenceRadius value cell is visible in its usdGen group. The guide or curve relationship is a graph pin already authored in this prepared scene; it is not an inline value cell.",
+      "scene": "examples/guide-interpolate-plane.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenGuideInterpolate",
+      "selectedPrim": "/World/Groom/Hair/Ops/interp",
+      "editedField": "usdGen:influenceRadius",
+      "visibleField": "influenceRadius",
+      "actions": [
+        "Open examples/guide-interpolate-plane.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Hair/Ops/interp; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the influenceRadius value cell, type the value you want, and press Enter.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "operator-referencesource-noodles",
+      "image": "docs/site/media/ui/operator-referencesource-noodles.png",
+      "title": "Reference Source in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Reference Source selected. The enabled checkbox is visible in its usdGen group. The guide or curve relationship is a graph pin already authored in this prepared scene; it is not an inline value cell.",
+      "scene": "examples/docs/operators/reference-source.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenReferenceSource",
+      "selectedPrim": "/World/Groom/Fur/Ops/source",
+      "editedField": "usdGen:enabled",
+      "visibleField": "enabled",
+      "actions": [
+        "Open examples/docs/operators/reference-source.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/source; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the enabled checkbox to toggle it.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "operator-curvesource-noodles",
+      "image": "docs/site/media/ui/operator-curvesource-noodles.png",
+      "title": "Curve Source in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Curve Source selected. The densityMultiplier value cell is visible in its usdGen group. The guide or curve relationship is a graph pin already authored in this prepared scene; it is not an inline value cell.",
+      "scene": "examples/docs/operators/curve-source.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenCurveSource",
+      "selectedPrim": "/World/Groom/Fur/Ops/source",
+      "editedField": "usdGen:densityMultiplier",
+      "visibleField": "densityMultiplier",
+      "actions": [
+        "Open examples/docs/operators/curve-source.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/source; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the densityMultiplier value cell, type the value you want, and press Enter.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "operator-clump-noodles",
+      "image": "docs/site/media/ui/operator-clump-noodles.png",
+      "title": "Clump in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Clump selected. The clump:amount value cell is visible in its usdGen group.",
+      "scene": "examples/docs/operators/clump.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenClump",
+      "selectedPrim": "/World/Groom/Fur/Ops/clump",
+      "editedField": "usdGen:clump:amount",
+      "visibleField": "clump:amount",
+      "actions": [
+        "Open examples/docs/operators/clump.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/clump; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the clump:amount value cell, type the value you want, and press Enter.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "operator-noise-noodles",
+      "image": "docs/site/media/ui/operator-noise-noodles.png",
+      "title": "Noise in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Noise selected. The noise:magnitude value cell is visible in its usdGen group.",
+      "scene": "examples/docs/operators/noise.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenNoise",
+      "selectedPrim": "/World/Groom/Fur/Ops/noise",
+      "editedField": "usdGen:noise:magnitude",
+      "visibleField": "noise:magnitude",
+      "actions": [
+        "Open examples/docs/operators/noise.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/noise; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the noise:magnitude value cell, type the value you want, and press Enter.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "operator-length-noodles",
+      "image": "docs/site/media/ui/operator-length-noodles.png",
+      "title": "Length in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Length selected. The length:value value cell is visible in its usdGen group.",
+      "scene": "examples/docs/operators/length.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenLength",
+      "selectedPrim": "/World/Groom/Fur/Ops/length",
+      "editedField": "usdGen:length:value",
+      "visibleField": "length:value",
+      "actions": [
+        "Open examples/docs/operators/length.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/length; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the length:value value cell, type the value you want, and press Enter.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "operator-width-noodles",
+      "image": "docs/site/media/ui/operator-width-noodles.png",
+      "title": "Width in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Width selected. The width value cell is visible in its usdGen group.",
+      "scene": "examples/docs/operators/width.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenWidth",
+      "selectedPrim": "/World/Groom/Fur/Ops/width",
+      "editedField": "usdGen:width",
+      "visibleField": "width",
+      "actions": [
+        "Open examples/docs/operators/width.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/width; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the width value cell, type the value you want, and press Enter.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "operator-direction-noodles",
+      "image": "docs/site/media/ui/operator-direction-noodles.png",
+      "title": "Direction in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Direction selected. The amount value cell is visible in its usdGen group.",
+      "scene": "examples/docs/operators/direction.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenDirection",
+      "selectedPrim": "/World/Groom/Fur/Ops/direction",
+      "editedField": "usdGen:amount",
+      "visibleField": "amount",
+      "actions": [
+        "Open examples/docs/operators/direction.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/direction; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the amount value cell, type the value you want, and press Enter.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "operator-smooth-noodles",
+      "image": "docs/site/media/ui/operator-smooth-noodles.png",
+      "title": "Smooth in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Smooth selected. The strength value cell is visible in its usdGen group.",
+      "scene": "examples/docs/operators/smooth.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenSmooth",
+      "selectedPrim": "/World/Groom/Fur/Ops/smooth",
+      "editedField": "usdGen:strength",
+      "visibleField": "strength",
+      "actions": [
+        "Open examples/docs/operators/smooth.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/smooth; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the strength value cell, type the value you want, and press Enter.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "operator-resample-noodles",
+      "image": "docs/site/media/ui/operator-resample-noodles.png",
+      "title": "Resample in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Resample selected. The cvCount value cell is visible in its usdGen group.",
+      "scene": "examples/docs/operators/resample.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenResample",
+      "selectedPrim": "/World/Groom/Fur/Ops/resample",
+      "editedField": "usdGen:cvCount",
+      "visibleField": "cvCount",
+      "actions": [
+        "Open examples/docs/operators/resample.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/resample; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the cvCount value cell, type the value you want, and press Enter.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "operator-scale-noodles",
+      "image": "docs/site/media/ui/operator-scale-noodles.png",
+      "title": "Scale in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Scale selected. The scale value cell is visible in its usdGen group.",
+      "scene": "examples/docs/operators/scale.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenScale",
+      "selectedPrim": "/World/Groom/Fur/Ops/scale",
+      "editedField": "usdGen:scale",
+      "visibleField": "scale",
+      "actions": [
+        "Open examples/docs/operators/scale.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/scale; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the scale value cell, type the value you want, and press Enter.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "operator-curl-noodles",
+      "image": "docs/site/media/ui/operator-curl-noodles.png",
+      "title": "Curl in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Curl selected. The radius value cell is visible in its usdGen group.",
+      "scene": "examples/docs/operators/curl.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenCurl",
+      "selectedPrim": "/World/Groom/Fur/Ops/curl",
+      "editedField": "usdGen:radius",
+      "visibleField": "radius",
+      "actions": [
+        "Open examples/docs/operators/curl.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/curl; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the radius value cell, type the value you want, and press Enter.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "operator-bend-noodles",
+      "image": "docs/site/media/ui/operator-bend-noodles.png",
+      "title": "Bend in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Bend selected. The angle value cell is visible in its usdGen group.",
+      "scene": "examples/docs/operators/bend.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenBend",
+      "selectedPrim": "/World/Groom/Fur/Ops/bend",
+      "editedField": "usdGen:angle",
+      "visibleField": "angle",
+      "actions": [
+        "Open examples/docs/operators/bend.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/bend; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the angle value cell, type the value you want, and press Enter.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "operator-straighten-noodles",
+      "image": "docs/site/media/ui/operator-straighten-noodles.png",
+      "title": "Straighten in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Straighten selected. The tangentStraightness value cell is visible in its usdGen group.",
+      "scene": "examples/docs/operators/straighten.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenStraighten",
+      "selectedPrim": "/World/Groom/Fur/Ops/straighten",
+      "editedField": "usdGen:tangentStraightness",
+      "visibleField": "tangentStraightness",
+      "actions": [
+        "Open examples/docs/operators/straighten.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/straighten; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the tangentStraightness value cell, type the value you want, and press Enter.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "operator-displace-noodles",
+      "image": "docs/site/media/ui/operator-displace-noodles.png",
+      "title": "Displace in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Displace selected. The displace:amount value cell is visible in its usdGen group.",
+      "scene": "examples/docs/operators/displace.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenDisplace",
+      "selectedPrim": "/World/Groom/Fur/Ops/displace",
+      "editedField": "usdGen:displace:amount",
+      "visibleField": "displace:amount",
+      "actions": [
+        "Open examples/docs/operators/displace.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/displace; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the displace:amount value cell, type the value you want, and press Enter.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "operator-wave-noodles",
+      "image": "docs/site/media/ui/operator-wave-noodles.png",
+      "title": "Wave in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Wave selected. The amplitudeU value cell is visible in its usdGen group.",
+      "scene": "examples/docs/operators/wave.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenWave",
+      "selectedPrim": "/World/Groom/Fur/Ops/wave",
+      "editedField": "usdGen:amplitudeU",
+      "visibleField": "amplitudeU",
+      "actions": [
+        "Open examples/docs/operators/wave.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/wave; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the amplitudeU value cell, type the value you want, and press Enter.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "operator-part-noodles",
+      "image": "docs/site/media/ui/operator-part-noodles.png",
+      "title": "Part in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Part selected. The part:radius value cell is visible in its usdGen group.",
+      "scene": "examples/docs/operators/part.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenPart",
+      "selectedPrim": "/World/Groom/Fur/Ops/part",
+      "editedField": "usdGen:part:radius",
+      "visibleField": "part:radius",
+      "actions": [
+        "Open examples/docs/operators/part.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/part; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the part:radius value cell, type the value you want, and press Enter.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "operator-exprop-noodles",
+      "image": "docs/site/media/ui/operator-exprop-noodles.png",
+      "title": "Expression Op in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Expression Op selected. The expr:source value cell is visible in its usdGen group.",
+      "scene": "examples/docs/operators/expr-op.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenExprOp",
+      "selectedPrim": "/World/Groom/Fur/Ops/expression",
+      "editedField": "usdGen:expr:source",
+      "visibleField": "expr:source",
+      "actions": [
+        "Open examples/docs/operators/expr-op.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/expression; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the expr:source value cell, type the value you want, and press Enter.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "operator-sculptlayer-noodles",
+      "image": "docs/site/media/ui/operator-sculptlayer-noodles.png",
+      "title": "Sculpt Layer in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Sculpt Layer selected. The sculpt:weight value cell is visible in its usdGen group.",
+      "scene": "examples/docs/operators/sculpt-layer.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenSculptLayer",
+      "selectedPrim": "/World/Groom/Fur/Ops/sculpt",
+      "editedField": "usdGen:sculpt:weight",
+      "visibleField": "sculpt:weight",
+      "actions": [
+        "Open examples/docs/operators/sculpt-layer.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/sculpt; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the sculpt:weight value cell, type the value you want, and press Enter.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "operator-deform-noodles",
+      "image": "docs/site/media/ui/operator-deform-noodles.png",
+      "title": "Deform in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Deform selected. The lockRoots checkbox is visible in its usdGen group.",
+      "scene": "examples/rbf-guides-plane.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenDeform",
+      "selectedPrim": "/World/Groom/Hair/Ops/deform",
+      "editedField": "usdGen:lockRoots",
+      "visibleField": "lockRoots",
+      "actions": [
+        "Open examples/rbf-guides-plane.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Hair/Ops/deform; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the lockRoots checkbox to toggle it.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "operator-collide-noodles",
+      "image": "docs/site/media/ui/collide-cut-controls-noodles.png",
+      "title": "Collide in Noodles Editor",
+      "caption": "Actual Collide node in Noodles Editor: cutThenCollide temporarily shortens deeply penetrating strands before flexible collision, with cutDepthThreshold 0.15 and cutBlendDepth 0.02 in stage units. The preset uses 128 iterations, pushAmount 1 and offset 0.",
+      "scene": "examples/docs/operators/collide.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript tools/docs/capture_collide_slide_ui.py; synchronous testusdview without --allow-async",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenCollide",
+      "selectedPrim": "/World/Groom/Fur/Ops/collide",
+      "editedField": "usdGen:pushAmount",
+      "visibleField": "pushAmount",
+      "actions": [
+        "Open examples/docs/operators/collide.usda in usdview. Choose Camera > Select Camera > CamMotion (/World/CamMotion) to frame the sphere's full descent and slide, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/collide; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, select collide.usda as the edit target so changes and Ctrl+S preserve the sphere's existing 0, 27 and 99 motion keys in that file.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In usdview select the Collide prim's usdGen:colliders relationship and inspect its two explicit targets: /World/Shield and the invisible closed /World/ScalpVolume beneath the patch.",
+        "Select /World/Shield and add it to Noodles. Its editable subdivisionScheme token is catmullClark. In usdview choose Display > Complexity > Very High to display its smooth surface; Collide uses the authored scheme independently of viewport complexity.",
+        "For a sphere motion edit, select /World/Shield in the Scene Graph and press A in Noodles. Choose Write Values > Animation (key at current frame), set Current Frame to 27, and click the Y component of xformOp:translate. The authored center is (0.5, 0.525, 0.5); change it and restore 0.525, then check frames 0 and 99 to keep all three motion keys. In the root edit layer, Ctrl+S saves the complete keyed scene.",
+        "Return Write Values to Default before editing Collide controls. At frame 27 or 99, keep offset 0, iterations 128 and resolveType flexible; click pushAmount, type 0 and press Enter to see the uncorrected fur, then type 1 and press Enter to restore native correction.",
+        "For deep contact, choose cutThenCollide with resolveType flexible, set cutDepthThreshold to 0.15 and cutBlendDepth to 0.02. Threshold is an inset from the evaluated subdivision limit; collision still bends against its outer boundary; blend controls how gradually it turns on.",
+        "With CamMotion selected, hold Current Frame at 0, 27 and 99 in turn and wait for each cook. Compare the clear, descending and sliding poses; pre-cut shortening should disappear when contact clears. For a closer settled view at frame 99, choose Camera > Select Camera > Cam (/World/Cam).",
+        "For a fur-only comparison at frame 27 or 99, open Window > Layer Editor and choose Session Layer as the edit target. Select /World/Shield in the Scene Graph, then choose Edit > Make Invisible (Ctrl+H). Wait for the hair to settle and select its visibility property to inspect the invisible value. The Shield still participates in Collide: keep both /World/Shield and /World/ScalpVolume in usdGen:colliders. Choose Edit > Remove Session Visibility (Ctrl+U) to show the sphere again, then restore your previous edit target. This inspection uses a session opinion and needs no source-layer save.",
+        "In Storm, set the timeline range to 0–99 and use the scene's 24 fps. Press Play: each frame waits for the complete current-frame groom and its converged viewport presentation, so slow cooks slow playback. Manual scrubbing remains progressive.",
+        "Press Playblast next to Play, choose an MP4 destination in the file dialog, and wait for capture and encoding. The displayed range is recorded at timeline FPS. Cancel restores the previous frame and playback state and preserves an existing output movie.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "relatedCaptures": [
+        "collide-targets",
+        "collide-shield-subdivision",
+        "collide-key-000",
+        "collide-key-027",
+        "collide-key-099",
+        "collide-key-authoring-noodles",
+        "collide-playblast",
+        "collide-fur-only-ui"
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing",
+        "Camera > Select Camera > CamMotion: actual QAction selection and view camera assertion"
+      ],
+      "editVerification": "The accepted capture exercised Noodles Animation editing of the frame-27 translate Y cell and canceled it; source immutability was checked. The earlier separate edit/save/reopen test verified all three keys and both collider targets.",
+      "visibleFields": [
+        "deepPenetrationMode",
+        "cutDepthThreshold",
+        "cutBlendDepth"
+      ],
+      "authoredValues": {
+        "deepPenetrationMode": "cutThenCollide",
+        "resolveType": "flexible",
+        "cutDepthThreshold": 0.15,
+        "cutBlendDepth": 0.02,
+        "iterations": 128,
+        "pushAmount": 1,
+        "offset": 0
+      },
+      "sceneSha256": "45f940bf88748379f2f75fe1af227ac0a1e0a749dd5f0b342c1c356e8df49f18",
+      "imageSha256": "dfb427c223ff66c3733477991cc2a63cc813a58e76a96032847663840222434f",
+      "captureLogSha256": "66ee6ac4692cdee54096e1f0afcbb2c06c8b6b477e11358310542bc4aa0909e6",
+      "captureScriptSha256": "73328b273de8cf3d84207ee669e0114b91cb192a8a0d3aad9e2da42d52cb7f50",
+      "captureMode": "synchronous",
+      "captureVerification": "All eight actual main-launcher Storm captures completed; testusdview exited 0. The helper verified the 0/27/99 keys, inset controls, two collider targets, subdivision and session visibility restoration with the source unchanged.",
+      "captureExitCode": 0
+    },
+    {
+      "id": "operator-wind-noodles",
+      "image": "docs/site/media/ui/operator-wind-noodles.png",
+      "title": "Wind in Noodles Editor",
+      "caption": "Actual Wind node in the 6,500-strand clumped practice scene, with native low- and high-frequency billow controls. The preset combines slow broad waves with faster tip ripples.",
+      "scene": "examples/docs/operators/wind-clumped.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenWind",
+      "selectedPrim": "/World/Groom/Fur/Ops/wind",
+      "editedField": "usdGen:billowHighStrength",
+      "visibleField": "billowHighStrength",
+      "actions": [
+        "Open examples/docs/operators/wind-clumped.usda in usdview. Choose Camera > Select Camera > Cam (/World/Cam) for the elevated view, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/wind; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "Play frames 0–99 at 24 fps. Click billowHighStrength, type 0 and press Enter to isolate broad billowing; restore 0.045 for finer ripples. Keep billowLowStrength 0.10, billowLowFrequency 0.75 and billowLowRate 0.24. Try billowHighRate 0.48, then restore 0.96, to compare ripple speed; billowHighFrequency stays 3.",
+        "For a full Wind movie, set the timeline range to 0–99 and use the scene's 24 fps. Storm Play waits for complete current-frame hair and converged viewport presentation before advancing; manual scrubbing remains progressive.",
+        "Press Playblast next to Play and choose an MP4 destination. Each ready viewport frame in the displayed range is recorded at timeline FPS even when cooking slows interactive Play. Cancel restores the previous frame and playback state and preserves an existing output movie.",
+        "Compare the matched wind-unclumped.usda scene: its /World/Groom/Fur/Ops/clump node has enabled off, while the clumped scene has it on. Both Scatter nodes author density 6500. Select those nodes to inspect the native toggle and density controls, then return to Wind.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "relatedCaptures": [
+        "wind-clump-enabled-noodles",
+        "wind-clump-disabled-noodles",
+        "wind-scatter-6500-noodles",
+        "wind-playblast"
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing",
+        "Camera > Select Camera > Cam: actual QAction selection and view camera assertion"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "wind-playblast",
+      "image": "docs/site/media/ui/wind-playblast.png",
+      "title": "Wind playback and Playblast",
+      "caption": "Actual main-launcher Storm viewport with Playblast beside Play. This acceptance capture used the short range 0–5 at 24 fps in wind-unclumped.usda. Cam was selected through the camera menu after initial population, with camera lighting and selection highlighting off. All Play advances and movie captures contained the complete 6,500-strand groom.",
+      "scene": "examples/docs/operators/wind-unclumped.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript plugin/usdGenTools/testenv/testUsdviewPlaybackPlayblast.py --allow-async --renderer GL",
+      "ui": "Camera > Select Camera > Cam; Lights > Enable Default Camera Light: off; Timeline > Play; Playblast",
+      "captureMode": "asynchronous",
+      "captureVerification": "Real native readiness and viewport presentation checks passed before every Play advance and capture. ffprobe verified six MP4 frames at 24 fps; progressive scrubbing and Cancel/error restoration passed. The assertions completed before the stock harness reported retained initial render-buffer errors.",
+      "captureExitCaveat": "Installed testusdview exited 1 in RaiseIfNotClean after acceptance completed, reporting two stock initial invalid render-buffer-size diagnostics. No playback, movie, curve-count or restoration assertion failed."
+    },
+    {
+      "id": "collide-playblast",
+      "image": "docs/site/media/ui/collide-playblast.png",
+      "title": "Collide playback and Playblast",
+      "caption": "Actual main-launcher Storm viewport with Playblast beside Play. This acceptance capture used the short range 0–5 at 24 fps in collide.usda. CamMotion was selected through the camera menu after initial population, with camera lighting and selection highlighting off. All Play advances and movie captures contained the complete 8,000-strand groom.",
+      "scene": "examples/docs/operators/collide.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript plugin/usdGenTools/testenv/testUsdviewPlaybackPlayblast.py --allow-async --renderer GL",
+      "ui": "Camera > Select Camera > CamMotion; Lights > Enable Default Camera Light: off; Timeline > Play; Playblast",
+      "captureMode": "asynchronous",
+      "captureVerification": "Real native readiness and viewport presentation checks passed before every Play advance and capture. ffprobe verified six MP4 frames at 24 fps; progressive scrubbing and Cancel/error restoration passed. The assertions completed before the stock harness reported retained initial render-buffer errors.",
+      "captureExitCaveat": "Installed testusdview exited 1 in RaiseIfNotClean after acceptance completed, reporting two stock initial invalid render-buffer-size diagnostics. No playback, movie, curve-count or restoration assertion failed."
+    },
+    {
+      "id": "collide-targets",
+      "image": "docs/site/media/ui/collide-targets.png",
+      "title": "Both physical Collide targets",
+      "caption": "The real usdview relationship lists /World/Shield and the invisible closed /World/ScalpVolume; the latter is an authored under-patch collision floor. Flexible resolution, 128 iterations, pushAmount 1 and offset 0 are visible below it.",
+      "scene": "examples/docs/operators/collide.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript tools/docs/capture_collide_slide_ui.py",
+      "ui": "Scene Graph > Collide; usdGen:colliders relationship",
+      "selectedPrim": "/World/Groom/Fur/Ops/collide",
+      "visibleField": "usdGen:colliders",
+      "sceneSha256": "45f940bf88748379f2f75fe1af227ac0a1e0a749dd5f0b342c1c356e8df49f18",
+      "imageSha256": "fd5fccea3b39dcd9a7f9f04c7257da22b0dc365a89d2aabb7fe18595b83ff7a5",
+      "captureLogSha256": "66ee6ac4692cdee54096e1f0afcbb2c06c8b6b477e11358310542bc4aa0909e6",
+      "captureScriptSha256": "73328b273de8cf3d84207ee669e0114b91cb192a8a0d3aad9e2da42d52cb7f50",
+      "captureMode": "synchronous",
+      "captureVerification": "All eight actual main-launcher Storm captures completed; testusdview exited 0. The helper verified the 0/27/99 keys, inset controls, two collider targets, subdivision and session visibility restoration with the source unchanged.",
+      "captureExitCode": 0
+    },
+    {
+      "id": "collide-shield-subdivision",
+      "image": "docs/site/media/ui/collide-shield-subdivision.png",
+      "title": "Catmull-Clark Shield at Very High complexity",
+      "caption": "The real main-build usdview property view shows subdivisionScheme = catmullClark on /World/Shield. The same session selected Display > Complexity > Very High before capturing the smooth Storm viewport; native Collide follows the authored scheme independently of viewport complexity.",
+      "scene": "examples/docs/operators/collide.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript tools/docs/capture_collide_slide_ui.py",
+      "ui": "Display > Complexity > Very High; Scene Graph > Shield; subdivisionScheme selected",
+      "selectedPrim": "/World/Shield",
+      "visibleField": "subdivisionScheme",
+      "sceneSha256": "45f940bf88748379f2f75fe1af227ac0a1e0a749dd5f0b342c1c356e8df49f18",
+      "imageSha256": "58243553954ba7875d9c9154d409c29a493035e08a549bc5506fe5fed0e10fae",
+      "captureLogSha256": "66ee6ac4692cdee54096e1f0afcbb2c06c8b6b477e11358310542bc4aa0909e6",
+      "captureScriptSha256": "73328b273de8cf3d84207ee669e0114b91cb192a8a0d3aad9e2da42d52cb7f50",
+      "captureMode": "synchronous",
+      "captureVerification": "All eight actual main-launcher Storm captures completed; testusdview exited 0. The helper verified the 0/27/99 keys, inset controls, two collider targets, subdivision and session visibility restoration with the source unchanged.",
+      "captureExitCode": 0
+    },
+    {
+      "id": "collide-key-000",
+      "image": "docs/site/media/ui/collide-key-000.png",
+      "title": "Sphere starts clear at frame 0",
+      "caption": "Current Frame 0 shows the authored Shield center (0.5, 1.45, 0.5) above the fur patch in the real usdview Storm viewport.",
+      "scene": "examples/docs/operators/collide.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript tools/docs/capture_collide_slide_ui.py",
+      "ui": "Current Frame 0; xformOp:translate selected",
+      "selectedPrim": "/World/Shield",
+      "visibleField": "xformOp:translate",
+      "sceneSha256": "45f940bf88748379f2f75fe1af227ac0a1e0a749dd5f0b342c1c356e8df49f18",
+      "imageSha256": "8f8c73a39b0f22eab2e927cc6996536fe61371ab04e13091fdb92afaa7937924",
+      "captureLogSha256": "66ee6ac4692cdee54096e1f0afcbb2c06c8b6b477e11358310542bc4aa0909e6",
+      "captureScriptSha256": "73328b273de8cf3d84207ee669e0114b91cb192a8a0d3aad9e2da42d52cb7f50",
+      "captureMode": "synchronous",
+      "captureVerification": "All eight actual main-launcher Storm captures completed; testusdview exited 0. The helper verified the 0/27/99 keys, inset controls, two collider targets, subdivision and session visibility restoration with the source unchanged.",
+      "captureExitCode": 0
+    },
+    {
+      "id": "collide-key-027",
+      "image": "docs/site/media/ui/collide-key-027.png",
+      "title": "Sphere descends by frame 27",
+      "caption": "Current Frame 27 shows center (0.5, 0.525, 0.5) pressing into the clumped patch; the selected xformOp:translate value is visible.",
+      "scene": "examples/docs/operators/collide.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript tools/docs/capture_collide_slide_ui.py",
+      "ui": "Current Frame 27; xformOp:translate selected",
+      "selectedPrim": "/World/Shield",
+      "visibleField": "xformOp:translate",
+      "sceneSha256": "45f940bf88748379f2f75fe1af227ac0a1e0a749dd5f0b342c1c356e8df49f18",
+      "imageSha256": "e16837e0d5384c320ab2910d48d39482a8a35464a8234f6a7c224bedec54a20c",
+      "captureLogSha256": "66ee6ac4692cdee54096e1f0afcbb2c06c8b6b477e11358310542bc4aa0909e6",
+      "captureScriptSha256": "73328b273de8cf3d84207ee669e0114b91cb192a8a0d3aad9e2da42d52cb7f50",
+      "captureMode": "synchronous",
+      "captureVerification": "All eight actual main-launcher Storm captures completed; testusdview exited 0. The helper verified the 0/27/99 keys, inset controls, two collider targets, subdivision and session visibility restoration with the source unchanged.",
+      "captureExitCode": 0
+    },
+    {
+      "id": "collide-key-099",
+      "image": "docs/site/media/ui/collide-key-099.png",
+      "title": "Sphere slides by frame 99",
+      "caption": "Current Frame 99 shows center (0.5, 0.525, 0.85), preserving the lower height while sliding in +Z.",
+      "scene": "examples/docs/operators/collide.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript tools/docs/capture_collide_slide_ui.py",
+      "ui": "Current Frame 99; xformOp:translate selected",
+      "selectedPrim": "/World/Shield",
+      "visibleField": "xformOp:translate",
+      "sceneSha256": "45f940bf88748379f2f75fe1af227ac0a1e0a749dd5f0b342c1c356e8df49f18",
+      "imageSha256": "025e1524c292dfc6c16c4071bdc544789d0150e563945fdca3e3bfa672b72d31",
+      "captureLogSha256": "66ee6ac4692cdee54096e1f0afcbb2c06c8b6b477e11358310542bc4aa0909e6",
+      "captureScriptSha256": "73328b273de8cf3d84207ee669e0114b91cb192a8a0d3aad9e2da42d52cb7f50",
+      "captureMode": "synchronous",
+      "captureVerification": "All eight actual main-launcher Storm captures completed; testusdview exited 0. The helper verified the 0/27/99 keys, inset controls, two collider targets, subdivision and session visibility restoration with the source unchanged.",
+      "captureExitCode": 0
+    },
+    {
+      "id": "collide-key-authoring-noodles",
+      "image": "docs/site/media/ui/collide-key-authoring-noodles.png",
+      "title": "Author the sphere's frame-27 key in Noodles",
+      "caption": "Focused crop of the real Noodles Animation value editor at Current Frame 27: the xformOp:translate double3 Y cell contains 0.525 before Enter. The public capture cancels the edit to leave collide.usda unchanged; a separate UI edit, Ctrl+S and reopen test verified the three keys and both collider targets.",
+      "scene": "examples/docs/operators/collide.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript tools/docs/capture_collide_slide_ui.py",
+      "ui": "Window > Noodles Editor; Write Values > Animation (key at current frame); xformOp:translate Y cell",
+      "selectedPrim": "/World/Shield",
+      "visibleField": "xformOp:translate",
+      "sceneSha256": "45f940bf88748379f2f75fe1af227ac0a1e0a749dd5f0b342c1c356e8df49f18",
+      "imageSha256": "245d8a8e8774680c4ba2f0e57514eac40570cc2a89b0487a4f3b0947dd828ca8",
+      "captureLogSha256": "66ee6ac4692cdee54096e1f0afcbb2c06c8b6b477e11358310542bc4aa0909e6",
+      "captureScriptSha256": "73328b273de8cf3d84207ee669e0114b91cb192a8a0d3aad9e2da42d52cb7f50",
+      "captureMode": "synchronous",
+      "captureVerification": "All eight actual main-launcher Storm captures completed; testusdview exited 0. The helper verified the 0/27/99 keys, inset controls, two collider targets, subdivision and session visibility restoration with the source unchanged.",
+      "captureExitCode": 0
+    },
+    {
+      "id": "wind-clump-enabled-noodles",
+      "image": "docs/site/media/ui/wind-clump-enabled-noodles.png",
+      "title": "Clump enabled in the matched Wind scene",
+      "caption": "The actual Clump node has enabled on. This scene keeps all 6,500 roots and adds native group cohesion before Wind.",
+      "scene": "examples/docs/operators/wind-clumped.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "selectedPrim": "/World/Groom/Fur/Ops/clump",
+      "visibleField": "enabled"
+    },
+    {
+      "id": "wind-clump-disabled-noodles",
+      "image": "docs/site/media/ui/wind-clump-disabled-noodles.png",
+      "title": "Clump disabled in the matched Wind scene",
+      "caption": "The same Clump node has enabled off. Wind still runs on the same 6,500-root patch without the Clump cohesion contribution.",
+      "scene": "examples/docs/operators/wind-unclumped.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "selectedPrim": "/World/Groom/Fur/Ops/clump",
+      "visibleField": "enabled"
+    },
+    {
+      "id": "wind-scatter-6500-noodles",
+      "image": "docs/site/media/ui/wind-scatter-6500-noodles.png",
+      "title": "Matched Scatter density",
+      "caption": "The actual Scatter node authors density 6500 in both Wind practice scenes, so the comparison changes Clump cohesion rather than patch density.",
+      "scene": "examples/docs/operators/wind-clumped.usda",
+      "capture": "bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "selectedPrim": "/World/Groom/Fur/Ops/scatter",
+      "visibleField": "density"
+    },
+    {
+      "id": "operator-freeze-noodles",
+      "image": "docs/site/media/ui/operator-freeze-noodles.png",
+      "title": "Freeze in Noodles Editor",
+      "caption": "Real localized Noodles Editor with Freeze selected. The enabled checkbox is visible in its usdGen group.",
+      "scene": "examples/docs/operators/freeze.usda",
+      "capture": "tools/docs/capture_all_operator_ui.ps1 invokes bin/launch_usdview.ps1 -TestScript tools/docs/capture_operator_noodles_ui.py",
+      "ui": "Window > Noodles Editor; View > Show Attribute Values",
+      "operator": "UsdGenFreeze",
+      "selectedPrim": "/World/Groom/Fur/Ops/freeze",
+      "editedField": "usdGen:enabled",
+      "visibleField": "enabled",
+      "actions": [
+        "Open examples/docs/operators/freeze.usda in usdview, then choose Window > Noodles Editor (N).",
+        "In usdview's Scene Graph, select /World/Groom/Fur/Ops/freeze; focus Noodles Editor and press A to add the selected prim.",
+        "In Window > Layer Editor, choose a persistent edit target before changing a value.",
+        "Keep View > Show Attribute Values on. Right-click the Noodles canvas and choose Write Values > Default.",
+        "In the selected node's usdGen group, click the enabled checkbox to toggle it.",
+        "Press Ctrl+S in Noodles Editor to save the selected edit-target layer."
+      ],
+      "captureExercises": [
+        "Scene Graph selection",
+        "Window > Noodles Editor",
+        "A: Add from Prim Tree",
+        "node framing"
+      ],
+      "editVerification": "Per-operator edit and save steps are source-audited; the ALab Noise walkthrough exercises an actual value edit and Ctrl+S in Qt."
+    },
+    {
+      "id": "collide-fur-only-ui",
+      "image": "docs/site/media/ui/collide-fur-only-ui.png",
+      "title": "Inspect the hair response with the sphere hidden",
+      "caption": "Actual Storm viewport at frame 99. Only Shield visibility is invisible in the session layer; its explicit collision target remains. The 8,000-strand count and total length matched before, during and after the visibility action. Separate native bake verification compared every BasisCurves attribute.",
+      "scene": "examples/docs/operators/collide.usda",
+      "sceneSha256": "45f940bf88748379f2f75fe1af227ac0a1e0a749dd5f0b342c1c356e8df49f18",
+      "imageSha256": "0a069fff2ad346ae216881e0cbe2054b55c13490be70d8ba0d06afdba9b4b7f6",
+      "capture": "bin/launch_usdview.ps1 -TestScript tools/docs/capture_collide_slide_ui.py; synchronous testusdview",
+      "captureScriptSha256": "73328b273de8cf3d84207ee669e0114b91cb192a8a0d3aad9e2da42d52cb7f50",
+      "captureLogSha256": "66ee6ac4692cdee54096e1f0afcbb2c06c8b6b477e11358310542bc4aa0909e6",
+      "ui": "Window > Layer Editor: session edit target; Scene Graph > Shield; Edit > Make Invisible; Edit > Remove Session Visibility",
+      "captureMode": "synchronous"
+    }
+  ]
+}

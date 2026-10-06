@@ -131,6 +131,38 @@ bool HasDependency(UsdGenExecutionTaskMetadata const& task, uint32_t predecessor
 
 int main() {
     {
+        auto noise = MakeRootedDesc();
+        noise.nodes[1].type = TfToken("UsdGenNoise");
+        noise.nodes[1].params.clear();
+        CHECK(CompileVulkanSourceWidthPlan(noise));
+
+        auto weighted = noise;
+        AddAuthoredPlane(&weighted.curveSets[0], "clumpWeight_0",
+                         UsdGenAuthoredPlaneType::Float32,
+                         UsdGenAuthoredPlaneDomain::Point, 1);
+        UsdGenDiagnostics weightedDiagnostics;
+        CHECK(!CompileVulkanSourceWidthPlan(weighted, &weightedDiagnostics));
+        CHECK(std::any_of(weightedDiagnostics.errors.begin(),
+                          weightedDiagnostics.errors.end(),
+            [](std::string const &error) {
+                return error.find("Noise does not support imported clump motion planes") !=
+                    std::string::npos;
+            }));
+
+        auto legacyIds = noise;
+        AddAuthoredPlane(&legacyIds.curveSets[0], "clumpId_0",
+                         UsdGenAuthoredPlaneType::Int32,
+                         UsdGenAuthoredPlaneDomain::Primitive, 1);
+        CHECK(CompileVulkanSourceWidthPlan(legacyIds));
+        for (char const *type : {"UsdGenCurl", "UsdGenBend", "UsdGenWind"}) {
+            auto unsupported = weighted;
+            unsupported.nodes[1].type = TfToken(type);
+            UsdGenDiagnostics unsupportedDiagnostics;
+            CHECK(!CompileVulkanSourceWidthPlan(unsupported, &unsupportedDiagnostics) &&
+                  unsupportedDiagnostics.HasErrors());
+        }
+    }
+    {
         auto c3 = MakeRootedDesc();
         UsdGenNodeDesc grow;
         grow.path = SdfPath("/Groom/Ops/disabledGrow"); grow.type = TfToken("UsdGenGrow");

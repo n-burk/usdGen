@@ -43,8 +43,14 @@ public:
     uint32_t PlanesTouched() const override;
 
 private:
-    // clumpId_<level> for every level this node emits, set by Configure().
-    std::vector<TfToken> _outputs{TfToken("clumpId_0")};
+    // Four native motion planes per level, set by Configure().
+    std::vector<TfToken> _outputs;
+    int _levelBaseOverride = -1;
+public:
+    // The compiler supplies the chain-wide topological allocation. Direct
+    // standalone Configure callers retain the descriptor-order fallback.
+    void SetLevelBase(int base) { _levelBaseOverride = base; }
+private:
     const TfToken sMask{"mask"};
 };
 

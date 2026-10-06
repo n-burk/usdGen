@@ -48,6 +48,7 @@
 #define USDGEN_IMAGING_BRUSH_API_H
 
 #include "usdGenImaging/api.h"
+#include <stddef.h>
 
 #ifndef USDGENIMAGING_API
 #define USDGENIMAGING_API
@@ -56,6 +57,12 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Read-only, nonblocking playback publication snapshot. Returns required bytes
+ * including NUL; insufficient capacity writes nothing. Returns zero on an
+ * exception. selectorJson contains renderer and top-level groom roots. */
+USDGENIMAGING_API size_t usdGenImaging_copy_playback_status_json(
+    const char* selectorJson, double requestedFrame, char* buffer, size_t capacity);
 
 #define USDGEN_BRUSH_API_VERSION 1
 

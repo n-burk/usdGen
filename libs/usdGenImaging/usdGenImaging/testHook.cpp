@@ -331,6 +331,14 @@ UsdGenImagingTestHook::groomCookCount(HdSceneIndexBase const &index)
     return groom ? groom->_TestCookCount() : 0;
 }
 
+bool
+UsdGenImagingTestHook::staleGroomProgressRejected(
+    HdSceneIndexBase const &index, SdfPath const &groomPath)
+{
+    auto const *groom = dynamic_cast<UsdGenGroomSceneIndex const *>(&index);
+    return groom && groom->_TestStaleProgressRejected(groomPath);
+}
+
 void
 UsdGenImagingTestHook::groomOwnerCommandBarrier(HdSceneIndexBase const &index)
 {

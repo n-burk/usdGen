@@ -23,6 +23,7 @@
 // Evaluate writes the captured strands, following their roots.
 #include "usdGen/ops/guideInterpolate.h"
 
+#include "usdGen/clumpMotion.h"
 #include "usdGen/opParams.h"
 #include "usdGen/ops/opUtil.h"
 #include "usdGen/ops/regionMap.h"
@@ -34,6 +35,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <vector>
@@ -244,6 +246,10 @@ bool UsdGenGuideInterpolateOp::Capture(
         !ctx.resolvedReferences[0]->value)
         return fail("usdGen:guides must target one guide curve set");
     UsdGenCurveBuffer const &guides = ctx.resolvedReferences[0]->value->buffer;
+    UsdGenClumpMotion guideClumps;
+    std::string clumpError;
+    if (!UsdGenBuildClumpMotion(guides, &guideClumps, &clumpError))
+        return fail("guide clump motion metadata " + clumpError);
     size_t const G = guides.totalCurves;
     if (G == 0) return fail("the guide curve set has no curves");
 
@@ -352,6 +358,11 @@ bool UsdGenGuideInterpolateOp::Capture(
     std::vector<float> widths(R * n, fallbackWidth);
     std::vector<int> planeIndex(R * 3, -1);
     std::vector<float> planeWeight(R * 3, 0.0f);
+    // Keep the full geometry blend for native clump inheritance. The
+    // published guideIndex/guideWeight primvars intentionally expose only
+    // their historical top-three subset, while maxGuides can be eight.
+    std::vector<int> selectedGuide(R * 8, -1);
+    std::vector<float> selectedWeight(R * 8, 0.0f);
     std::atomic<size_t> orphans{0};
     double const cosMax = std::cos(s.maxAngle * 3.14159265358979323846 / 180.0);
     size_t const maxKeep = s.unique ? 1 : size_t(s.maxGuides);
@@ -418,6 +429,10 @@ bool UsdGenGuideInterpolateOp::Capture(
         for (size_t j = 0; j < 3; ++j) {
             planeIndex[c * 3 + j] = j < kept ? int(keep[j].guide) : -1;
             planeWeight[c * 3 + j] = j < kept ? float(keep[j].weight) : 0.0f;
+        }
+        for (size_t j = 0; j < kept; ++j) {
+            selectedGuide[c * 8 + j] = int(keep[j].guide);
+            selectedWeight[c * 8 + j] = float(keep[j].weight);
         }
 
         // Compose, at the rest root.
@@ -491,6 +506,119 @@ bool UsdGenGuideInterpolateOp::Capture(
     std::string planeError;
     if (!UsdGenResampleExtraPlanes(upstream, &buf, &planeError))
         return fail("cannot carry named planes across the CV topology change: " + planeError);
+    // A complete native guide quartet follows the chosen guide group. A
+    // mixed guide blend retains only the selected group's share of cohesion;
+    // the other guides continue shaping geometry without claiming that this
+    // strand moves rigidly with a group it did not fully follow. Numeric
+    // levels not present on guides retain the root-source planes above.
+    auto findGuideIds = [&guides](int level) -> UsdGenPlane const * {
+        TfToken const name("clumpId_" + std::to_string(level));
+        auto const it = std::lower_bound(guides.extraCurve.begin(), guides.extraCurve.end(), name,
+            [](UsdGenPlane const &plane, TfToken const &needle) { return plane.name < needle; });
+        return it != guides.extraCurve.end() && it->name == name ? &*it : nullptr;
+    };
+    auto erasePlane = [&buf](TfToken const &name) {
+        auto eraseNamed = [&name](std::vector<UsdGenPlane> *planes) {
+            planes->erase(std::remove_if(planes->begin(), planes->end(),
+                [&name](UsdGenPlane const &plane) { return plane.name == name; }), planes->end());
+        };
+        eraseNamed(&buf.extraCurve);
+        eraseNamed(&buf.extraCv);
+    };
+    auto insertNamed = [&buf](UsdGenPlane plane, bool vertex) {
+        auto &planes = vertex ? buf.extraCv : buf.extraCurve;
+        auto it = std::lower_bound(planes.begin(), planes.end(), plane.name,
+            [](UsdGenPlane const &a, TfToken const &b) { return a.name < b; });
+        if (it != planes.end() && it->name == plane.name) *it = std::move(plane);
+        else planes.insert(it, std::move(plane));
+    };
+    for (UsdGenClumpMotionLevel const &level : guideClumps.levels) {
+        if (level.weight.empty()) continue; // legacy ID only
+        UsdGenPlane const *guideIds = findGuideIds(level.level);
+        if (!guideIds || guideIds->i.size() != G) continue;
+        std::string const suffix = std::to_string(level.level);
+        UsdGenPlane outId, outCenter, outCenterId, outWeight;
+        outId.name = TfToken("clumpId_" + suffix);
+        outId.interpolation = TfToken("uniform");
+        outId.type = TfToken("int");
+        outId.i = VtIntArray(R, -1);
+        outCenter.name = TfToken("clumpCenter_" + suffix);
+        outCenter.interpolation = TfToken("uniform");
+        outCenter.type = TfToken("float");
+        outCenter.arity = 3;
+        outCenter.f = VtFloatArray(R * 3, 0.0f);
+        outCenterId.name = TfToken("clumpCenterId_" + suffix);
+        outCenterId.interpolation = TfToken("uniform");
+        outCenterId.type = TfToken("int");
+        outCenterId.arity = 2;
+        outCenterId.i = VtIntArray(R * 2, 0);
+        outWeight.name = TfToken("clumpWeight_" + suffix);
+        outWeight.interpolation = TfToken("vertex");
+        outWeight.type = TfToken("float");
+        outWeight.f = VtFloatArray(R * n, 0.0f);
+        for (size_t c = 0; c < R; ++c) {
+            uint32_t selected = UINT32_MAX;
+            float selectedShare = 0.0f;
+            for (size_t j = 0; j < 8; ++j) {
+                int const guide = selectedGuide[c * 8 + j];
+                if (guide < 0 || size_t(guide) >= G) continue;
+                uint32_t const group = level.groupForCurve[size_t(guide)];
+                if (group >= level.groups.size()) continue;
+                float share = 0.0f;
+                for (size_t k = 0; k < 8; ++k) {
+                    int const other = selectedGuide[c * 8 + k];
+                    if (other >= 0 && size_t(other) < G &&
+                        level.groupForCurve[size_t(other)] == group)
+                        share += selectedWeight[c * 8 + k];
+                }
+                if (share > selectedShare || (share == selectedShare &&
+                    selected < level.groups.size() &&
+                    level.groups[group].centerId < level.groups[selected].centerId)) {
+                    selected = group;
+                    selectedShare = share;
+                }
+            }
+            if (selected >= level.groups.size() || selectedShare <= 0.0f) continue;
+            UsdGenClumpMotionGroup const &group = level.groups[selected];
+            for (size_t j = 0; j < 8; ++j) {
+                int const guide = selectedGuide[c * 8 + j];
+                if (guide < 0 || size_t(guide) >= G ||
+                    level.groupForCurve[size_t(guide)] != selected) continue;
+                outId.i[c] = guideIds->i[size_t(guide)];
+                break;
+            }
+            for (int d = 0; d < 3; ++d) outCenter.f[c * 3 + size_t(d)] = group.restAnchor[d];
+            uint32_t const words[2] = {uint32_t(group.centerId),
+                                       uint32_t(group.centerId >> 32)};
+            std::memcpy(&outCenterId.i[c * 2], words, sizeof(words));
+            for (size_t i = 0; i < n; ++i) {
+                float const t = n > 1 ? float(i) / float(n - 1) : 0.0f;
+                float blended = 0.0f;
+                for (size_t j = 0; j < 8; ++j) {
+                    int const guide = selectedGuide[c * 8 + j];
+                    if (guide < 0 || size_t(guide) >= G ||
+                        level.groupForCurve[size_t(guide)] != selected) continue;
+                    size_t const first = guideSpans[size_t(guide)];
+                    size_t const count = guideSpans[size_t(guide) + 1] - first;
+                    if (count == 0) continue;
+                    float const at = count > 1 ? t * float(count - 1) : 0.0f;
+                    size_t const lo = std::min(size_t(at), count - 1);
+                    size_t const hi = std::min(lo + 1, count - 1);
+                    float const f = at - float(lo);
+                    float const a = level.weight[first + lo];
+                    float const b = level.weight[first + hi];
+                    blended += selectedWeight[c * 8 + j] * (a + (b - a) * f);
+                }
+                outWeight.f[c * n + i] = std::clamp(blended, 0.0f, 1.0f);
+            }
+        }
+        for (TfToken const &name : {outId.name, outCenter.name,
+                                    outCenterId.name, outWeight.name}) erasePlane(name);
+        insertNamed(std::move(outId), false);
+        insertNamed(std::move(outCenter), false);
+        insertNamed(std::move(outCenterId), false);
+        insertNamed(std::move(outWeight), true);
+    }
     auto insertPlane = [&buf](UsdGenPlane plane) {
         auto &planes = buf.extraCurve;
         auto it = std::lower_bound(planes.begin(), planes.end(), plane.name,

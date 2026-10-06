@@ -146,11 +146,27 @@ UsdGenPlane DefaultOutputPlane(TfToken const &name)
     plane.interpolation = TfToken("uniform");
     plane.type = TfToken("float");
     if (name == TfToken("guideIndex") || name == TfToken("partId") ||
-        name.GetString().rfind("clumpId_", 0) == 0)
+        name.GetString().rfind("clumpId_", 0) == 0 ||
+        name.GetString().rfind("clumpCenterId_", 0) == 0)
         plane.type = TfToken("int");
+    if (name.GetString().rfind("clumpCenter_", 0) == 0)
+        plane.arity = 3;
+    if (name.GetString().rfind("clumpCenterId_", 0) == 0)
+        plane.arity = 2;
+    if (name.GetString().rfind("clumpWeight_", 0) == 0)
+        plane.interpolation = TfToken("vertex");
     if (name == TfToken("guideIndex") || name == TfToken("guideWeight"))
         plane.arity = 3;
     return plane;
+}
+
+bool IsNativeClumpPlane(TfToken const &name)
+{
+    std::string const &s = name.GetString();
+    return s.rfind("clumpId_", 0) == 0 ||
+           s.rfind("clumpCenter_", 0) == 0 ||
+           s.rfind("clumpCenterId_", 0) == 0 ||
+           s.rfind("clumpWeight_", 0) == 0;
 }
 
 void InsertOrAssignPlane(std::vector<UsdGenPlane> *planes, UsdGenPlane plane)
@@ -193,8 +209,12 @@ void PrepareExtraPlanes(UsdGenCompiledNode &node,
         else if (UsdGenPlane const *curvePlane = FindPlane(oldCurve, name)) old = {curvePlane, false};
 
         PlaneLookup const layout = source.plane ? source : old;
-        bool const cv = layout.plane ? layout.cv : false;
-        UsdGenPlane plane = layout.plane ? *layout.plane : DefaultOutputPlane(name);
+        bool const nativeClump = node.type == TfToken("UsdGenClump") &&
+                                 IsNativeClumpPlane(name);
+        UsdGenPlane plane = nativeClump ? DefaultOutputPlane(name) :
+            (layout.plane ? *layout.plane : DefaultOutputPlane(name));
+        bool const cv = nativeClump ? plane.interpolation == TfToken("vertex") :
+            (layout.plane ? layout.cv : false);
         size_t const values = size_t(cv ? buffer.totalCvs : buffer.totalCurves) *
             std::max<uint8_t>(plane.arity, 1);
 
@@ -214,8 +234,39 @@ void PrepareExtraPlanes(UsdGenCompiledNode &node,
             plane.f = VtFloatArray(values, 0.0f);
             plane.i.clear();
         }
+        if (nativeClump) {
+            auto &other = cv ? buffer.extraCurve : buffer.extraCv;
+            auto it = std::lower_bound(other.begin(), other.end(), name,
+                [](UsdGenPlane const &p, TfToken const &n) { return p.name < n; });
+            if (it != other.end() && it->name == name) other.erase(it);
+        }
         InsertOrAssignPlane(cv ? &buffer.extraCv : &buffer.extraCurve,
                             std::move(plane));
+    }
+    if (node.op->RemapsVertexPlanes()) {
+        for (UsdGenPlane const &source : upstream.extraCv) {
+            UsdGenPlane plane = source;
+            UsdGenPlane const *prior = FindPlane(oldCv, source.name);
+            size_t const values = size_t(buffer.totalCvs) *
+                std::max<uint8_t>(source.arity, 1);
+            bool const reusable = prior && SamePlaneLayout(*prior, source) &&
+                !PlaneAliases(*prior, &source) &&
+                (source.type == TfToken("int") ? prior->i.size() == values
+                                                : prior->f.size() == values);
+            if (reusable) {
+                plane = *prior;
+                // Detach on the commit thread while the retained descriptor
+                // is still a second owner. Workers only receive raw pointers.
+                if (source.type == TfToken("int")) (void)plane.i.data();
+                else (void)plane.f.data();
+            }
+            else if (source.type == TfToken("int")) {
+                plane.i = VtIntArray(values, 0); plane.f.clear();
+            } else {
+                plane.f = VtFloatArray(values, 0.0f); plane.i.clear();
+            }
+            InsertOrAssignPlane(&buffer.extraCv, std::move(plane));
+        }
     }
 }
 
@@ -271,11 +322,13 @@ void PrepareNodeForEval(
         // Rest is an immutable C3 transport channel, separate from current
         // points.  Every topology-preserving operator aliases it on each
         // preparation so a reused node cannot retain a prior generation's
-        // owner.  Topology producers that repartition CVs (Grow, Resample)
+        // owner.  Topology producers that repartition CVs (Grow, Resample,
+        // GuideInterpolate)
         // explicitly materialize a new rest layout during Capture instead.
         bool const captureAuthorsRest = ownsBuffer &&
             (op.Type() == TfToken("UsdGenGrow") ||
              op.Type() == TfToken("UsdGenResample") ||
+             op.Type() == TfToken("UsdGenGuideInterpolate") ||
              // Frozen Freeze owns its buffer (OwnsBuffer()==!live) and keeps
              // the snapshotted rest; live Freeze re-aliases like a styler.
              op.Type() == TfToken("UsdGenFreeze"));
@@ -296,8 +349,8 @@ void PrepareNodeForEval(
     // every sparse commit); a plane the op passes through is a read-only
     // alias of the upstream plane, refreshed only when the identity differs.
     // Kernels write through the raw pointer SweepChunk slices from
-    // cdata()+const_cast — data() is never called on a potentially shared
-    // array (see EnsureNoDetaches).
+    // cdata()+const_cast. Fallible remappers detach retained storage once on
+    // this commit thread before workers receive those pointers.
     uint32_t const planes = op.PlanesTouched();
     auto prep = [&](bool write, VtFloatArray &a, VtFloatArray const &up) {
         if (write) {
@@ -320,13 +373,14 @@ void PrepareNodeForEval(
     prep(planes & UsdGenOp::kPlanePoints, buf.pz, upBuf.pz);
     prep(planes & UsdGenOp::kPlaneWidths, buf.width, upBuf.width);
     prep(planes & UsdGenOp::kPlaneHairT, buf.hairT, upBuf.hairT);
-    // A CV-repartitioning capture has already transformed every inherited
-    // named plane for its new CV cardinality (UsdGenResampleExtraPlanes).
+    // A CV-repartitioning capture has already transformed inherited named
+    // planes or authored guide-derived replacements for its new CV layout.
     // Do not replace those private owners with the old upstream descriptors
     // during generic pass-through preparation.
     bool const captureOwnsTransformedPlanes = hasUp && ownsBuffer &&
         (op.Type() == TfToken("UsdGenGrow") ||
          op.Type() == TfToken("UsdGenResample") ||
+         op.Type() == TfToken("UsdGenGuideInterpolate") ||
          // Frozen Freeze: the snapshot owns the transformed extras (same
          // ownsBuffer gate as above); live Freeze prepares pass-through.
          op.Type() == TfToken("UsdGenFreeze"));
@@ -334,14 +388,19 @@ void PrepareNodeForEval(
         PrepareExtraPlanes(node, upBuf, hasUp);
 }
 
-/// Kept as the single documented answer to "who may call data()": NOBODY.
-/// A shared plane is written only through the const-cast raw pointer; every
-/// potential writer already holds PRIVATE storage (prep re-allocates when a
-/// to-be-written plane still aliases its input). This function now only
-/// guarantees generators' planes exist at buffer size; it must never detach.
-void EnsureNoDetaches(UsdGenCompiledNode &node, UsdGenOp &op)
+/// Detach writable built-in planes on the commit thread for fallible
+/// remappers. Their node buffer can still share a retained published snapshot
+/// even after it no longer aliases the immediate upstream buffer.
+void EnsureWritablePlanes(UsdGenCompiledNode &node, UsdGenOp &op)
 {
-    TF_UNUSED(node); TF_UNUSED(op);
+    if (!op.RemapsVertexPlanes()) return;
+    uint32_t const planes=op.PlanesTouched();
+    if (planes & UsdGenOp::kPlanePoints) {
+        (void)node.buffer.px.data();
+        (void)node.buffer.py.data();
+        (void)node.buffer.pz.data();
+    }
+    if (planes & UsdGenOp::kPlaneWidths) (void)node.buffer.width.data();
 }
 
 UsdGenEpoch WithExternalValueIdentity(UsdGenEpoch digest,
@@ -383,6 +442,10 @@ struct NodeSweepPayload
     UsdGenCompiledNode const *up2; // ordered second input for binary kernels
     bool evalAll;
     uint32_t planes;
+    std::atomic<uint32_t> failureCode{0};
+    bool deferCompletion = false;
+    std::vector<GfVec3d> pointScratch;
+    std::vector<double> scalarScratch;
     std::vector<uint8_t> didEval;  // one byte per chunk: a bit-packed
                                    // vector<bool> makes 64 workers share one
                                    // word — cache-line ping-pong (03 §5.4
@@ -583,6 +646,17 @@ void SweepChunk(size_t index, void *payload)
     view.outI = view.outCount ? outI.data() : nullptr;
     view.inF = view.inCount ? inF.data() : nullptr;
     view.inI = view.inCount ? inI.data() : nullptr;
+    view.extraCv = pl.op->RemapsVertexPlanes() && !buf.extraCv.empty()
+        ? buf.extraCv.data() : nullptr;
+    view.inExtraCv = pl.op->RemapsVertexPlanes() && !upBuf.extraCv.empty()
+        ? upBuf.extraCv.data() : nullptr;
+    view.extraCvCount = pl.op->RemapsVertexPlanes()
+        ? static_cast<uint32_t>(std::min(buf.extraCv.size(), upBuf.extraCv.size()))
+        : 0;
+    view.pointScratch = pl.pointScratch.empty() ? nullptr
+        : pl.pointScratch.data()+base;
+    view.scalarScratch = pl.scalarScratch.empty() ? nullptr
+        : pl.scalarScratch.data()+base;
 
     // Per-curve arrays (read-only views into the node's own buffer).
     size_t const baseCurve = cd.firstCurve;
@@ -609,7 +683,7 @@ void SweepChunk(size_t index, void *payload)
     pl.op->Evaluate(pl.ctx, *node.capture, &view);
 
     pl.didEval[index] = 1;
-    if (pl.onChunkCompleted) pl.onChunkCompleted(index);
+    if (pl.onChunkCompleted && !pl.deferCompletion) pl.onChunkCompleted(index);
 }
 
 // ---------------------------------------------------------------------------
@@ -752,6 +826,14 @@ UsdGenRunResult UsdGenScheduler::Run(
 
     int nTiles = graph.NumTiles();
     std::vector<char> tileTouched(nTiles, 0);
+    bool transactionalRun=false;
+    for (int pos=0;pos<graph.NodeCount();++pos) {
+        UsdGenCompiledNode const &node=graph.Node(pos);
+        // Configure is structural, while effective enabled can be driven by
+        // a value expression later in preparation. Conservatively transact
+        // any graph containing a fallible remapper.
+        transactionalRun |= node.op && node.op->RemapsVertexPlanes();
+    }
 
     // Each frontier is dependency-ready and therefore may share one flattened
     // chunk sweep. Capture, COW preparation, repartition and bookkeeping stay
@@ -879,6 +961,7 @@ UsdGenRunResult UsdGenScheduler::Run(
         if (job->reCaptured) {
             TRACE_SCOPE_DYNAMIC("usdGen capture " + NodeLabel(node));
             TRACE_COUNTER_DELTA("usdGen nodes captured", 1);
+            cctx.previousCapture = node.capture.get();
             auto cap = op.CreateCapture();
             if (cap && op.Capture(cctx, upBuf, cap.get(), &nodeDiag)) {
                 if (cap->OwnsBuffer()) {
@@ -940,6 +1023,13 @@ UsdGenRunResult UsdGenScheduler::Run(
             }
         }
         job->captureEnd = std::chrono::steady_clock::now();
+        // Native time readers move without any authored parameter dirty.
+        // Route only their output and descendants; static upstream captures
+        // remain reusable during playback.
+        if (node.enabled && op.ReadsTime() &&
+            (node.lastEvalTime != evalCtx.time ||
+             node.lastEvalRate != graph.Desc().timeCodesPerSecond))
+            graph.DirtyParameter(node.id, TfToken("__usdGenCookTime"));
         job->evalAll = node.paramValueDigest != node.lastParamDigest ||
                        job->expressionsChanged;
         node.lastParamDigest = node.paramValueDigest;
@@ -987,7 +1077,7 @@ UsdGenRunResult UsdGenScheduler::Run(
         }
 
         PrepareNodeForEval(node, op, upBuf, hasUp);
-        EnsureNoDetaches(node, op);
+        EnsureWritablePlanes(node, op);
         NodeSweepPayload &pl = job->sweep;
         pl.node = &node;
         pl.graph = &graph;
@@ -1005,11 +1095,20 @@ UsdGenRunResult UsdGenScheduler::Run(
             : node.mapBindingRefs.data();
         pl.ctx.mapBindingCount = static_cast<uint32_t>(node.mapBindingRefs.size());
         pl.ctx.seed = node.desc ? static_cast<uint32_t>(node.desc->seed) : 0;
+        pl.failureCode.store(0, std::memory_order_relaxed);
+        pl.ctx.failureCode = &pl.failureCode;
         pl.op = &op;
         pl.up = hasUp ? &graph.Node(node.input) : nullptr;
         pl.up2 = node.inputs.size() > 1 ? &graph.Node(node.inputs[1]) : nullptr;
         pl.evalAll = job->evalAll;
         pl.planes = op.PlanesTouched();
+        // Fallible remappers cannot progressively publish a tile before the
+        // frontier joins and validates the shared failure flag.
+        pl.deferCompletion = op.RemapsVertexPlanes();
+        if (pl.deferCompletion) {
+            pl.pointScratch.resize(node.buffer.totalCvs);
+            pl.scalarScratch.resize(node.buffer.totalCvs);
+        }
         pl.didEval.assign(node.chunks.size(), 0);
         job->shouldSweep = true;
         return true;
@@ -1073,21 +1172,26 @@ UsdGenRunResult UsdGenScheduler::Run(
 
             std::vector<ChunkExecution> work;
             size_t sweepJobs = 0;
+            bool frontierFallible = false;
             for (auto const &job : jobs) {
                 if (!job->shouldSweep) continue;
                 ++sweepJobs;
+                frontierFallible |= job->sweep.deferCompletion;
                 for (size_t c = 0; c < job->sweep.node->chunks.size(); ++c) {
                     if (job->evalAll ||
                         (job->sweep.node->chunkDirty[c] & UsdGenDirtyParameter))
                         work.push_back({&job->sweep, c});
                 }
             }
+            if (frontierFallible)
+                for (auto const &job : jobs)
+                    if (job->shouldSweep) job->sweep.deferCompletion=true;
             // The terminal output has no downstream writer. Its chunk spans
             // are disjoint, so completion of the last selected chunk in a
             // tile makes that tile safe to copy while other tiles still run.
             // The counters live through ParallelFor's synchronous join.
             std::unique_ptr<std::atomic<uint32_t>[]> terminalRemaining;
-            if (tileCompleted && nTiles > 0) {
+            if (tileCompleted && !transactionalRun && nTiles > 0) {
                 for (auto const &job : jobs) {
                     if (!job->shouldSweep ||
                         job->sweep.node->id != graph.TerminalNodeId()) continue;
@@ -1126,6 +1230,27 @@ UsdGenRunResult UsdGenScheduler::Run(
                     dispatcher.ParallelFor(work.size(), SweepPreparedChunk,
                                            work.data());
                 }
+            }
+
+            for (auto const &job : jobs) {
+                uint32_t const failure = job->sweep.failureCode.load(
+                    std::memory_order_acquire);
+                if (!failure) continue;
+                std::string message = "UsdGen: operator evaluation failed";
+                if (failure == 1)
+                    message = "UsdGenCollide: closed-surface depth query failed";
+                else if (failure == 2)
+                    message = "UsdGenCollide: cut depth search exceeded its deterministic resource budget";
+                aggregated.Error(std::move(message));
+                result.diagnostics = std::move(aggregated);
+                return result;
+            }
+
+            for (auto const &job : jobs) {
+                if (!job->sweep.deferCompletion ||
+                    !job->sweep.onChunkCompleted) continue;
+                for (size_t c=0;c<job->sweep.didEval.size();++c)
+                    if (job->sweep.didEval[c]) job->sweep.onChunkCompleted(c);
             }
 
             for (size_t j = 0; j < jobs.size(); ++j) {
@@ -1173,6 +1298,10 @@ UsdGenRunResult UsdGenScheduler::Run(
                         job.evalAll ? "  (all chunks: values moved)" : "");
                 }
                 completed[size_t(frontier[j])] = 1;
+                if (node.op->ReadsTime() && node.enabled) {
+                    node.lastEvalTime = evalCtx.time;
+                    node.lastEvalRate = graph.Desc().timeCodesPerSecond;
+                }
                 --remaining;
             }
         }
@@ -1194,6 +1323,11 @@ UsdGenRunResult UsdGenScheduler::Run(
             (termOp->PlanesTouched() & UsdGenOp::kPlaneWidths) != 0;
         dispatcher.ParallelFor(size_t(nTiles), InterleaveTile, &ip);
     }
+
+    if (tileCompleted && transactionalRun)
+        for (int tile=0;tile<nTiles;++tile)
+            if (tileTouched[size_t(tile)])
+                tileCompleted(graph.Tiles()[tile],term);
 
     result.terminalOutput = &graph.Output();
     result.tiles = graph.Tiles();

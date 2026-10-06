@@ -21,6 +21,8 @@ CTestTestfile.cmake
 
 # Host-renderer comparison captures (regenerate locally; do not commit)
 renders/ue-parity/
+# Raw manual render frames; curated web media lives in docs/site/media/.
+renders/docs/
 
 # Harnesses
 .omp/

@@ -1,0 +1,2802 @@
+{
+  "version": 1,
+  "copyright": "Copyright (c) 2026 Nick Burkard",
+  "license": "SPDX-License-Identifier: MIT",
+  "operators": [
+    {
+      "id": "UsdGenScatter",
+      "title": "Scatter",
+      "category": "Generation",
+      "summary": "Place roots across the bound rest surface at a chosen density. Stable root IDs keep downstream randomization repeatable.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference and supported CUDA configurations",
+      "inputs": [
+        "Bound rest surface"
+      ],
+      "output": "Root points and frames, ready for Grow or Guide Interpolate.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:subdivisionLevel",
+          "type": "int",
+          "default": "0",
+          "description": "Smooth root placement to OpenSubdiv limit patches. Zero uses the polygon cage; levels 1–6 require suitable quad topology and run on CPU. Level 3 is a useful felt setting."
+        },
+        {
+          "name": "usdGen:density",
+          "type": "float",
+          "default": "100.0",
+          "description": "Expected roots per unit of rest-surface area. Must be finite and >= 0; the per-face count is density * restArea * mask, rounded stochastically."
+        },
+        {
+          "name": "usdGen:flip",
+          "type": "bool",
+          "default": "false",
+          "description": "Reverse tangent and binormal directions in every root frame. This changes how downstream directional styling is oriented."
+        }
+      ],
+      "workflow": [
+        "Bind a mesh as the description surface.",
+        "Set density and seed, then author Grow or Guide Interpolate as an upper sibling of Scatter so it runs afterward."
+      ],
+      "tips": [
+        "Start with low density while tuning the silhouette; increase it for the final coat."
+      ],
+      "pitfalls": [
+        "Density is per unit of rest surface area; scene scale changes the visible count.",
+        "Subdivision levels above zero need a suitable quad mesh and run on CPU."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/scatter.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [
+        "examples/clump-ptex-plane.usda",
+        "examples/expression-width-plane.usda",
+        "examples/felt/felt_sphere.usda",
+        "examples/guide-interpolate-plane.usda",
+        "examples/head-hair-closeup.usda",
+        "examples/motion/felt_sphere_animated.usda"
+      ],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenGrow",
+      "title": "Grow",
+      "category": "Generation",
+      "summary": "Turn each scattered root into a straight strand. Length, direction, lift, and azimuth establish the base coat before styling.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference and supported CUDA configurations",
+      "inputs": [
+        "Roots from Scatter"
+      ],
+      "output": "Curves with a fixed number of CVs.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:segments",
+          "type": "int",
+          "default": "8",
+          "description": "CVs per generated strand, in [2, 64]. This is the operator that fixes the CV topology of the chain."
+        },
+        {
+          "name": "usdGen:length",
+          "type": "float",
+          "default": "1.0",
+          "description": "Base strand length in scene units. Must be finite and >= 0; the per-curve target is length * lengthRandom draw."
+        },
+        {
+          "name": "usdGen:lengthRandom",
+          "type": "float2",
+          "default": "(1, 1)",
+          "description": "Per-curve multiplier range (lo, hi) applied to usdGen:length. A reversed pair is swapped; both components must be finite and >= 0."
+        },
+        {
+          "name": "usdGen:direction",
+          "type": "uniform token",
+          "default": "\"surfaceNormal\"",
+          "description": "Growth direction mode: \"surfaceNormal\" uses the root frame normal, \"vector\" uses usdGen:directionVector verbatim.",
+          "allowed": [
+            "surfaceNormal",
+            "vector"
+          ]
+        },
+        {
+          "name": "usdGen:directionVector",
+          "type": "vector3f",
+          "default": "(0, 1, 0)",
+          "description": "Explicit growth direction in description space, used when usdGen:direction is \"vector\". Normalised before use; every component must be finite."
+        },
+        {
+          "name": "usdGen:lift",
+          "type": "float",
+          "default": "0.0",
+          "description": "Rotation of the growth direction around the root binormal, in degrees, in [-90, 90]."
+        },
+        {
+          "name": "usdGen:azimuth",
+          "type": "float",
+          "default": "0.0",
+          "description": "Rotation around the root normal after lift, in degrees in [-360, 360]. Zero preserves the existing face-local lean."
+        },
+        {
+          "name": "usdGen:azimuthRandom",
+          "type": "float",
+          "default": "0.0",
+          "description": "Per-strand azimuth variation in [0, 1]: adds a stable uniform offset in [-180, 180) degrees multiplied by this value. One distributes the lean around the full circle, avoiding face-axis patterns in isotropic felt. Seeded by usdGen:seed and stable strand ID, independently of length. Zero preserves existing direction."
+        }
+      ],
+      "workflow": [
+        "Place Grow after Scatter.",
+        "Set segment count and length, then adjust direction and lean."
+      ],
+      "tips": [
+        "Use azimuthRandom to break up face-axis patterns on short fur."
+      ],
+      "pitfalls": [
+        "Segments changes CV topology; add enough CVs for later bends without overbuilding."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/grow.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [
+        "examples/clump-ptex-plane.usda",
+        "examples/expression-width-plane.usda",
+        "examples/felt/felt_sphere.usda",
+        "examples/head-hair-closeup.usda",
+        "examples/motion/felt_sphere_animated.usda",
+        "examples/motion/felt_sphere_groom_outside_xform.usda"
+      ],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenGuideInterpolate",
+      "title": "Guide Interpolate",
+      "category": "Generation",
+      "summary": "Grow dense strands by blending nearby authored guides in the root frame. Region controls can keep separate parts from borrowing each other’s guides.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference; CUDA admission rejects this type",
+      "inputs": [
+        "Roots from Scatter",
+        "A sparse BasisCurves guide set via usdGen:guides"
+      ],
+      "output": "Guide-shaped curves and guide index/weight planes.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:guides",
+          "type": "rel",
+          "default": null,
+          "description": "The guide curves: one BasisCurves prim whose curves are the sparse guides. Each input root grows a strand of usdGen:cvCount CVs by blending the root-local shapes of its nearest guides."
+        },
+        {
+          "name": "usdGen:cvCount",
+          "type": "int",
+          "default": "8",
+          "description": "CVs per generated strand, in [2, 64]. Guides are resampled to this count by arc length."
+        },
+        {
+          "name": "usdGen:maxGuides",
+          "type": "int",
+          "default": "3",
+          "description": "Most guides blended into one strand, in [1, 8]. The heaviest three are published per strand as guideIndex/guideWeight."
+        },
+        {
+          "name": "usdGen:influenceRadius",
+          "type": "float",
+          "default": "4.0",
+          "description": "Search radius around a strand root, in rest scene units; a guide root farther away does not contribute. A strand with no guide in reach follows the nearest guide of its region. Must be finite and > 0."
+        },
+        {
+          "name": "usdGen:influenceDecay",
+          "type": "float",
+          "default": "2.0",
+          "description": "Falloff exponent: a guide at distance d weighs (1 - d / influenceRadius)^influenceDecay before normalisation. 0 weighs every guide in reach equally. Must be finite and >= 0."
+        },
+        {
+          "name": "usdGen:maxGuideAngle",
+          "type": "float",
+          "default": "90.0",
+          "description": "Largest angle, in degrees, between a strand's root normal and a guide's root normal for the guide to contribute, in [0, 180]. Keeps guides on one side of a thin surface off the other."
+        },
+        {
+          "name": "usdGen:blendMethod",
+          "type": "uniform token",
+          "default": "\"linearBlend\"",
+          "description": "How guide shapes blend: \"linearBlend\" averages the guides' root-local CV offsets; \"extrudeAndBlend\" averages their segment directions and lengths and extrudes the strand from its root, which keeps the length when guides diverge.",
+          "allowed": [
+            "linearBlend",
+            "extrudeAndBlend"
+          ]
+        },
+        {
+          "name": "usdGen:blendInSkinSpace",
+          "type": "float",
+          "default": "1.0",
+          "description": "1 turns each guide's shape by the rotation that takes the guide's root normal onto the strand's before blending, so strands follow a curved surface; 0 copies the shapes unrotated; values between rotate partially. In [0, 1]."
+        },
+        {
+          "name": "usdGen:useUniqueGuide",
+          "type": "bool",
+          "default": "false",
+          "description": "Each strand copies its single heaviest guide instead of blending several."
+        },
+        {
+          "name": "usdGen:randomizeGuide",
+          "type": "float",
+          "default": "0.0",
+          "description": "Per strand, per guide random reduction of the guide weights, in [0, 1]; breaks up the blend and, with useUniqueGuide, varies which guide a strand copies. Keyed by (usdGen:seed, curve id, guide)."
+        },
+        {
+          "name": "usdGen:region",
+          "type": "float",
+          "default": "0.0",
+          "description": "Region id per strand. A guide only shapes strands of its own region, and a guide's region is the value at its root (read from the strand rooted nearest it). Connect a UsdGenExpression to part the groom: a ptex(\"<map>\") region map, or a voronoi over the guide roots such as geoSampler(\"guideCurves\", \"$index\"). Values that differ by less than 1/1024 are the same region. Unconnected, every strand is in one region."
+        },
+        {
+          "name": "usdGen:regionCrossover",
+          "type": "float",
+          "default": "0.0",
+          "description": "Weight scale for guides of another region, in [0, 1]. 0 keeps region borders hard (parting lines); larger values let neighbouring regions' guides soften the border."
+        }
+      ],
+      "workflow": [
+        "In usdview, use Pomade to author sparse guides and Build the hair description, which commits guide BasisCurves under the groom. Point usdGen:guides at those curves, then use Pomade Save groom to save the groom layer.",
+        "Adjust search radius, guide count, and blend method.",
+        "Use region values for hard or soft part boundaries."
+      ],
+      "tips": [
+        "extrudeAndBlend keeps strand length better when guides diverge."
+      ],
+      "pitfalls": [
+        "This is a CPU reference operator.",
+        "A root with no guide inside the radius falls back to the closest guide in its region.",
+        "GuideInterpolate reads authored or baked C3 guide CurveSets. A live Clump operator is not a guide-curve target; bake or commit its result as BasisCurves before using it as guides."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/guideInterpolate.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [
+        "examples/guide-interpolate-plane.usda",
+        "examples/motion/braid_animated_guides.usda",
+        "examples/motion/braid_animated_guides_and_surface.usda",
+        "examples/motion/braid_simulated_center_curve.usda",
+        "examples/motion/two_braids_ptex_regions.usda",
+        "examples/motion/two_curves_ptex_regions.usda"
+      ],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenReferenceSource",
+      "title": "Reference Source",
+      "category": "Sources",
+      "summary": "Bring a baked in-stage BasisCurves snapshot into the chain.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference and supported CUDA configurations",
+      "inputs": [
+        "One BasisCurves target through usdGen:reference"
+      ],
+      "output": "Imported curves with their captured channels.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:reference",
+          "type": "rel",
+          "default": null,
+          "description": "The in-stage BasisCurves prim whose baked geometry this source pulls into the operation stack (contract C3). Exactly one target is required."
+        }
+      ],
+      "workflow": [
+        "Point usdGen:reference at one in-stage curve prim.",
+        "Style or deform the resulting curves downstream."
+      ],
+      "tips": [
+        "Use a stable, published snapshot when a procedural groom needs a fixed starting point."
+      ],
+      "pitfalls": [
+        "Exactly one reference target is required."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/referenceSource.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenCurveSource",
+      "title": "Curve Source",
+      "category": "Sources",
+      "summary": "Load authored BasisCurves into the groom. It can also expand a sparse surface cage into transient dense curves at cook time.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference and supported CUDA configurations",
+      "inputs": [
+        "One BasisCurves target through usdGen:curves"
+      ],
+      "output": "Source curves or transient surface-cage output.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:curves",
+          "type": "rel",
+          "default": null,
+          "description": "The authored BasisCurves prim this source reads (contract C3). Exactly one target is required; it is the only way curve data enters the engine."
+        },
+        {
+          "name": "usdGen:interpolationMode",
+          "type": "uniform token",
+          "default": "\"none\"",
+          "description": "Source expansion mode. \"none\" reads authored C3 curves normally; \"surfaceCage\" turns sparse C3 cage rails into transient dense output at cook time. The dense result is never authored back to the stage.",
+          "allowed": [
+            "none",
+            "surfaceCage"
+          ]
+        },
+        {
+          "name": "usdGen:densityMultiplier",
+          "type": "float",
+          "default": "1.0",
+          "description": "Positive multiplier applied to each surface-cage owner's authored density when generating transient dense output."
+        },
+        {
+          "name": "usdGen:regionMap",
+          "type": "rel",
+          "default": null,
+          "description": "The categorical UsdGenPtexMap used by surfaceCage interpolation. Channel values are ownerId + 1; zero rejects output roots."
+        },
+        {
+          "name": "usdGen:regionMapChannel",
+          "type": "uniform int",
+          "default": "0",
+          "description": "The categorical channel to sample from usdGen:regionMap for surfaceCage interpolation."
+        },
+        {
+          "name": "usdGen:expectMapGeneration",
+          "type": "uniform uint64",
+          "default": "0",
+          "description": "Required captured texture generation of usdGen:regionMap for surfaceCage interpolation. A mismatch is a cook error rather than a stale-map fallback."
+        },
+        {
+          "name": "usdGen:useRest",
+          "type": "bool",
+          "default": "true",
+          "description": "True reads the source as rest-space geometry and requires an authored rest snapshot; false accepts already-posed points."
+        },
+        {
+          "name": "usdGen:idSource",
+          "type": "uniform token",
+          "default": "\"primvar\"",
+          "description": "Where stable curve ids come from: \"primvar\" uses the authored curveId primvar, \"index\" synthesizes them from the source ordering.",
+          "allowed": [
+            "primvar",
+            "index"
+          ]
+        },
+        {
+          "name": "usdGen:expectEpoch",
+          "type": "uniform string",
+          "default": "\"\"",
+          "description": "Expected frozen-curve epoch string. Empty disables the check; otherwise a mismatch is reported through usdGen:staleAction."
+        },
+        {
+          "name": "usdGen:staleAction",
+          "type": "uniform token",
+          "default": "\"warn\"",
+          "description": "What to do when the source epoch does not match usdGen:expectEpoch: \"warn\", \"ignore\", or \"block\" (a hard error).",
+          "allowed": [
+            "warn",
+            "ignore",
+            "block"
+          ]
+        },
+        {
+          "name": "usdGen:resampleTo",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Resample every source curve to this CV count. 0 keeps the authored topology; any other value must be >= 2."
+        },
+        {
+          "name": "usdGen:rebind",
+          "type": "uniform token",
+          "default": "\"onError\"",
+          "description": "When to re-derive root bindings and frames from the bound surface: \"never\", \"onError\", or \"always\".",
+          "allowed": [
+            "never",
+            "onError",
+            "always"
+          ]
+        }
+      ],
+      "workflow": [
+        "Author curves with root bindings and stable IDs.",
+        "Target them with usdGen:curves; choose rest-space reading and rebind behavior.",
+        "Use surfaceCage mode only for a compatible cage and region map."
+      ],
+      "tips": [
+        "Keep idSource=primvar for edits that must survive curve reordering."
+      ],
+      "pitfalls": [
+        "useRest=true requires a rest snapshot.",
+        "surfaceCage uses a categorical Ptex map and generation guard."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/curveSource.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [
+        "examples/cuda-length-network.usda",
+        "examples/cuda-rbf-network.usda",
+        "examples/cuda-width-network.usda",
+        "examples/motion/braid_animated_guides.usda",
+        "examples/motion/braid_animated_guides_and_surface.usda",
+        "examples/motion/braid_simulated_center_curve.usda"
+      ],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenClump",
+      "title": "Clump",
+      "category": "Styling",
+      "summary": "Pull neighboring strands toward clump centers, with a root-to-tip strength ramp and optional nested clump levels.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference; CUDA admission rejects this type",
+      "inputs": [
+        "Existing curves"
+      ],
+      "output": "Curves plus a typed quartet per level: clumpId_<n> (uniform membership), clumpCenter_<n> (uniform rest anchor), clumpCenterId_<n> (uniform stable center identity), and clumpWeight_<n> (vertex effective cohesion).",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:mask",
+          "type": "float",
+          "default": "1.0",
+          "description": "Effect weight from 0 to 1. Connect a UsdGenExpression for variation per curve or per CV."
+        },
+        {
+          "name": "usdGen:clump:amount",
+          "type": "float",
+          "default": "0.5",
+          "description": "Pull strength toward the clump centre strand, in [0, 1], scaled per CV by the profile ramp."
+        },
+        {
+          "name": "usdGen:clump:profile:knots",
+          "type": "float2[]",
+          "default": "[(0, 0), (1, 1)]",
+          "description": "(position, value) ramp knots with position in [0, 1] along the strand, multiplying usdGen:clump:amount: the default leaves roots free and pulls tips fully. Empty knots mean a flat 1."
+        },
+        {
+          "name": "usdGen:clump:profile:interpolation",
+          "type": "uniform token",
+          "default": "\"catmullRom\"",
+          "description": "Interpolation of usdGen:clump:profile:knots.",
+          "allowed": [
+            "linear",
+            "catmullRom",
+            "bspline",
+            "constant"
+          ]
+        },
+        {
+          "name": "usdGen:clump:map",
+          "type": "float",
+          "default": "0.0",
+          "description": "Clump membership. Connect a UsdGenExpression to cluster strands by a map: strands whose values are equal (within 1/1024) form one clump, centred on the member rooted nearest the group's centroid. A ptex(\"<map>\") read of a UsdGenPtexMap region map makes the map's cells the clumps; a geoSampler voronoi makes the sampled points the clump seeds. Unconnected, clump centres are scattered at usdGen:clump:density."
+        },
+        {
+          "name": "usdGen:clump:density",
+          "type": "float",
+          "default": "4.0",
+          "description": "Clump centres per unit of rest-surface area when usdGen:clump:map is unconnected (and for every level after the first). Centres are picked among the strands with a minimum spacing, keyed by usdGen:seed. Must be finite and >= 0; at least one centre is always picked."
+        },
+        {
+          "name": "usdGen:clump:size",
+          "type": "float",
+          "default": "1.0",
+          "description": "Reach of a clump in rest scene units: a strand rooted farther than this from its centre is not clumped. Must be finite and > 0."
+        },
+        {
+          "name": "usdGen:clump:level",
+          "type": "uniform int",
+          "default": "-1",
+          "description": "Index of the first clump metadata level this operator publishes. -1 allocates the next free contiguous range in compiled order, reserving all preceding Clump levels (including disabled nodes) and imported C3 clump levels. Explicit indices must not overlap an occupied range."
+        },
+        {
+          "name": "usdGen:clump:levels",
+          "type": "int",
+          "default": "1",
+          "description": "Clumping levels, in [1, 4]. Every level after the first splits each clump of the previous level into smaller clumps of density / sizeReduction^(2L), reach size * sizeReduction^L and strength amount * tightnessReduction^L, centred on strands as the previous level left them."
+        },
+        {
+          "name": "usdGen:clump:sizeReduction",
+          "type": "float",
+          "default": "0.5",
+          "description": "Per-level scale of the clump size, in (0, 1]."
+        },
+        {
+          "name": "usdGen:clump:tightnessReduction",
+          "type": "float",
+          "default": "0.8",
+          "description": "Per-level scale of the pull strength, in [0, 1]."
+        },
+        {
+          "name": "usdGen:clump:method",
+          "type": "uniform token",
+          "default": "\"linearBlend\"",
+          "description": "Pull target: \"linearBlend\" pulls each CV toward the centre strand's CV at the same parameter, so tips converge; \"extrudeAndBlend\" pulls toward the centre strand's shape moved to the strand's own root, so strands align without converging.",
+          "allowed": [
+            "linearBlend",
+            "extrudeAndBlend"
+          ]
+        },
+        {
+          "name": "usdGen:clump:stray:amount",
+          "type": "float",
+          "default": "0.0",
+          "description": "Pull removed from a stray strand, in [0, 1], growing toward the tip as t^falloff."
+        },
+        {
+          "name": "usdGen:clump:stray:rate",
+          "type": "float",
+          "default": "0.0",
+          "description": "Share of strands that stray, in [0, 1], picked by (usdGen:seed, curve id)."
+        },
+        {
+          "name": "usdGen:clump:stray:falloff",
+          "type": "float",
+          "default": "1.0",
+          "description": "Exponent of the stray profile along the strand; must be finite and >= 0."
+        },
+        {
+          "name": "usdGen:preserveLength",
+          "type": "float",
+          "default": "1.0",
+          "description": "1 restores every segment to its input length after the pull, root locked; 0 keeps the pulled lengths; values between blend. In [0, 1]."
+        }
+      ],
+      "workflow": [
+        "Start with a moderate amount and a profile that keeps roots apart.",
+        "Set center density and reach; add stray variation if the result is too even."
+      ],
+      "tips": [
+        "Use a Ptex or expression map to define designed clump memberships.",
+        "Native clumps carry a stable center identity, rest anchor and root-to-tip effective cohesion downstream. Wind, Noise, Curl and Bend share procedural variation only to the extent of the surviving cohesion at each CV; weaker or stray CVs retain individual variation."
+      ],
+      "pitfalls": [
+        "The reach is in rest scene units.",
+        "This is a CPU reference operator.",
+        "A clump ID alone records membership, not how strongly a strand follows the group. Preserve the native center and weight planes when baking or moving curves between stacks."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/clump.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [
+        "examples/clump-ptex-plane.usda",
+        "examples/felt/felt_sphere.usda",
+        "examples/head-hair-closeup.usda"
+      ],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenNoise",
+      "title": "Noise",
+      "category": "Styling",
+      "summary": "Add coherent, multi-octave positional variation along strands.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU for clump-weighted coherence; CUDA/Vulkan only for admitted unclumped or legacy ID-only configurations",
+      "inputs": [
+        "Existing curves"
+      ],
+      "output": "Perturbed curves.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:mask",
+          "type": "float",
+          "default": "1.0",
+          "description": "Effect weight from 0 to 1. Connect a UsdGenExpression for variation per curve or per CV."
+        },
+        {
+          "name": "usdGen:noise:magnitude",
+          "type": "float",
+          "default": "0.05",
+          "description": "Peak displacement of the frizz field in scene units, before the magnitude ramp and the mask envelope."
+        },
+        {
+          "name": "usdGen:noise:magnitude:knots",
+          "type": "float2[]",
+          "default": "[(0, 0), (1, 1)]",
+          "description": "Root-to-tip ramp on the displacement magnitude as (position, value) pairs with position in [0, 1]. Empty is a flat ramp of 1."
+        },
+        {
+          "name": "usdGen:noise:magnitude:interpolation",
+          "type": "uniform token",
+          "default": "\"catmullRom\"",
+          "description": "Interpolation of usdGen:noise:magnitude:knots: \"linear\", \"catmullRom\", \"bspline\" or \"constant\".",
+          "allowed": [
+            "linear",
+            "catmullRom",
+            "bspline",
+            "constant"
+          ]
+        },
+        {
+          "name": "usdGen:noise:frequency",
+          "type": "float",
+          "default": "3.0",
+          "description": "Spatial frequency of the fBm field, in cycles per scene unit."
+        },
+        {
+          "name": "usdGen:noise:correlation",
+          "type": "float",
+          "default": "0.5",
+          "description": "How strongly neighbouring strands share one noise draw, clamped to [0, 1]. 0 is fully independent per curve."
+        },
+        {
+          "name": "usdGen:noise:octaves",
+          "type": "int",
+          "default": "1",
+          "description": "Number of fBm octaves, in [1, 6]."
+        },
+        {
+          "name": "usdGen:noise:lacunarity",
+          "type": "float",
+          "default": "2.0",
+          "description": "Frequency multiplier between successive fBm octaves; must be > 1."
+        },
+        {
+          "name": "usdGen:noise:gain",
+          "type": "float",
+          "default": "0.5",
+          "description": "Amplitude multiplier between successive fBm octaves, in [0, 1]."
+        },
+        {
+          "name": "usdGen:cumulative",
+          "type": "bool",
+          "default": "false",
+          "description": "True accumulates the displacement along the strand so the tip carries the sum; false displaces every CV independently."
+        },
+        {
+          "name": "usdGen:preserveLength",
+          "type": "float",
+          "default": "1.0",
+          "description": "Arc-length restoration after displacement, in [0, 1]. Values at or above 0.999 restore every segment length exactly; lower values leave the strand stretched."
+        }
+      ],
+      "workflow": [
+        "Place after the primary shape is established.",
+        "Tune magnitude, frequency, correlation and the root-to-tip ramp."
+      ],
+      "tips": [
+        "Small magnitude with a tapered ramp adds detail without breaking the scalp line.",
+        "After native Clump, cohesive CVs blend the noise field with a field sampled at their clump rest anchor. Per-CV magnitude, frequency, correlation and detail remain authored controls; cohesion does not average these values."
+      ],
+      "pitfalls": [
+        "Large magnitude can alter silhouette and strand length.",
+        "The cumulative mode changes how displacements accumulate.",
+        "Clump-aware Noise that uses effective cohesion runs on CPU. CUDA and Vulkan reject a reachable Noise fed imported clumpWeight_<n> planes; legacy ID-only or unclumped input may still qualify under each backend's other admission rules."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/noise.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [
+        "examples/clump-ptex-plane.usda",
+        "examples/expression-width-plane.usda",
+        "examples/felt/felt_sphere.usda",
+        "examples/guide-interpolate-plane.usda",
+        "examples/head-hair-closeup.usda",
+        "examples/pomade-ponytail.usda"
+      ],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenLength",
+      "title": "Length",
+      "category": "Styling",
+      "summary": "Set or scale strand lengths using a per-curve target and stable random variation. Short strands can be collapsed to zero length.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference and supported CUDA configurations",
+      "inputs": [
+        "Existing curves"
+      ],
+      "output": "Curves with repositioned CVs and stable IDs.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:mask",
+          "type": "float",
+          "default": "1.0",
+          "description": "Effect weight from 0 to 1. Connect a UsdGenExpression for variation per curve or per CV."
+        },
+        {
+          "name": "usdGen:length:mode",
+          "type": "uniform token",
+          "default": "\"scale\"",
+          "description": "set treats length:value as a target in scene units; scale and cull multiply the input length. Culling uses thresholds and currently collapses strands to zero length.",
+          "allowed": [
+            "set",
+            "scale",
+            "cull"
+          ]
+        },
+        {
+          "name": "usdGen:length:value",
+          "type": "float",
+          "default": "1.0",
+          "description": "Target length in scene units (\"set\") or multiplier (\"scale\"). Must be >= 0."
+        },
+        {
+          "name": "usdGen:length:random",
+          "type": "float2",
+          "default": "(1, 1)",
+          "description": "Per-curve multiplier range (lo, hi) on the resolved length. A reversed pair is swapped; both components must be finite and >= 0."
+        },
+        {
+          "name": "usdGen:length:method",
+          "type": "uniform token",
+          "default": "\"scale\"",
+          "description": "scale and cutExtend are accepted tokens. The current kernel applies the same radial scaling for both.",
+          "allowed": [
+            "scale",
+            "cutExtend"
+          ]
+        },
+        {
+          "name": "usdGen:rebuild",
+          "type": "uniform token",
+          "default": "\"keepParam\"",
+          "description": "Declared CV parameterization choice. The current kernel leaves CV count and parameterization unchanged.",
+          "allowed": [
+            "keepParam",
+            "reparam"
+          ]
+        },
+        {
+          "name": "usdGen:minRemainingLength",
+          "type": "float",
+          "default": "0.0",
+          "description": "Collapse a strand to zero length when its resolved target is below this scene-unit minimum. Zero disables this test."
+        },
+        {
+          "name": "usdGen:cullThreshold",
+          "type": "float",
+          "default": "0.0",
+          "description": "Collapse a strand to zero length when its resolved target is below this scene-unit threshold. Zero disables this test."
+        }
+      ],
+      "workflow": [
+        "Choose set for an absolute target or scale for a multiplier.",
+        "Set value and random range; use the thresholds to collapse short strands."
+      ],
+      "tips": [
+        "Apply before late detail so Noise and Curl respond to final length."
+      ],
+      "pitfalls": [
+        "The current kernel zero-lengthens strands below a threshold; it does not remove curves.",
+        "cutExtend and rebuild are declared controls but do not change the current radial scaling method."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/length.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [
+        "examples/cuda-length-network.usda",
+        "examples/felt/felt_sphere.usda",
+        "examples/head-hair-closeup.usda",
+        "examples/styled-fur-plane.usda"
+      ],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenWidth",
+      "title": "Width",
+      "category": "Styling",
+      "summary": "Set strand widths with a root-to-tip ramp. Width can replace the input or multiply it.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference and supported CUDA configurations",
+      "inputs": [
+        "Existing curves"
+      ],
+      "output": "Curves with a width value for every CV.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:mask",
+          "type": "float",
+          "default": "1.0",
+          "description": "Effect weight from 0 to 1. Connect a UsdGenExpression for variation per curve or per CV."
+        },
+        {
+          "name": "usdGen:width",
+          "type": "float",
+          "default": "0.01",
+          "description": "Base strand width in scene units before the ramp and the mask envelope. Must be >= 0."
+        },
+        {
+          "name": "usdGen:width:knots",
+          "type": "float2[]",
+          "default": "[(0, 1), (1, 1)]",
+          "description": "Root-to-tip width ramp as (position, multiplier) pairs with position in [0, 1]. Empty is a flat ramp of 1."
+        },
+        {
+          "name": "usdGen:width:interpolation",
+          "type": "uniform token",
+          "default": "\"catmullRom\"",
+          "description": "Interpolation of usdGen:width:knots: \"linear\", \"catmullRom\", \"bspline\" or \"constant\".",
+          "allowed": [
+            "linear",
+            "catmullRom",
+            "bspline",
+            "constant"
+          ]
+        },
+        {
+          "name": "usdGen:replace",
+          "type": "bool",
+          "default": "true",
+          "description": "True sets the width plane from this operator's profile; false multiplies the incoming widths by it."
+        }
+      ],
+      "workflow": [
+        "Set a base width and taper ramp.",
+        "Use replace=false to scale widths from an earlier Width node."
+      ],
+      "tips": [
+        "A narrow tip ramp avoids blunt looking fur."
+      ],
+      "pitfalls": [
+        "Widths are in scene units; look at a render at intended camera distance."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/width.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [
+        "examples/clump-ptex-plane.usda",
+        "examples/cuda-length-network.usda",
+        "examples/cuda-rbf-network.usda",
+        "examples/cuda-width-network.usda",
+        "examples/expression-width-plane.usda",
+        "examples/felt/felt_sphere.usda"
+      ],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenWidthBlend",
+      "title": "Width Blend",
+      "category": "Styling",
+      "summary": "Blend the width plane of two matching curve streams with an ordered weight. This runtime operator has no generated USD schema prim.",
+      "status": "implemented",
+      "availability": "Runtime only; no typed USD schema prim",
+      "execution": "CPU reference and supported CUDA configurations",
+      "inputs": [
+        "Two curve streams identical except for width"
+      ],
+      "output": "Curves with linearly blended widths.",
+      "parameters": [
+        {
+          "name": "usdGen:widthBlend:weight",
+          "type": "float (runtime parameter)",
+          "default": "1.0",
+          "description": "Ordered blend weight in [0, 1]; zero uses the left width and one uses the right width."
+        }
+      ],
+      "workflow": [
+        "Provide left and right matching curve inputs through the graph descriptor.",
+        "Set widthBlend:weight from 0 (left) to 1 (right)."
+      ],
+      "tips": [
+        "Useful when two width treatments share exact curve geometry."
+      ],
+      "pitfalls": [
+        "This is a runtime-only operator; a standard typed UsdGenWidthBlend prim is not available.",
+        "Any difference outside the width plane is rejected.",
+        "The graph descriptor requires enabled=true and accepts only widthBlend:weight as a parameter; there is no seed or mask control."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/widthBlend.cpp",
+        "libs/usdGen/usdGen/opRegistry.cpp",
+        "tools/docs/utility_fixtures.cpp"
+      ],
+      "examples": [
+        "examples/docs/fixtures/width-blend-studio.usda",
+        "examples/docs/fixtures/width-blend-fixture.usda"
+      ],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenDirection",
+      "title": "Direction",
+      "category": "Styling",
+      "summary": "Reorient strands toward a vector, with controls for lift, tilt, spin, surface contour, and rigid or progressive bending.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference; CUDA admission rejects this type",
+      "inputs": [
+        "Existing curves"
+      ],
+      "output": "Reoriented curves.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:mask",
+          "type": "float",
+          "default": "1.0",
+          "description": "Effect weight from 0 to 1. Connect a UsdGenExpression for variation per curve or per CV."
+        },
+        {
+          "name": "usdGen:direction",
+          "type": "vector3f",
+          "default": "(0, 1, 0)",
+          "description": "Target combing direction in description space; a curve-set source can supply captured tangents instead."
+        },
+        {
+          "name": "usdGen:amount",
+          "type": "float",
+          "default": "0.0",
+          "description": "Fraction of rotation toward the target direction."
+        },
+        {
+          "name": "usdGen:lift",
+          "type": "float",
+          "default": "0.0",
+          "description": "Additional rotation around the root binormal, in degrees."
+        },
+        {
+          "name": "usdGen:tiltU",
+          "type": "float",
+          "default": "0.0",
+          "description": "Rotate the target about the root tangent, in degrees."
+        },
+        {
+          "name": "usdGen:tiltV",
+          "type": "float",
+          "default": "0.0",
+          "description": "Rotate the target about the root binormal, in degrees."
+        },
+        {
+          "name": "usdGen:tiltN",
+          "type": "float",
+          "default": "0.0",
+          "description": "Rotate the target about the root normal, in degrees."
+        },
+        {
+          "name": "usdGen:aroundN",
+          "type": "float",
+          "default": "0.0",
+          "description": "Additional rotation about the root normal after tiltN."
+        },
+        {
+          "name": "usdGen:followSkinContour",
+          "type": "float",
+          "default": "0.0",
+          "description": "Blend the target toward its projection into the root tangent plane."
+        },
+        {
+          "name": "usdGen:direction:source",
+          "type": "rel",
+          "default": null,
+          "description": "Optional curve set or operator whose tangents supply the target. Map targets are not supported."
+        },
+        {
+          "name": "usdGen:direction:knots",
+          "type": "float2[]",
+          "default": "[(0, 1), (1, 1)]",
+          "description": "Root-to-tip ramp for the direction influence."
+        },
+        {
+          "name": "usdGen:direction:interpolation",
+          "type": "uniform token",
+          "default": "\"catmullRom\"",
+          "description": "Interpolation of the direction ramp.",
+          "allowed": [
+            "linear",
+            "catmullRom",
+            "bspline",
+            "constant"
+          ]
+        },
+        {
+          "name": "usdGen:mode",
+          "type": "uniform token",
+          "default": "\"rigid\"",
+          "description": "rigid rotates CV offsets around the root; perSegment accumulates turns while preserving segment lengths.",
+          "allowed": [
+            "rigid",
+            "perSegment"
+          ]
+        }
+      ],
+      "workflow": [
+        "Set direction and amount.",
+        "Adjust tilt and the direction ramp to control root-to-tip influence."
+      ],
+      "tips": [
+        "Use gradual influence for a combed coat while retaining root attachment."
+      ],
+      "pitfalls": [
+        "The direction:source map relationship is declared but this kernel refuses map-driven direction."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/direction.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenSmooth",
+      "title": "Smooth",
+      "category": "Styling",
+      "summary": "Average a curve along itself or against nearby curves to remove kinks and stray noise.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference; CUDA admission rejects this type",
+      "inputs": [
+        "Existing curves"
+      ],
+      "output": "Smoothed curves.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:mask",
+          "type": "float",
+          "default": "1.0",
+          "description": "Effect weight from 0 to 1. Connect a UsdGenExpression for variation per curve or per CV."
+        },
+        {
+          "name": "usdGen:strength",
+          "type": "float",
+          "default": "0.5",
+          "description": "Blend factor toward the smoothed position."
+        },
+        {
+          "name": "usdGen:iterations",
+          "type": "int",
+          "default": "1",
+          "description": "Number of smoothing passes."
+        },
+        {
+          "name": "usdGen:mode",
+          "type": "uniform token",
+          "default": "\"alongCurve\"",
+          "description": "alongCurve smooths each strand internally; neighbours blends same-index CVs of nearby strands.",
+          "allowed": [
+            "alongCurve",
+            "neighbours"
+          ]
+        },
+        {
+          "name": "usdGen:lockRoot",
+          "type": "bool",
+          "default": "true",
+          "description": "Keep root CVs fixed during smoothing."
+        },
+        {
+          "name": "usdGen:searchRadius",
+          "type": "float",
+          "default": "0.0",
+          "description": "Maximum root distance for strands to count as neighbors."
+        },
+        {
+          "name": "usdGen:numNeighbors",
+          "type": "int",
+          "default": "4",
+          "description": "Maximum nearby strands used for each neighbor-mode blend."
+        }
+      ],
+      "workflow": [
+        "Set strength and iteration count.",
+        "Choose alongCurve or neighbor mode and decide whether roots stay locked."
+      ],
+      "tips": [
+        "Use after guide interpolation or sculpt work to soften uneven shapes."
+      ],
+      "pitfalls": [
+        "High strength or many iterations can flatten intended detail."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/smooth.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenResample",
+      "title": "Resample",
+      "category": "Styling",
+      "summary": "Redistribute CVs along every strand to a chosen count.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference; CUDA admission rejects this type",
+      "inputs": [
+        "Existing curves"
+      ],
+      "output": "Curves with a new CV topology.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:mask",
+          "type": "float",
+          "default": "1.0",
+          "description": "Blend each output CV toward the resampled position. CV count still changes at zero mask; zero retains the nearest input CV shape at the new count."
+        },
+        {
+          "name": "usdGen:cvCount",
+          "type": "int",
+          "default": "8",
+          "description": "Number of CVs to produce on each strand."
+        },
+        {
+          "name": "usdGen:distribution",
+          "type": "uniform token",
+          "default": "\"uniform\"",
+          "description": "Spacing rule for resampled CVs.",
+          "allowed": [
+            "uniform",
+            "keepParam"
+          ]
+        },
+        {
+          "name": "usdGen:restoreSegmentLengths",
+          "type": "bool",
+          "default": "false",
+          "description": "Restore original segment lengths after placing the new CVs."
+        }
+      ],
+      "workflow": [
+        "Choose cvCount and spacing distribution.",
+        "Enable segment-length restoration when the shape needs it."
+      ],
+      "tips": [
+        "Place before CV-sensitive operators to give them predictable resolution."
+      ],
+      "pitfalls": [
+        "Changing CV count invalidates CV-indexed sculpt deltas and other topology-dependent data."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/resample.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenScale",
+      "title": "Scale",
+      "category": "Styling",
+      "summary": "Scale strand shape along its length, with a ramp and per-curve random multiplier. It can scale widths too.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference; CUDA admission rejects this type",
+      "inputs": [
+        "Existing curves"
+      ],
+      "output": "Scaled curves and optionally scaled widths.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:mask",
+          "type": "float",
+          "default": "1.0",
+          "description": "Effect weight from 0 to 1. Connect a UsdGenExpression for variation per curve or per CV."
+        },
+        {
+          "name": "usdGen:scale",
+          "type": "float",
+          "default": "1.0",
+          "description": "Base multiplier of every offset from the root."
+        },
+        {
+          "name": "usdGen:scale:knots",
+          "type": "float2[]",
+          "default": "[(0, 1), (1, 1)]",
+          "description": "Root-to-tip multiplier ramp."
+        },
+        {
+          "name": "usdGen:scale:interpolation",
+          "type": "uniform token",
+          "default": "\"catmullRom\"",
+          "description": "Interpolation of the scale ramp.",
+          "allowed": [
+            "linear",
+            "catmullRom",
+            "bspline",
+            "constant"
+          ]
+        },
+        {
+          "name": "usdGen:scaleRandom",
+          "type": "float2",
+          "default": "(1, 1)",
+          "description": "Per-curve random multiplier range."
+        },
+        {
+          "name": "usdGen:widthToo",
+          "type": "bool",
+          "default": "false",
+          "description": "Apply the same local multiplier to strand widths."
+        }
+      ],
+      "workflow": [
+        "Set scale and its root-to-tip ramp.",
+        "Adjust scaleRandom; turn on widthToo if diameter should follow length."
+      ],
+      "tips": [
+        "Keep the root ramp near one to preserve attachment while tapering the outer groom."
+      ],
+      "pitfalls": [
+        "Random range is per curve; large ranges can disrupt a carefully matched guide silhouette."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/scale.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenCurl",
+      "title": "Curl",
+      "category": "Styling",
+      "summary": "Wrap strands into a helix with controllable radius, frequency, phase, taper, and axis.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference; CUDA admission rejects this type",
+      "inputs": [
+        "Existing curves"
+      ],
+      "output": "Curled curves.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:mask",
+          "type": "float",
+          "default": "1.0",
+          "description": "Effect weight from 0 to 1. Connect a UsdGenExpression for variation per curve or per CV."
+        },
+        {
+          "name": "usdGen:radius",
+          "type": "float",
+          "default": "0.02",
+          "description": "Base curl radius in scene units."
+        },
+        {
+          "name": "usdGen:radius:knots",
+          "type": "float2[]",
+          "default": "[(0, 1), (1, 1)]",
+          "description": "Root-to-tip multiplier ramp for curl radius."
+        },
+        {
+          "name": "usdGen:radius:interpolation",
+          "type": "uniform token",
+          "default": "\"catmullRom\"",
+          "description": "Interpolation of the radius ramp.",
+          "allowed": [
+            "linear",
+            "catmullRom",
+            "bspline",
+            "constant"
+          ]
+        },
+        {
+          "name": "usdGen:frequency",
+          "type": "float",
+          "default": "2.0",
+          "description": "Number of curl cycles per unit of arc length."
+        },
+        {
+          "name": "usdGen:phase",
+          "type": "float",
+          "default": "0.0",
+          "description": "Base angular phase of the curl."
+        },
+        {
+          "name": "usdGen:phaseRandom",
+          "type": "float",
+          "default": "0.0",
+          "description": "Stable per-curve phase variation."
+        },
+        {
+          "name": "usdGen:taper",
+          "type": "bool",
+          "default": "true",
+          "description": "Reduce the curl radius toward the ends."
+        },
+        {
+          "name": "usdGen:axisMode",
+          "type": "uniform token",
+          "default": "\"curveTangent\"",
+          "description": "curveTangent follows the input curve; guide uses the root frame.",
+          "allowed": [
+            "curveTangent",
+            "guide"
+          ]
+        },
+        {
+          "name": "usdGen:clockwise",
+          "type": "bool",
+          "default": "true",
+          "description": "Reverse the direction of rotation around the curl axis."
+        }
+      ],
+      "workflow": [
+        "Set radius and frequency.",
+        "Choose the curl axis and phase variation; shape radius with the ramp."
+      ],
+      "tips": [
+        "PhaseRandom avoids repeated synchronized curls.",
+        "After native Clump, cohesive CVs share the random phase draw. Authored phase, frequency, radius and root frames remain individual controls, so clumping does not force every strand into an identical helix."
+      ],
+      "pitfalls": [
+        "This is a CPU reference operator.",
+        "Curl needs enough CVs to describe the turns."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/curl.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [
+        "examples/felt/felt_sphere.usda",
+        "examples/head-hair-closeup.usda",
+        "examples/motion/felt_sphere_animated.usda",
+        "examples/motion/felt_sphere_groom_outside_xform.usda"
+      ],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenBend",
+      "title": "Bend",
+      "category": "Styling",
+      "summary": "Rotate a strand around a selected axis, using a root-to-tip angle ramp.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference; CUDA admission rejects this type",
+      "inputs": [
+        "Existing curves"
+      ],
+      "output": "Bent curves.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:mask",
+          "type": "float",
+          "default": "1.0",
+          "description": "Effect weight from 0 to 1. Connect a UsdGenExpression for variation per curve or per CV."
+        },
+        {
+          "name": "usdGen:angle",
+          "type": "float",
+          "default": "0.0",
+          "description": "Base bend angle in degrees."
+        },
+        {
+          "name": "usdGen:angle:knots",
+          "type": "float2[]",
+          "default": "[(0, 1), (1, 1)]",
+          "description": "Root-to-tip multiplier ramp for the angle."
+        },
+        {
+          "name": "usdGen:angle:interpolation",
+          "type": "uniform token",
+          "default": "\"catmullRom\"",
+          "description": "Interpolation of the bend ramp.",
+          "allowed": [
+            "linear",
+            "catmullRom",
+            "bspline",
+            "constant"
+          ]
+        },
+        {
+          "name": "usdGen:angleRandom",
+          "type": "float2",
+          "default": "(1, 1)",
+          "description": "Per-curve multiplier range for the bend angle."
+        },
+        {
+          "name": "usdGen:axis",
+          "type": "vector3f",
+          "default": "(1, 0, 0)",
+          "description": "Explicit bend axis when selected by axisMode."
+        },
+        {
+          "name": "usdGen:axisMode",
+          "type": "uniform token",
+          "default": "\"rootDirection\"",
+          "description": "Choose the root direction or explicit vector as the bend axis.",
+          "allowed": [
+            "rootDirection",
+            "uniform",
+            "attribute"
+          ]
+        }
+      ],
+      "workflow": [
+        "Set angle, axis mode, and optional axis vector.",
+        "Use angleRandom and a ramp for varied, anchored bends."
+      ],
+      "tips": [
+        "A ramp near zero at the root keeps strands seated on the surface.",
+        "After native Clump, cohesive strands share the random bend draw. Authored angles, axes and root frames remain individual controls; the operation does not average them across a tuft."
+      ],
+      "pitfalls": [
+        "This is a CPU reference operator."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/bend.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenStraighten",
+      "title": "Straighten",
+      "category": "Styling",
+      "summary": "Reduce bend in curve tangent and normal directions while preserving the root.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference; CUDA admission rejects this type",
+      "inputs": [
+        "Existing curves"
+      ],
+      "output": "Straighter curves.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:mask",
+          "type": "float",
+          "default": "1.0",
+          "description": "Effect weight from 0 to 1. Connect a UsdGenExpression for variation per curve or per CV."
+        },
+        {
+          "name": "usdGen:tangentStraightness",
+          "type": "float",
+          "default": "0.0",
+          "description": "Straightening strength in the strand tangent direction."
+        },
+        {
+          "name": "usdGen:normalStraightness",
+          "type": "float",
+          "default": "0.0",
+          "description": "Straightening strength in the root normal direction."
+        }
+      ],
+      "workflow": [
+        "Increase tangentStraightness or normalStraightness gradually.",
+        "Compare at final render distance."
+      ],
+      "tips": [
+        "Useful after overactive Noise or Curl."
+      ],
+      "pitfalls": [
+        "Full straightening removes designed curvature."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/straighten.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenDisplace",
+      "title": "Displace",
+      "category": "Styling",
+      "summary": "Move strand CVs along the rest root normal using a sampled scalar height field.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference; CUDA admission rejects this type",
+      "inputs": [
+        "Existing curves",
+        "Optional usdGen:displace:map"
+      ],
+      "output": "Displaced curves.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:mask",
+          "type": "float",
+          "default": "1.0",
+          "description": "Effect weight from 0 to 1. Connect a UsdGenExpression for variation per curve or per CV."
+        },
+        {
+          "name": "usdGen:displace:amount",
+          "type": "float",
+          "default": "0.0",
+          "description": "Overall displacement multiplier."
+        },
+        {
+          "name": "usdGen:displace:map",
+          "type": "rel",
+          "default": null,
+          "description": "Optional scalar map sampled at each rest root."
+        },
+        {
+          "name": "usdGen:displace:base",
+          "type": "float",
+          "default": "0.5",
+          "description": "Reference map value subtracted from the sample."
+        },
+        {
+          "name": "usdGen:displace:scale",
+          "type": "float",
+          "default": "1.0",
+          "description": "Scale applied to the sample minus base."
+        },
+        {
+          "name": "usdGen:displace:offset",
+          "type": "float",
+          "default": "0.0",
+          "description": "Bias added after scale."
+        },
+        {
+          "name": "usdGen:mode",
+          "type": "uniform token",
+          "default": "\"height\"",
+          "description": "height moves along the root normal. vector is declared but unsupported.",
+          "allowed": [
+            "height",
+            "vector"
+          ]
+        }
+      ],
+      "workflow": [
+        "Connect a scalar map or tune base, scale, and offset.",
+        "Use height mode and set the overall amount."
+      ],
+      "tips": [
+        "Start with a low amount and inspect root movement before increasing it."
+      ],
+      "pitfalls": [
+        "The vector mode is declared but refused by the current scalar-map kernel.",
+        "Every CV, including the root, can move."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/displace.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenWave",
+      "title": "Wave",
+      "category": "Styling",
+      "summary": "Add a periodic wave in local tangent and normal directions.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference; CUDA admission rejects this type",
+      "inputs": [
+        "Existing curves"
+      ],
+      "output": "Wavy curves.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:mask",
+          "type": "float",
+          "default": "1.0",
+          "description": "Effect weight from 0 to 1. Connect a UsdGenExpression for variation per curve or per CV."
+        },
+        {
+          "name": "usdGen:frequencyU",
+          "type": "float",
+          "default": "1.0",
+          "description": "Wave frequency along the local U direction."
+        },
+        {
+          "name": "usdGen:frequencyN",
+          "type": "float",
+          "default": "1.0",
+          "description": "Wave frequency along the local normal direction."
+        },
+        {
+          "name": "usdGen:amplitudeU",
+          "type": "float",
+          "default": "0.0",
+          "description": "Displacement amplitude in local U."
+        },
+        {
+          "name": "usdGen:amplitudeN",
+          "type": "float",
+          "default": "0.0",
+          "description": "Displacement amplitude in the local normal."
+        }
+      ],
+      "workflow": [
+        "Set U/N frequencies and amplitudes.",
+        "Combine with a later Width or Noise for surface detail."
+      ],
+      "tips": [
+        "Different U and N frequencies reduce overly regular rows.",
+        "Wave is deterministic and keeps its authored behavior after Clump; it passes clump metadata downstream for later motion operators."
+      ],
+      "pitfalls": [
+        "This is a CPU reference operator.",
+        "Zero amplitudes leave geometry unchanged."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/wave.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenPart",
+      "title": "Part",
+      "category": "Styling",
+      "summary": "Classify nearby strand roots by which side of an authored part curve they occupy. Part publishes a per-curve partId plane; it does not move strand points.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference; CUDA admission rejects this type",
+      "inputs": [
+        "Existing curves",
+        "Parting curves through usdGen:part:curves"
+      ],
+      "output": "Unchanged curve positions plus a uniform integer partId plane (-1 for unassigned strands).",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:mask",
+          "type": "float",
+          "default": "1.0",
+          "description": "Effect weight from 0 to 1. Connect a UsdGenExpression for variation per curve or per CV."
+        },
+        {
+          "name": "usdGen:part:curves",
+          "type": "rel",
+          "default": null,
+          "description": "Curve set that defines the parting line."
+        },
+        {
+          "name": "usdGen:part:radius",
+          "type": "float",
+          "default": "0.05",
+          "description": "Rest-space search radius for assigning side IDs near the parting line. The effective radius is multiplied by strength."
+        },
+        {
+          "name": "usdGen:part:strength",
+          "type": "float",
+          "default": "1.0",
+          "description": "Gate from 0 to 1 for part assignment: radius × strength sets the effective reach. It does not displace geometry."
+        }
+      ],
+      "workflow": [
+        "Target one parting curve set.",
+        "Set radius and strength to choose the roots assigned a side ID; inspect or consume the partId plane downstream."
+      ],
+      "tips": [
+        "Read the published partId primvar in a diagnostic or downstream tool to see the assigned sides."
+      ],
+      "pitfalls": [
+        "This is a CPU reference operator.",
+        "Part does not alter points or widths, so a beauty render alone looks identical to the input.",
+        "Roots beyond radius × strength receive partId -1."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/part.cpp",
+        "libs/usdGenSchema/schema.usda",
+        "tools/docs/utility_fixtures.cpp"
+      ],
+      "examples": [
+        "examples/docs/fixtures/part-studio.usda",
+        "examples/docs/fixtures/part-fixture.usda"
+      ],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenExprOp",
+      "title": "Expression Op",
+      "category": "Styling",
+      "summary": "Evaluate an expression over curves or CVs and apply its result as a displacement or width.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference; CUDA admission rejects this type",
+      "inputs": [
+        "Existing curves",
+        "Expression source text"
+      ],
+      "output": "Modified positions or widths.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:mask",
+          "type": "float",
+          "default": "1.0",
+          "description": "Effect weight from 0 to 1. Connect a UsdGenExpression for variation per curve or per CV."
+        },
+        {
+          "name": "usdGen:expr:source",
+          "type": "string",
+          "default": "\"\"",
+          "description": "Expression program evaluated over each curve or CV. Bare source supports geometry variables but cannot resolve ptex()/geoSampler() input bindings."
+        },
+        {
+          "name": "usdGen:expr:maps",
+          "type": "rel",
+          "default": null,
+          "description": "Declared map targets. The current bare expression kernel cannot resolve map sampler calls through this relationship."
+        },
+        {
+          "name": "usdGen:expr:returnType",
+          "type": "uniform token",
+          "default": "\"displacement\"",
+          "description": "displacement expects a 3-component result and adds it to position; width expects a scalar and blends toward it. The color token is declared but refused by the current kernel.",
+          "allowed": [
+            "displacement",
+            "width",
+            "color"
+          ]
+        },
+        {
+          "name": "usdGen:mode",
+          "type": "uniform token",
+          "default": "\"cv\"",
+          "description": "cv evaluates once per CV; curve evaluates once per strand.",
+          "allowed": [
+            "cv",
+            "curve"
+          ]
+        }
+      ],
+      "workflow": [
+        "Set returnType to displacement or width and mode to curve or cv.",
+        "Write an expression using the supported geometry variables."
+      ],
+      "tips": [
+        "Use UsdGenExpression connections for single parameter modulation; ExprOp changes the curve result itself."
+      ],
+      "pitfalls": [
+        "Bare expr:source cannot resolve ptex()/geoSampler() calls or $value.",
+        "The schema lists color as a return type, but the kernel accepts displacement or width only."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/exprOp.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenSculptLayer",
+      "title": "Sculpt Layer",
+      "category": "Styling",
+      "summary": "Apply hand-authored CV deltas to strands matched by stable curve ID.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference; CUDA admission rejects this type",
+      "inputs": [
+        "Existing curves",
+        "curveIds, cvOffsets, and deltas arrays"
+      ],
+      "output": "Sculpted curves.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:mask",
+          "type": "float",
+          "default": "1.0",
+          "description": "Effect weight from 0 to 1. Connect a UsdGenExpression for variation per curve or per CV."
+        },
+        {
+          "name": "usdGen:sculpt:weight",
+          "type": "float",
+          "default": "1.0",
+          "description": "Strength of the authored deltas, multiplied by mask."
+        },
+        {
+          "name": "usdGen:sculpt:space",
+          "type": "uniform token",
+          "default": "\"rootFrame\"",
+          "description": "Interpret deltas in the root tangent/binormal/normal frame or directly in object space.",
+          "allowed": [
+            "rootFrame",
+            "object"
+          ]
+        },
+        {
+          "name": "usdGen:sculpt:curveIds",
+          "type": "uint64[]",
+          "default": "[]",
+          "description": "Sorted stable curve IDs that receive sculpt deltas."
+        },
+        {
+          "name": "usdGen:sculpt:cvOffsets",
+          "type": "int[]",
+          "default": "[]",
+          "description": "Prefix offsets into deltas, one span per curve ID; each matched span must equal its strand CV count."
+        },
+        {
+          "name": "usdGen:sculpt:deltas",
+          "type": "vector3f[]",
+          "default": "[]",
+          "description": "Per-CV vector displacements for the selected curves."
+        },
+        {
+          "name": "usdGen:sculpt:epoch",
+          "type": "uniform string",
+          "default": "\"\"",
+          "description": "Epoch of the groom topology against which the layer was authored."
+        },
+        {
+          "name": "usdGen:sculpt:lockedCurves",
+          "type": "uint64[]",
+          "default": "[]",
+          "description": "Curve IDs protected from downstream styling."
+        },
+        {
+          "name": "usdGen:sculpt:rootPrims",
+          "type": "int[]",
+          "default": "[]",
+          "description": "Root binding metadata validated for a tool rebase operation; not used to move curves here."
+        },
+        {
+          "name": "usdGen:sculpt:rootUVs",
+          "type": "texCoord2f[]",
+          "default": "[]",
+          "description": "Root UV metadata validated for a tool rebase operation; not used to move curves here."
+        }
+      ],
+      "workflow": [
+        "Create a layer of stable curve IDs and matching CV delta spans.",
+        "Choose object or rootFrame delta space; adjust weight."
+      ],
+      "tips": [
+        "Keep upstream topology fixed while hand sculpting."
+      ],
+      "pitfalls": [
+        "A delta span with the wrong CV count fails the cook.",
+        "Rebase metadata is validated but does not itself move curves."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/sculptLayer.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenDeform",
+      "title": "Deform",
+      "category": "Deformation",
+      "summary": "Carry a rest groom with a posed surface or animated guide curves using an RBF field or center-curve wrap.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference and supported CUDA configurations",
+      "inputs": [
+        "Existing rest-space curves",
+        "Bound animated surface or driver guides"
+      ],
+      "output": "Posed curves.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:mask",
+          "type": "float",
+          "default": "1.0",
+          "description": "Effect weight from 0 to 1. Connect a UsdGenExpression for variation per curve or per CV."
+        },
+        {
+          "name": "usdGen:regionMap",
+          "type": "rel",
+          "default": null,
+          "description": "Optional categorical Ptex map sampled at each rest root. In curveWrap with multiple center curves, its raw integer IDs select guideRegions; unmatched IDs fail. Use nearest filtering and zero blur. Map scale, offset, and clamp do not change the IDs."
+        },
+        {
+          "name": "usdGen:mode",
+          "type": "uniform token",
+          "default": "\"\"",
+          "description": "Empty selects RBF deformation. curveWrap binds each input CV to the nearest segment of an open center curve and preserves its local offset as the center animates. Multiple center curves require a categorical region map and matching guideRegions IDs. curveWrap runs on CPU only.",
+          "allowed": [
+            "",
+            "curveWrap"
+          ]
+        },
+        {
+          "name": "usdGen:guideRegions",
+          "type": "int[]",
+          "default": "[]",
+          "description": "Region ID for each center curve in the usdGen:guides target's curve order. Required with regionMap; one unique nonnegative integer per curve. Used only by curveWrap."
+        },
+        {
+          "name": "usdGen:guides",
+          "type": "rel",
+          "default": null,
+          "description": "Optional animated BasisCurves driver with UsdGenCurveAPI. RBF uses its rest and current CV positions to deform the groom; without it, the bound surface supplies samples. curveWrap uses it as one or more center curves. Driver and groom rest positions must share a coordinate domain."
+        },
+        {
+          "name": "usdGen:lockRoots",
+          "type": "bool",
+          "default": "true",
+          "description": "True keeps every root where it arrives: the whole strand is shifted back by the field's displacement at its root, so the deformation only bends the strand above it."
+        },
+        {
+          "name": "usdGen:rbfSamples",
+          "type": "int",
+          "default": "100",
+          "description": "Most RBF samples used: taken on the bound surface, or, with usdGen:guides, farthest-point sampled from the driver CVs. Higher values track the drivers more closely at a higher per-frame cost. At least 4."
+        }
+      ],
+      "workflow": [
+        "Author rest positions on the surface or drivers.",
+        "Choose the default RBF mode or curveWrap, then set root locking."
+      ],
+      "tips": [
+        "Disable lockRoots when roots should move with the skin."
+      ],
+      "pitfalls": [
+        "curveWrap is CPU-only and needs matching rest/current center-curve topology.",
+        "Multi-center wrapping requires a categorical region map with valid IDs."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/deform.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [
+        "examples/cuda-rbf-network.usda",
+        "examples/motion/braid_animated_guides.usda",
+        "examples/motion/braid_animated_guides_and_surface.usda",
+        "examples/motion/braid_simulated_center_curve.usda",
+        "examples/motion/felt_sphere_animated.usda",
+        "examples/motion/felt_sphere_groom_outside_xform.usda"
+      ],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenCollide",
+      "title": "Collide",
+      "category": "Deformation",
+      "summary": "Correct contact against mesh surfaces, with optional temporary shortening for deep penetration and clearance around open surfaces.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference; CUDA admission rejects this type",
+      "inputs": [
+        "Existing curves",
+        "Bound surface and optional collider targets"
+      ],
+      "output": "Collision-corrected curves with optional temporary shortening and surface clearance.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:mask",
+          "type": "float",
+          "default": "1.0",
+          "description": "Effect weight from 0 to 1. Connect a UsdGenExpression for variation per curve or per CV."
+        },
+        {
+          "name": "usdGen:colliders",
+          "type": "rel",
+          "default": null,
+          "description": "Optional Mesh or face GeomSubset targets added to the bound scalp. Valid Catmull-Clark, Loop and bilinear meshes use their evaluated subdivision limit. Meshes with subdivisionScheme=none use their polygon surface; otherwise-valid unsupported or rejected topology emits a path-and-scheme warning before polygon fallback. Consistently oriented watertight meshes eject interior CVs. Open meshes and incomplete face subsets provide surface clearance; subsets collide only with their named faces. Empty subsets are an error."
+        },
+        {
+          "name": "usdGen:deepPenetrationMode",
+          "type": "uniform token",
+          "default": "\"collide\"",
+          "description": "Choose collide for collision correction alone, or cutThenCollide to temporarily shorten deeply penetrating strands before correcting contact. Shortening is recalculated from the incoming strand at each frame, so the original incoming length returns when contact clears.",
+          "allowed": [
+            "collide",
+            "cutThenCollide"
+          ]
+        },
+        {
+          "name": "usdGen:cutDepthThreshold",
+          "type": "float",
+          "default": "0.0",
+          "description": "Signed interior depth in stage units at which temporary shortening begins in cutThenCollide mode. Use a finite nonnegative value; the practice scene uses 0.15. For its closed Catmull-Clark Shield, this is an inset from the evaluated subdivision limit. Collision correction still uses the outer evaluated boundary, independently of this threshold and its blend. This control has no effect in collide mode."
+        },
+        {
+          "name": "usdGen:cutBlendDepth",
+          "type": "float",
+          "default": "0.02",
+          "description": "Distance in stage units over which shortening gradually turns on beyond cutDepthThreshold. Larger values make the transition more gradual. Use a finite positive value; the default and practice value are 0.02. This control has no effect in collide mode."
+        },
+        {
+          "name": "usdGen:offset",
+          "type": "float",
+          "default": "0.0",
+          "description": "Extra clearance in stage units beyond the evaluated collider boundary, including the subdivision limit when supported. Closed meshes eject interior CVs even at offset 0; open surfaces correct only CVs closer than offset."
+        },
+        {
+          "name": "usdGen:pushAmount",
+          "type": "float",
+          "default": "0.0",
+          "description": "Fraction of the collision correction applied per sweep. Use 1 for the full correction; 0 leaves curves unchanged."
+        },
+        {
+          "name": "usdGen:iterations",
+          "type": "int",
+          "default": "1",
+          "description": "Number of correction sweeps, at least 1. More passes can help when a correction encounters another collider."
+        },
+        {
+          "name": "usdGen:resolveType",
+          "type": "uniform token",
+          "default": "\"flexible\"",
+          "description": "Flexible moves affected CVs individually and may change segment lengths. Stiff rotates downstream strands about the last clean CV, preserving segment lengths; if the root is affected, it translates the strand.",
+          "allowed": [
+            "flexible",
+            "stiff"
+          ]
+        }
+      ],
+      "workflow": [
+        "Open the linked collide practice scene in usdview and choose Camera > Select Camera > CamMotion (/World/CamMotion). The visible /World/Shield sphere starts clear at frame 0, descends to center Y 0.525 by frame 27, then slides from center Z 0.5 to 0.85 by frame 99 through the 8,000-strand clumped patch.",
+        "Select /World/Groom/Fur/Ops/collide in the Scene Graph, open Window > Noodles Editor and press A in Noodles to show its native controls.",
+        "Select /World/Shield and add it to Noodles. Its editable Mesh subdivisionScheme token is catmullClark; keep that opinion to collide against the smooth limit. In usdview choose Display > Complexity > Very High to see the subdivided sphere. Viewport complexity changes the displayed mesh detail, while native Collide evaluates the authored subdivision scheme independently.",
+        "Inspect the usdGen:colliders relationship: it names both /World/Shield and the invisible closed /World/ScalpVolume under the patch. The second target is a physical collision floor, not a rendered prop or hidden correction outside Collide.",
+        "To edit the motion visually, select /World/Shield in the Scene Graph and add it to Noodles. In the root edit layer choose Write Values > Animation (key at current frame), set Current Frame to 27, then edit the Y component of xformOp:translate. The full keyed scene also has frames 0 and 99; save and reopen it to check all three keys.",
+        "For a fur-only comparison at frame 27 or 99, open Window > Layer Editor and choose Session Layer as the edit target. Select /World/Shield in the Scene Graph, then choose Edit > Make Invisible (Ctrl+H). Wait for the hair to settle and select its visibility property to inspect the invisible value. The Shield still participates in Collide: keep both /World/Shield and /World/ScalpVolume in usdGen:colliders. Choose Edit > Remove Session Visibility (Ctrl+U) to show the sphere again, then restore your previous edit target. This inspection uses a session opinion and needs no source-layer save.",
+        "At frame 27 or 99, compare pushAmount 0 with 1 while keeping offset 0, iterations 128 and flexible resolution. Native correction moves affected fur around the Shield's Catmull-Clark limit and the authored polygon under-patch floor.",
+        "For deep contact, choose cutThenCollide with flexible resolution. Set cutDepthThreshold 0.15 and cutBlendDepth 0.02. Both distances use stage units: 0.15 defines an inset activation depth inside the evaluated subdivision limit, and 0.02 controls how gradually temporary shortening turns on beyond it. Shallow contact bends around the outer collision boundary without triggering the cut.",
+        "In Storm, press Play to inspect contact over the timeline range. Play waits for complete current-frame hair and its converged viewport presentation before advancing; slow cooks slow playback. Manual scrubbing remains progressive. Hold frames 0, 27 and 99 for exact comparisons. Temporary shortening disappears when contact clears. Flexible collision after the cut may still change segment lengths.",
+        "Press Playblast next to Play and choose an MP4 output to record the displayed timeline range at its FPS. Each movie frame waits for complete current-frame hair and viewport presentation; Cancel restores the previous viewer state.",
+        "Try a small positive offset when B-spline smoothing or strand width needs extra clearance, then restore the authored 0 and save the edit-target layer."
+      ],
+      "tips": [
+        "Use a consistently oriented watertight mesh for solid collision. Author catmullClark, loop or bilinear subdivisionScheme to use its evaluated limit surface; use none for polygon collision. Open surfaces and incomplete face subsets provide clearance instead.",
+        "List every physical target in usdGen:colliders, including an invisible closed floor if the patch needs one. The bound scalp also participates in collision.",
+        "The dense 8,000-strand practice scene can cook slowly. Storm Play holds each frame until its hair and viewport presentation are complete. Use Playblast for a movie at the timeline FPS even when interactive playback runs more slowly; manual scrubbing still shows progressively arriving tiles.",
+        "The cut applies to the whole strand. With a partial mask, a weighted point can select shortening that also moves zero-masked CVs; an all-zero strand remains unchanged."
+      ],
+      "pitfalls": [
+        "Default pushAmount=0 produces no correction. For an open surface, offset=0 also produces no correction.",
+        "Open or inconsistently oriented meshes do not define a reliable solid interior. A face subset is a solid only if its selected faces form a watertight mesh.",
+        "An otherwise-valid unsupported or rejected topology warns with the collider path, scheme and reason before polygon fallback. Unsafe geometry, failed limit evaluation or an unmet precision cap can produce a hard diagnostic instead.",
+        "Flexible correction after temporary shortening can change segment lengths. Final control-polygon chord lengths do not identify the prepared retained prefix. Compare incoming and prepared geometry separately when measuring the cut; the full incoming length is available again when deep contact clears.",
+        "Inspect the full strand near concave or multiple colliders. Collide corrects curve CVs and control-polygon segments. Rendered B-splines and strand width can extend beyond that control polygon; a small positive offset can provide extra clearance.",
+        "A GeomSubset with no faces is an error."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/collide.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [
+        "examples/docs/operators/collide.usda"
+      ],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenWind",
+      "title": "Wind",
+      "category": "Deformation",
+      "summary": "Bend strands with steady wind, gusts, and broad or fine traveling billows, resisted by stiffness.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference; CUDA admission rejects this type",
+      "inputs": [
+        "Existing curves",
+        "Cook time for animated gusts"
+      ],
+      "output": "Wind-deflected curves.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:mask",
+          "type": "float",
+          "default": "1.0",
+          "description": "Effect weight from 0 to 1. Connect a UsdGenExpression for variation per curve or per CV."
+        },
+        {
+          "name": "usdGen:direction",
+          "type": "vector3f",
+          "default": "(0, 0, 1)",
+          "description": "Direction of displacement. Use (1, 0, 0) for +X. The vector is normalized, so change strength to increase the bend."
+        },
+        {
+          "name": "usdGen:constStrength",
+          "type": "float",
+          "default": "0.0",
+          "description": "Steady displacement in stage units before stiffness and the root-to-tip weight. Zero gives a calm baseline when gustStrength and both billow strengths are also zero."
+        },
+        {
+          "name": "usdGen:gustStrength",
+          "type": "float",
+          "default": "0.0",
+          "description": "Amount of time-varying noise added to steady strength. Without effective clump cohesion it varies per strand; cohesive CVs share the gust field at their clump rest anchor to the extent of their surviving weights. Set 0 while comparing steady bends."
+        },
+        {
+          "name": "usdGen:stiffness",
+          "type": "float",
+          "default": "0.0",
+          "description": "Resistance from 0 (fully flexible) to 1 (fully resistant with a flat unit ramp). The ramp multiplies this value. Roots stay fixed because Wind also weights displacement from zero at the root to full at the tip."
+        },
+        {
+          "name": "usdGen:stiffness:knots",
+          "type": "float2[]",
+          "default": "[(0, 1), (1, 1)]",
+          "description": "Root-to-tip multiplier for stiffness: each pair is (strand position, multiplier). A high root multiplier and low tip multiplier leave the upper strand more flexible."
+        },
+        {
+          "name": "usdGen:stiffness:interpolation",
+          "type": "uniform token",
+          "default": "\"catmullRom\"",
+          "description": "Interpolation of the stiffness ramp.",
+          "allowed": [
+            "linear",
+            "catmullRom",
+            "bspline",
+            "constant"
+          ]
+        },
+        {
+          "name": "usdGen:billowLowStrength",
+          "type": "float",
+          "default": "0.0",
+          "description": "Amplitude of the broad traveling wave in stage units. Zero disables this band. It follows a root-anchored squared root-to-tip envelope, then mask and stiffness."
+        },
+        {
+          "name": "usdGen:billowLowFrequency",
+          "type": "float",
+          "default": "0.25",
+          "description": "Broad-wave spatial frequency in cycles per stage unit along normalized wind direction. Individual motion samples strand rest positions; effective clump cohesion blends in waves at clump rest anchors. Smaller values make wider billows. Use a finite nonnegative value."
+        },
+        {
+          "name": "usdGen:billowLowRate",
+          "type": "float",
+          "default": "0.2",
+          "description": "Broad-wave travel rate in cycles per second. Smaller values make the billow move more slowly. A negative rate reverses travel."
+        },
+        {
+          "name": "usdGen:billowHighStrength",
+          "type": "float",
+          "default": "0.0",
+          "description": "Amplitude of the finer traveling wave in stage units. Zero disables this band. Its cubed root-to-tip envelope concentrates movement toward tips, then mask and stiffness apply."
+        },
+        {
+          "name": "usdGen:billowHighFrequency",
+          "type": "float",
+          "default": "1.25",
+          "description": "Fine-wave spatial frequency in cycles per stage unit along wind direction, sampled at strand rest positions and effective clump rest anchors. Larger values make closer ripples. Use a finite nonnegative value."
+        },
+        {
+          "name": "usdGen:billowHighRate",
+          "type": "float",
+          "default": "0.8",
+          "description": "Fine-wave travel rate in cycles per second. Larger values make ripples move faster. A negative rate reverses travel."
+        }
+      ],
+      "workflow": [
+        "Open the linked 6,500-strand wind-clumped.usda practice scene in usdview with Storm. Choose Camera > Select Camera > Cam (/World/Cam) for the elevated view, then press Play over frames 0–99 at 24 fps to inspect broad billows and finer faster ripples. Play waits for complete current-frame hair and converged viewport presentation before advancing; slow cooks slow playback, while manual scrubbing remains progressive.",
+        "Press Playblast next to Play and choose an MP4 output to record the displayed timeline range at its FPS. The movie captures each ready viewport frame even when cooking is slower than playback; Cancel restores the previous viewer state.",
+        "Select /World/Groom/Fur/Ops/wind in the Scene Graph, open Window > Noodles Editor and press A in Noodles to show its native controls.",
+        "Start with direction (1, 0, 0), constStrength 0.08, gustStrength 0 and stiffness 0.12. The example uses low strength 0.10, frequency 0.75 and rate 0.24, plus high strength 0.045, frequency 3 and rate 0.96.",
+        "Set billowHighStrength to 0 to isolate the slow broad wave; restore 0.045 to add fine ripples. Try billowLowFrequency 0.375 for twice the wavelength, then restore 0.75.",
+        "Set billowHighRate to 0.48 for slower ripples, then restore 0.96. Compare wind-unclumped.usda at the same frames: both scenes retain the same 6,500 Scatter roots and Wind settings, while Clump enabled changes from on to off. Save the edit-target layer after comparing playback."
+      ],
+      "tips": [
+        "Judge movement during usdview playback. A still frame cannot show the difference between wave frequencies and travel rates.",
+        "Isolate each band by setting the other band’s strength to 0. The low wave has a squared root-to-tip envelope; the high wave concentrates motion toward tips. Roots remain fixed.",
+        "Place Clump upstream of Wind for coherent tuft motion. Gusts and broad billows consume surviving cohesion from coarse to fine; fine billows consume it from fine to coarse. A fully cohesive fine level can leave no coarse share at that CV. Clump amount, profile, mask and strays set the effective weights; any remainder stays individual. Constant wind keeps its authored per-strand strength."
+      ],
+      "pitfalls": [
+        "Zero constant, gust and billow strengths leave curves unchanged.",
+        "Billow frequency must be finite and nonnegative; strengths and rates must be finite. Negative rates reverse travel.",
+        "Billows are coherent waves over rest position and cook time. Gusts start from deterministic per-strand noise, then share clump-anchored motion where effective cohesion survives. A clump ID without weight does not imply shared motion; playback is needed to judge the result."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/wind.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [
+        "examples/docs/operators/wind-clumped.usda",
+        "examples/docs/operators/wind-unclumped.usda"
+      ],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenFreeze",
+      "title": "Freeze",
+      "category": "Workflow",
+      "summary": "Snapshot the chain output at capture time or pass live upstream curves through.",
+      "status": "implemented",
+      "availability": "Schema and runtime",
+      "execution": "CPU reference; CUDA admission rejects this type",
+      "inputs": [
+        "Upstream curves or one frozen:curves snapshot"
+      ],
+      "output": "Frozen snapshot or live curves.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Enable or mute this node. A muted modifier passes its input through; a muted source produces no curves."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Repeatable random seed for draws made by this operator."
+        },
+        {
+          "name": "usdGen:frozen:curves",
+          "type": "rel",
+          "default": null,
+          "description": "Optional single explicit BasisCurves snapshot; otherwise frozen mode captures the chain input."
+        },
+        {
+          "name": "usdGen:frozen:mode",
+          "type": "uniform token",
+          "default": "\"frozen\"",
+          "description": "frozen pins a deep copy; live passes the current chain input through.",
+          "allowed": [
+            "frozen",
+            "live"
+          ]
+        },
+        {
+          "name": "usdGen:frozen:epoch",
+          "type": "uniform string",
+          "default": "\"\"",
+          "description": "Identifier recorded with the snapshot."
+        },
+        {
+          "name": "usdGen:frozen:tier",
+          "type": "uniform token",
+          "default": "\"session\"",
+          "description": "Only session is implemented. sublayer and payload warn and fall back to session.",
+          "allowed": [
+            "session",
+            "sublayer",
+            "payload"
+          ]
+        }
+      ],
+      "workflow": [
+        "Set mode=frozen to pin a deep copy of the current input.",
+        "Set mode=live to pass the chain input onward."
+      ],
+      "tips": [
+        "Use an explicit frozen:curves target when the snapshot is a published asset."
+      ],
+      "pitfalls": [
+        "Only session storage is implemented; sublayer and payload tiers warn and use session.",
+        "A frozen snapshot needs valid, nonempty curve topology."
+      ],
+      "source": [
+        "libs/usdGen/usdGen/ops/freeze.cpp",
+        "libs/usdGenSchema/schema.usda",
+        "tools/docs/utility_fixtures.cpp"
+      ],
+      "examples": [
+        "examples/docs/fixtures/freeze-studio.usda",
+        "examples/docs/fixtures/freeze-fixture.usda"
+      ],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    },
+    {
+      "id": "UsdGenInstance",
+      "title": "Instance",
+      "category": "Reserved",
+      "summary": "Schema vocabulary for placing cards, archives, or spheres at roots. The current operator registry has no Instance kernel, so this prim does not produce instances.",
+      "status": "reserved",
+      "availability": "Schema only; no runtime kernel",
+      "execution": "Unavailable",
+      "inputs": [
+        "Authored prototypes and root curves (planned interface)"
+      ],
+      "output": "No runtime output in this build.",
+      "parameters": [
+        {
+          "name": "usdGen:enabled",
+          "type": "bool",
+          "default": "true",
+          "description": "Reserved common enabled flag; Instance has no current runtime effect."
+        },
+        {
+          "name": "usdGen:seed",
+          "type": "uniform int",
+          "default": "0",
+          "description": "Reserved random seed; no Instance draw runs today."
+        },
+        {
+          "name": "usdGen:primitive",
+          "type": "uniform token",
+          "default": "\"cards\"",
+          "description": "Intended prototype class: cards, archives, or spheres.",
+          "allowed": [
+            "cards",
+            "archives",
+            "spheres"
+          ]
+        },
+        {
+          "name": "usdGen:prototypes",
+          "type": "rel",
+          "default": null,
+          "description": "Intended targets supplying geometry to instance at hair roots."
+        },
+        {
+          "name": "usdGen:instance:weights",
+          "type": "float[]",
+          "default": "[]",
+          "description": "Intended relative selection weights for prototypes."
+        },
+        {
+          "name": "usdGen:instance:orient",
+          "type": "uniform token",
+          "default": "\"surfaceFrame\"",
+          "description": "Intended orientation frame for each prototype.",
+          "allowed": [
+            "surfaceFrame",
+            "curveTangent",
+            "camera",
+            "world"
+          ]
+        },
+        {
+          "name": "usdGen:instance:scale",
+          "type": "float",
+          "default": "1.0",
+          "description": "Intended base scale for each instance."
+        },
+        {
+          "name": "usdGen:instance:scaleRandom",
+          "type": "float2",
+          "default": "(1, 1)",
+          "description": "Intended per-instance scale multiplier range."
+        },
+        {
+          "name": "usdGen:instance:twist",
+          "type": "float",
+          "default": "0.0",
+          "description": "Intended base rotation around the instance axis."
+        },
+        {
+          "name": "usdGen:instance:twistRandom",
+          "type": "float",
+          "default": "0.0",
+          "description": "Intended per-instance twist variation."
+        },
+        {
+          "name": "usdGen:instance:normalOffset",
+          "type": "float",
+          "default": "0.0",
+          "description": "Intended offset from the surface along its normal."
+        },
+        {
+          "name": "usdGen:instance:width",
+          "type": "float",
+          "default": "0.02",
+          "description": "Intended width for generated card geometry."
+        },
+        {
+          "name": "usdGen:instance:length",
+          "type": "float",
+          "default": "0.09",
+          "description": "Intended length for generated card geometry."
+        },
+        {
+          "name": "usdGen:instance:width:knots",
+          "type": "float2[]",
+          "default": "[(0, 1), (1, 1)]",
+          "description": "Intended root-to-tip card width multiplier ramp."
+        },
+        {
+          "name": "usdGen:instance:width:interpolation",
+          "type": "uniform token",
+          "default": "\"catmullRom\"",
+          "description": "Intended interpolation of the card width ramp.",
+          "allowed": [
+            "linear",
+            "catmullRom",
+            "bspline",
+            "constant"
+          ]
+        },
+        {
+          "name": "usdGen:instance:variationPrimvars",
+          "type": "token[]",
+          "default": "[\"displayColor\"]",
+          "description": "Intended primvars to vary among prototype instances."
+        }
+      ],
+      "workflow": [
+        "Do not place this in a production operator stack yet.",
+        "Use published BasisCurves for current fur rendering."
+      ],
+      "tips": [
+        "The schema can preserve intended controls while the instancing path is developed."
+      ],
+      "pitfalls": [
+        "Unavailable: there is no registered UsdGenInstance kernel."
+      ],
+      "source": [
+        "libs/usdGenSchema/schema.usda",
+        "libs/usdGen/usdGen/opRegistry.cpp",
+        "libs/usdGenSchema/schema.usda"
+      ],
+      "examples": [],
+      "authoringGuide": "docs/reference/operator-authoring.md",
+      "media": {
+        "image": null,
+        "video": null
+      }
+    }
+  ]
+}

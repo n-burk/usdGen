@@ -134,11 +134,13 @@ index path currently lacks that consumer for both CUDA and Vulkan.
 
 | | |
 |---|---|
+| [Visual manual](docs/site/index.html) | Browse the groom workflow, operator reference, and illustrated examples locally |
 | [docs/README.md](docs/README.md) | Index of user-facing docs and historical notes |
 | [docs/pomade-tool.md](docs/pomade-tool.md) | Pomade workspace, modes, and hotkeys |
 | [docs/storm-fur.md](docs/storm-fur.md) | Storm hair shading and self-shadowing |
 | [docs/moonray-fur.md](docs/moonray-fur.md) | Instanced fur through the MoonRay Hydra delegate |
 | [examples/README.md](examples/README.md) | Scenes and how to view them |
+| [ALab stoat example](examples/alab/README.md) | Prepare the licensed character asset and inspect its guide-driven coat |
 | [plan/README.md](plan/README.md) | Design record. It is not the build guide |
 
 Regenerating schema resources, test tiers, and coding conventions are in [AGENTS.md](AGENTS.md).

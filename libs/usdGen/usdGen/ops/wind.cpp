@@ -1,10 +1,10 @@
 // usdGen — UsdGenWindOp implementation. 02-schema.md §2.8, 04 §4.
 // Time-dependent force field (see ops/wind.h for the full contract):
-// constant deflection plus a per-strand SeExpr FBM gust that drifts with the
-// cook time, resisted by a groom-wide stiffness and its hairT ramp, with the
-// deflection scaled by hairT so roots never move.
+// constant deflection, a per-strand SeExpr FBM gust, and two opt-in coherent
+// traveling billow bands. All are resisted by stiffness and its hairT ramp;
+// their root-anchored envelopes leave roots fixed.
 //
-// Capture pins the time-independent per-curve rest roots (opUtil::RestPoint:
+// Capture pins the time-independent per-curve and per-CV rest positions (opUtil::RestPoint:
 // the rest plane when complete, else the current positions) and validates
 // every literal and connected value fail-closed. Evaluate re-samples the gust
 // every frame from the live (time, seed): the readsTime/rebuild split —
@@ -15,6 +15,7 @@
 // stiffness and its ramp are groom-wide; the mask envelopes per CV.
 #include "usdGen/ops/wind.h"
 
+#include "usdGen/clumpMotion.h"
 #include "usdGen/opParams.h"
 #include "usdGen/ops/opUtil.h"
 #include "usdGenMath/usdGenMath/hash.h"
@@ -49,10 +50,15 @@ constexpr float kGustTimeRate = 0.5f;
 constexpr int kGustOctaves = 3;
 constexpr float kGustLacunarity = 2.0f;
 constexpr float kGustGain = 0.5f;
+constexpr double kTau = 6.2831853071795864769;
 
 struct UsdGenWindCapture final : public UsdGenCapturePayload
 {
     VtVec3fArray rootRest;   // per-curve rest root, pinned at capture
+    VtVec3fArray cvRest;     // per-CV rest position for coherent billow
+    UsdGenClumpMotion clumps; // native group anchors and effective per-CV cohesion
+    bool hasActiveClumps = false;
+    std::vector<size_t> groupBase; // flattened group offsets for chunk-local gust cache
     uint64_t upstreamTopologyVersion = 0;
     uint64_t upstreamValueVersion = 0;
     uint32_t upstreamCurves = 0;
@@ -101,6 +107,19 @@ void HashVec3(uint32_t seed, uint64_t curveId, float out[3])
     out[2] = UsdGenDraw01(int(seed), curveId, kSaltWind + 2u);
 }
 
+float SampleGust(uint32_t seed, uint64_t id, GfVec3f const &root, float drift)
+{
+    float hvec[3];
+    HashVec3(seed, id, hvec);
+    float const in3[3] = {root[0] * kGustSpaceFreq + hvec[0] + drift,
+                          root[1] * kGustSpaceFreq + hvec[1],
+                          root[2] * kGustSpaceFreq + hvec[2]};
+    float out1 = 0.0f;
+    SeExpr2::FBM<3, 1, false, float>(in3, &out1,
+                                     kGustOctaves, kGustLacunarity, kGustGain);
+    return 2.0f * out1 - 1.0f;
+}
+
 }  // namespace
 
 static TfTokenVector _topoParams = [] {
@@ -113,6 +132,12 @@ static TfTokenVector _valueParams = [] {
     v.push_back(TfToken("direction"));
     v.push_back(TfToken("constStrength"));
     v.push_back(TfToken("gustStrength"));
+    v.push_back(TfToken("billowLowStrength"));
+    v.push_back(TfToken("billowLowFrequency"));
+    v.push_back(TfToken("billowLowRate"));
+    v.push_back(TfToken("billowHighStrength"));
+    v.push_back(TfToken("billowHighFrequency"));
+    v.push_back(TfToken("billowHighRate"));
     v.push_back(TfToken("stiffness"));
     v.push_back(TfToken("stiffness:knots"));
     v.push_back(TfToken("stiffness:interpolation"));
@@ -155,11 +180,20 @@ bool UsdGenWindOp::Bind(UsdGenParamView const &params, UsdGenDiagnostics *diag)
             return false;
         }
     }
-    for (TfToken const *name : {&sConst, &sGust, &sStiffness}) {
+    for (TfToken const *name : {&sConst, &sGust, &sStiffness,
+                                &sLowStrength, &sLowFrequency, &sLowRate,
+                                &sHighStrength, &sHighFrequency, &sHighRate}) {
         double const v = params.GetDoubleLiteral(*name, 0.0);
         if (!Finite(v)) {
             if (diag) diag->Error("UsdGenWind: usdGen:" + name->GetString() +
                                   " must be finite");
+            return false;
+        }
+    }
+    for (TfToken const *name : {&sLowFrequency, &sHighFrequency}) {
+        if (params.GetDoubleLiteral(*name, 0.0) < 0.0) {
+            if (diag) diag->Error("UsdGenWind: usdGen:" + name->GetString() +
+                                  " must be nonnegative");
             return false;
         }
     }
@@ -220,10 +254,34 @@ bool UsdGenWindOp::Capture(
     std::string spansError;
     if (!opUtil::CurveSpans(upstream, &spans, &spansError))
         return fail("upstream CV topology " + spansError);
+    std::string clumpError;
+    auto const *prior = dynamic_cast<UsdGenWindCapture const *>(ctx.previousCapture);
+    UsdGenClumpMotion const *previousMotion = prior ? &prior->clumps : &cap.clumps;
+    if (!UsdGenBuildClumpMotion(upstream, &cap.clumps, &clumpError,
+                                previousMotion))
+        return fail("upstream clump motion metadata " + clumpError);
+    bool anyCohesion = false;
+    for (UsdGenClumpMotionLevel const &level : cap.clumps.levels) {
+        for (float w : level.weight) {
+            if (w > 0.0f) { anyCohesion = true; break; }
+        }
+        if (anyCohesion) break;
+    }
+    cap.hasActiveClumps = anyCohesion;
+    cap.groupBase.clear();
+    if (cap.hasActiveClumps) {
+        cap.groupBase.assign(cap.clumps.levels.size() + 1, 0);
+        for (size_t level = 0; level < cap.clumps.levels.size(); ++level)
+            cap.groupBase[level + 1] = cap.groupBase[level] +
+                cap.clumps.levels[level].groups.size();
+    }
     cap.upstreamTopologyVersion = upstream.topologyVersion;
     cap.upstreamValueVersion = upstream.valueVersion;
     cap.upstreamCurves = upstream.totalCurves;
     cap.rootRest.clear();
+    cap.cvRest.resize(upstream.totalCvs);
+    for (uint32_t cv = 0; cv != upstream.totalCvs; ++cv)
+        cap.cvRest[cv] = opUtil::RestPoint(upstream, cv);
     if (!p) {
         cap.rootRest.resize(upstream.totalCurves);
         for (uint32_t c = 0; c != upstream.totalCurves; ++c)
@@ -235,11 +293,19 @@ bool UsdGenWindOp::Capture(
     UsdGenParamField const directionField = p->GetScalarField(sDirection, 0.0);
     UsdGenParamField const constField = p->GetScalarField(sConst, 0.0);
     UsdGenParamField const gustField = p->GetScalarField(sGust, 0.0);
+    UsdGenParamField const lowStrengthField = p->GetScalarField(sLowStrength, 0.0);
+    UsdGenParamField const highStrengthField = p->GetScalarField(sHighStrength, 0.0);
     UsdGenParamField const maskField = p->GetScalarField(sMask, 1.0);
     if (directionField.connected && directionField.components != 3)
         return fail("connected direction must be vector3f");
-    if (!Finite(p->GetDouble(sStiffness, 0.0)))
-        return fail("groom usdGen:stiffness must be finite");
+    for (TfToken const *name : {&sStiffness, &sLowFrequency, &sLowRate,
+                                &sHighFrequency, &sHighRate}) {
+        if (!Finite(p->GetDouble(*name, 0.0)))
+            return fail("groom usdGen:" + name->GetString() + " must be finite");
+    }
+    for (TfToken const *name : {&sLowFrequency, &sHighFrequency})
+        if (p->GetDouble(*name, 0.0) < 0.0)
+            return fail("groom usdGen:" + name->GetString() + " must be nonnegative");
     uint32_t const R = upstream.totalCurves;
     for (uint32_t c = 0; c != R; ++c) {
         uint32_t const root = spans[c];
@@ -255,6 +321,9 @@ bool UsdGenWindOp::Capture(
         }
         if (!Finite(constField.Value(c, root)) || !Finite(gustField.Value(c, root)))
             return fail("per-strand constStrength/gustStrength must be finite");
+        if (!Finite(lowStrengthField.Value(c, root)) ||
+            !Finite(highStrengthField.Value(c, root)))
+            return fail("per-strand billow strengths must be finite");
         for (uint32_t cv = spans[c]; cv != spans[c + 1]; ++cv) {
             if (!Finite(maskField.Value(c, cv)))
                 return fail("per-CV mask must be finite");
@@ -279,14 +348,24 @@ void UsdGenWindOp::Evaluate(
         p ? p->GetScalarField(sConst, 0.0) : UsdGenParamField{0.0};
     UsdGenParamField const gustField =
         p ? p->GetScalarField(sGust, 0.0) : UsdGenParamField{0.0};
+    UsdGenParamField const lowStrengthField =
+        p ? p->GetScalarField(sLowStrength, 0.0) : UsdGenParamField{0.0};
+    UsdGenParamField const highStrengthField =
+        p ? p->GetScalarField(sHighStrength, 0.0) : UsdGenParamField{0.0};
     UsdGenParamField const maskField =
         p ? p->GetScalarField(sMask, 1.0) : UsdGenParamField{1.0};
     GfVec3f litDirection(0.0f, 0.0f, 1.0f);
     double stiffness = 0.0;
+    double lowFrequency = 0.25, highFrequency = 1.25;
+    double lowRate = 0.2, highRate = 0.8;
     if (p) {
         VtValue const v = p->GetVtValue(sDirection, VtValue());
         if (v.IsHolding<GfVec3f>()) litDirection = v.UncheckedGet<GfVec3f>();
         stiffness = p->GetDouble(sStiffness, 0.0);
+        lowFrequency = p->GetDouble(sLowFrequency, lowFrequency);
+        highFrequency = p->GetDouble(sHighFrequency, highFrequency);
+        lowRate = p->GetDouble(sLowRate, lowRate);
+        highRate = p->GetDouble(sHighRate, highRate);
     }
     // The cook time in seconds, with the scheduler's own conversion guard
     // (scheduler.cpp): timecodes divided by a finite positive rate, else raw.
@@ -295,6 +374,8 @@ void UsdGenWindOp::Evaluate(
     double const rate = ctx.desc ? ctx.desc->timeCodesPerSecond : 0.0;
     double tSec = std::isfinite(rate) && rate > 0.0 ? ctx.time / rate : ctx.time;
     if (!std::isfinite(tSec)) tSec = 0.0;
+    double const lowPhase = kTau * UsdGenDraw01(ctx.seed, 0, kSaltWind + 3u);
+    double const highPhase = kTau * UsdGenDraw01(ctx.seed, 0, kSaltWind + 4u);
     float const drift = float(tSec) * kGustTimeRate;
     float const *lutPtr = nullptr;
     VtVec2fArray const knots = ReadRampKnots(p, sKnots);
@@ -316,6 +397,29 @@ void UsdGenWindOp::Evaluate(
     auto const *cvOff = view->cvOffsets;
     bool const ragged = cvOff != nullptr;
 
+    // Cache each group's time-varying FBM once per chunk sweep. The tables
+    // are thread-local and stamped, so parallel chunks never mutate a shared
+    // capture and no per-CV lookup or allocation is needed.
+    thread_local std::vector<float> sampledGroupGust;
+    thread_local std::vector<uint64_t> sampledGroupStamp;
+    thread_local uint64_t sampleEpoch = 0;
+    bool const hasClumps = cap.hasActiveClumps;
+    if (hasClumps) {
+        if (sampledGroupGust.size() < cap.groupBase.back()) {
+            sampledGroupGust.resize(cap.groupBase.back());
+            sampledGroupStamp.resize(cap.groupBase.back(), 0);
+        }
+        if (++sampleEpoch == 0) {
+            std::fill(sampledGroupStamp.begin(), sampledGroupStamp.end(), 0);
+            sampleEpoch = 1;
+        }
+    }
+    size_t const activeLevels = hasClumps ? cap.clumps.levels.size() : 0;
+    std::vector<uint32_t> curveGroup(activeLevels, UINT32_MAX);
+    std::vector<float> curveGroupGust(activeLevels, 0.0f);
+    std::vector<float> curveGroupLow(activeLevels, 0.0f);
+    std::vector<float> curveGroupHigh(activeLevels, 0.0f);
+
     for (uint32_t c = 0; c < view->curveCount; ++c) {
         size_t const n = ragged ? size_t(cvOff[c + 1] - cvOff[c]) : size_t(view->cvCount);
         size_t const g = ragged ? size_t(cvOff[c] - cvOff[0]) : view->Cv(c, 0);
@@ -334,6 +438,37 @@ void UsdGenWindOp::Evaluate(
         dir *= inv;
         float const c0 = float(constField.Value(curve, cvBase + g));
         float const g0 = float(gustField.Value(curve, cvBase + g));
+        float const lowStrength = float(lowStrengthField.Value(curve, cvBase + g));
+        float const highStrength = float(highStrengthField.Value(curve, cvBase + g));
+        if (hasClumps) {
+            for (size_t li = 0; li < cap.clumps.levels.size(); ++li) {
+                UsdGenClumpMotionLevel const &level = cap.clumps.levels[li];
+                uint32_t const groupIndex = curve < level.groupForCurve.size()
+                    ? level.groupForCurve[curve] : UINT32_MAX;
+                curveGroup[li] = groupIndex;
+                curveGroupGust[li] = curveGroupLow[li] = curveGroupHigh[li] = 0.0f;
+                if (groupIndex >= level.groups.size()) continue;
+                UsdGenClumpMotionGroup const &group = level.groups[groupIndex];
+                if (g0 != 0.0f) {
+                    size_t const slot = cap.groupBase[li] + groupIndex;
+                    if (sampledGroupStamp[slot] != sampleEpoch) {
+                        sampledGroupGust[slot] = SampleGust(
+                            ctx.seed, group.centerId, group.restAnchor, drift);
+                        sampledGroupStamp[slot] = sampleEpoch;
+                    }
+                    curveGroupGust[li] = g0 * sampledGroupGust[slot];
+                }
+                if (lowStrength != 0.0f || highStrength != 0.0f) {
+                    double const coordinate = GfDot(group.restAnchor, dir);
+                    if (lowStrength != 0.0f)
+                        curveGroupLow[li] = lowStrength * float(std::sin(
+                            kTau * (lowFrequency * coordinate - lowRate * tSec) + lowPhase));
+                    if (highStrength != 0.0f)
+                        curveGroupHigh[li] = highStrength * float(std::sin(
+                            kTau * (highFrequency * coordinate - highRate * tSec) + highPhase));
+                }
+            }
+        }
         float gust = 0.0f;
         if (g0 != 0.0f) {
             GfVec3f const root = curve < cap.rootRest.size()
@@ -358,7 +493,67 @@ void UsdGenWindOp::Evaluate(
             float const flex =
                 std::clamp(1.0f - float(stiffness) * stiffScale, 0.0f, 1.0f);
             float const mask = std::clamp(float(maskField.Value(curve, cv)), 0.0f, 1.0f);
-            float const d = strength * flex * mask * t;
+            float billow = 0.0f;
+            float lowBillow = 0.0f, highBillow = 0.0f;
+            if (lowStrength != 0.0f || highStrength != 0.0f) {
+                GfVec3f const rest = cv < cap.cvRest.size()
+                    ? cap.cvRest[cv] : GfVec3f(inPx[o], inPy[o], inPz[o]);
+                double const coordinate = GfDot(rest, dir);
+                if (lowStrength != 0.0f)
+                    lowBillow = lowStrength * float(std::sin(
+                        kTau * (lowFrequency * coordinate - lowRate * tSec) + lowPhase)) * t * t;
+                if (highStrength != 0.0f)
+                    highBillow = highStrength * float(std::sin(
+                        kTau * (highFrequency * coordinate - highRate * tSec) + highPhase)) * t * t * t;
+                billow = lowBillow + highBillow;
+            }
+            // Keep the legacy multiplication order bit-for-bit when the new
+            // bands are disabled; adding billow changes only opted-in cooks.
+            float d = strength * flex * mask * t;
+            if (billow != 0.0f) d += billow * flex * mask;
+            if (hasClumps) {
+            // Blend animated components by hierarchy. Gust and broad, low
+            // billow favor coarse groups; high billow favors fine groups.
+            // Each component retains an independent residual. Thus a fully
+            // cohesive child can flutter together while its parent still
+            // supplies the broad motion. The constant force stays per strand.
+            float coarseResidual = 1.0f;
+            float fineResidual = 1.0f;
+            float coarseDynamic = 0.0f;
+            float fineDynamic = 0.0f;
+            bool grouped = false;
+            for (size_t li = 0; li < cap.clumps.levels.size(); ++li) {
+                UsdGenClumpMotionLevel const &level = cap.clumps.levels[li];
+                if (curveGroup[li] >= level.groups.size() || cv >= level.weight.size()) continue;
+                float const w = std::clamp(level.weight[cv], 0.0f, 1.0f);
+                if (w == 0.0f) continue;
+                float const contribution = coarseResidual * w;
+                coarseResidual *= 1.0f - w;
+                grouped = true;
+                coarseDynamic += contribution *
+                    (curveGroupGust[li] * t + curveGroupLow[li] * t * t);
+                if (coarseResidual == 0.0f) break;
+            }
+            if (highStrength != 0.0f) {
+                for (size_t li = cap.clumps.levels.size(); li-- > 0;) {
+                    UsdGenClumpMotionLevel const &level = cap.clumps.levels[li];
+                    if (curveGroup[li] >= level.groups.size() || cv >= level.weight.size()) continue;
+                    float const w = std::clamp(level.weight[cv], 0.0f, 1.0f);
+                    if (w == 0.0f) continue;
+                    float const contribution = fineResidual * w;
+                    fineResidual *= 1.0f - w;
+                    grouped = true;
+                    fineDynamic += contribution * curveGroupHigh[li] * t * t * t;
+                    if (fineResidual == 0.0f) break;
+                }
+            }
+            if (grouped) {
+                float const scale = flex * mask;
+                d = c0 * scale * t +
+                    (coarseResidual * (gust * t + lowBillow) + coarseDynamic +
+                     fineResidual * highBillow + fineDynamic) * scale;
+            }
+            }
             if (d == 0.0f) {
                 px[o] = inPx[o]; py[o] = inPy[o]; pz[o] = inPz[o];
                 continue;

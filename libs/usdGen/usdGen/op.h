@@ -23,6 +23,7 @@
 #include "pxr/base/tf/token.h"
 
 #include <memory>
+#include <atomic>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -229,6 +230,9 @@ struct UsdGenCapturePayload : public UsdGenCapture
 struct UsdGenCaptureContext
 {
     UsdGenGraphDesc const *desc = nullptr;   // surfaces, maps, density scales
+    // Prior committed payload for read-only reuse during a recapture. It
+    // remains owned by the node until Capture succeeds and commits.
+    UsdGenCapture const *previousCapture = nullptr;
     UsdGenParamView const *params = nullptr; // this node's resolved parameters and ramps
     UsdGenReferenceSet const **references = nullptr; // resolved ReferenceInputs(), evaluated
     UsdGenResolvedReferenceValue const **resolvedReferences = nullptr;
@@ -266,6 +270,10 @@ struct UsdGenEvalContext
     UsdGenMapBindingDesc const *mapBindings = nullptr;
     uint32_t              mapBindingCount = 0;
     uint32_t seed = 0;
+    // Kernels cannot append diagnostics from parallel chunk workers.  They
+    // publish the first deterministic failure code here; the commit thread
+    // converts it to a failed cook after the sweep joins.
+    std::atomic<uint32_t> *failureCode = nullptr;
 };
 
 /// The operator kernel interface. Five M1 types: UsdGenScatterOp,
@@ -282,6 +290,12 @@ public:
     /// because cull mode exists.
     virtual UsdGenTopoFx TopologyEffect() const { return UsdGenTopoFx::None; }
     virtual UsdGenRole Role() const { return UsdGenRole::Curves; }
+    /// Evaluate reads the live cook time (and potentially seconds via the
+    /// description's timeCodesPerSecond), independent of authored samples.
+    virtual bool ReadsTime() const { return false; }
+    /// Capture reads scene inputs sampled at the current frame. The imaging
+    /// owner must refresh the description on frame-only scene-global dirties.
+    virtual bool SamplesFrameInputs() const { return false; }
     /// C1-frozen parameter partition (02 §6 rows; docs/freezes/C1.md):
     /// TopologyParameters = capture/topology-class edits, ValueParameters =
     /// per-frame edits. The union must equal the node's mapped property set
@@ -295,6 +309,10 @@ public:
     virtual TfSpan<const TfToken> OutputPrimvars() const { return {}; }
     /// Upstream planes this operator reads, in slot order.
     virtual TfSpan<const TfToken> InputPrimvars() const { return {}; }
+    /// True when Evaluate remaps every inherited vertex-domain extra plane.
+    /// The scheduler then materializes private outputs and exposes matching
+    /// input/output descriptors through UsdGenChunkView.
+    virtual bool RemapsVertexPlanes() const { return false; }
     /// Exact number of geometry-producing usdGen:input edges consumed by
     /// this kernel. This is deliberately separate from IsGenerator(): Grow
     /// owns its generated strand topology, but still consumes one upstream

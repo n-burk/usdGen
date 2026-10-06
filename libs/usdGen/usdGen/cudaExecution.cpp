@@ -70,6 +70,39 @@ float CudaWidthBlendWeight(UsdGenGraphDesc const& desc, UsdGenNodeDesc const& no
     if (!(weight > 0.0)) return 0.0f;
     return weight >= 1.0 ? 1.0f : static_cast<float>(weight);
 }
+bool ValidateCudaClumpMotionInputs(UsdGenGraphDesc const& desc,
+                                   UsdGenDiagnostics* diagnostics) {
+    // This descriptor-only check runs with and without a CUDA build. An
+    // imported CurveSource may already carry clump motion planes; Noise's
+    // device kernel cannot consume them, even though no Clump node appears.
+    for (auto const& node : desc.nodes) {
+        if (node.type != TfToken("UsdGenNoise")) continue;
+        std::vector<SdfPath> pending(node.inputs.begin(), node.inputs.end());
+        std::set<SdfPath> visited;
+        while (!pending.empty()) {
+            SdfPath const path = pending.back();
+            pending.pop_back();
+            if (!visited.insert(path).second) continue;
+            auto const predecessor = std::find_if(desc.nodes.begin(), desc.nodes.end(),
+                [&](auto const& candidate) { return candidate.path == path; });
+            if (predecessor == desc.nodes.end()) continue;
+            if (predecessor->type != TfToken("UsdGenCurveSource")) {
+                pending.insert(pending.end(), predecessor->inputs.begin(),
+                               predecessor->inputs.end());
+                continue;
+            }
+            for (auto const& curves : desc.curveSets) {
+                if (std::find(predecessor->curves.begin(), predecessor->curves.end(),
+                              curves.path) == predecessor->curves.end()) continue;
+                for (auto const& plane : curves.authoredPlanes)
+                    if (plane.name.GetString().rfind("clumpWeight_", 0) == 0)
+                        return Fail(diagnostics,
+                            "CUDA Noise does not support imported clump motion planes");
+            }
+        }
+    }
+    return true;
+}
 #ifdef USDGEN_ENABLE_CUDA
 // The per-operator expression allowlist is shared with the CPU lane and the
 // compiler (expressionTargets.cpp). Keeping a second copy here is exactly how
@@ -2575,6 +2608,7 @@ bool BuildCudaGraphLayout(UsdGenGraphDesc const& desc, CudaGraphLayout* result,
 } // namespace
 
 bool ValidateCudaGraph(UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnostics) {
+    if (!ValidateCudaClumpMotionInputs(desc, diagnostics)) return false;
 #ifndef USDGEN_ENABLE_CUDA
     (void)desc;
     return Fail(diagnostics, "backend is not built");

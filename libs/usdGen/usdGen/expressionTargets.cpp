@@ -506,7 +506,9 @@ bool ValidateSculptLayer(UsdGenNodeDesc const &node, std::vector<std::string> *e
 bool ValidateWind(UsdGenNodeDesc const &node, std::vector<std::string> *errors)
 {
     static const std::set<std::string> floats{
-        "constStrength", "gustStrength", "stiffness", "mask"};
+        "constStrength", "gustStrength", "stiffness", "mask",
+        "billowLowStrength", "billowLowFrequency", "billowLowRate",
+        "billowHighStrength", "billowHighFrequency", "billowHighRate"};
     std::set<std::string> seen;
     bool ok = true;
     for (auto const &binding : node.expressionBindings) {
@@ -521,8 +523,11 @@ bool ValidateWind(UsdGenNodeDesc const &node, std::vector<std::string> *errors)
             ok = Reject(errors, "unsupported or incorrectly typed Wind expression " + name);
             continue;
         }
-        if ((boolean || name == "stiffness") && binding.domain != Domain::Groom)
-            ok = Reject(errors, "Wind enabled/stiffness require groom evaluation");
+        const bool groomOnly = boolean || name == "stiffness" ||
+            name == "billowLowFrequency" || name == "billowHighFrequency" ||
+            name == "billowLowRate" || name == "billowHighRate";
+        if (groomOnly && binding.domain != Domain::Groom)
+            ok = Reject(errors, "Wind " + name + " requires groom evaluation");
         else if (name != "mask" && binding.domain == Domain::Point)
             ok = Reject(errors, "Wind " + name + " requires groom/primitive evaluation");
     }
@@ -556,7 +561,8 @@ bool ValidateExprOp(UsdGenNodeDesc const &node, std::vector<std::string> *errors
 /// groom-wide; the mask is sampled per CV.
 bool ValidateCollide(UsdGenNodeDesc const &node, std::vector<std::string> *errors)
 {
-    static const std::set<std::string> floats{"offset", "pushAmount", "mask"};
+    static const std::set<std::string> floats{
+        "offset", "pushAmount", "mask", "cutDepthThreshold", "cutBlendDepth"};
     std::set<std::string> seen;
     bool ok = true;
     for (auto const &binding : node.expressionBindings) {
