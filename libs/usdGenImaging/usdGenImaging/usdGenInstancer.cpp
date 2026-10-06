@@ -25,6 +25,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <new>
 
 #if defined(__aarch64__)
 #include <arm_neon.h>
@@ -600,10 +601,22 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
     out.instancerPath = instancerPath;
     out.prototypePaths = protoPaths;
     out.instanceIndices.assign(nProtos, VtIntArray());
-    out.translations.resize(n);
-    out.rotations.resize(n);
-    out.scales.resize(n);
-    out.prototypeIndex.resize(n);
+    // Deferred-init sizing (bit-identical): resize(n) value-initializes
+    // (~44MB of zeroes here) that the Bake loop below overwrites in full:
+    // every lane of every array on both the spheres and the cards path,
+    // while the _Fail exits discard `out` unread, so no uninitialized
+    // element is ever observed. The arrays size through resize(n, fill)
+    // with an empty filler over uninitialized storage instead. `out` is
+    // function-local, so every array is fresh (null) and the fill runs
+    // exactly once per array at full range.
+    auto noInit = [](auto *b, auto *e) {
+        (void)b;
+        (void)e;
+    };
+    out.translations.resize(n, noInit);
+    out.rotations.resize(n, noInit);
+    out.scales.resize(n, noInit);
+    out.prototypeIndex.resize(n, noInit);
 
     for (uint32_t c = 0; c != n; ++c) {
         uint64_t const curveId = curves.curveId[c];
@@ -759,19 +772,31 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
             plane.interpolation = TfToken("instance");
             plane.type = TfToken("float");
             plane.arity = 3;
-            plane.f.resize(size_t(n) * 3);
+            // Uninitialized sizing (bit-identical): the resize + full
+            // overwrite below folds into resize(count, fill), whose filler
+            // runs over uninitialized storage. `plane` is function-local, so
+            // the fill runs exactly once at full range. Same bytes either way.
+            size_t const count3 = size_t(n) * 3;
             if (!wantColorPerCv) {
                 // Per-curve colors are contiguous GfVec3f == 3 floats: one
                 // copy instead of a strided per-component loop. Same bytes.
-                std::memcpy(plane.f.data(), input.displayColor.cdata(),
-                            size_t(n) * 3 * sizeof(float));
+                void const *src = input.displayColor.cdata();
+                plane.f.resize(count3, [src](float *b, float *e) {
+                    std::memcpy(b, src,
+                                size_t(e - b) * sizeof(float));
+                });
             } else {
-                for (uint32_t c = 0; c != n; ++c) {
-                    GfVec3f const v = input.displayColor[spans[c]];
-                    plane.f[size_t(c) * 3 + 0] = v[0];
-                    plane.f[size_t(c) * 3 + 1] = v[1];
-                    plane.f[size_t(c) * 3 + 2] = v[2];
-                }
+                GfVec3f const *colors = input.displayColor.cdata();
+                uint32_t const *offsets = spans.data();
+                plane.f.resize(count3, [colors, offsets](float *b, float *e) {
+                    float *d = b;
+                    for (uint32_t c = 0; d != e; ++c, d += 3) {
+                        GfVec3f const v = colors[offsets[c]];
+                        new (d + 0) float(v[0]);
+                        new (d + 1) float(v[1]);
+                        new (d + 2) float(v[2]);
+                    }
+                });
             }
             out.varyings.push_back(plane);
             continue;
@@ -805,15 +830,23 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
                 continue;
             }
             if (found->type == TfToken("float")) {
-                plane.f.resize(expect);
-                for (uint32_t c = 0; c != n; ++c)
-                    for (uint32_t k = 0; k != found->arity; ++k)
-                        plane.f[size_t(c) * found->arity + k] = found->f[k];
+                float const *vals = found->f.cdata();
+                uint32_t const arity = found->arity;
+                plane.f.resize(expect, [vals, arity](float *b, float *e) {
+                    for (float *d = b; d != e;) {
+                        for (uint32_t k = 0; k != arity; ++k, ++d)
+                            new (d) float(vals[k]);
+                    }
+                });
             } else {
-                plane.i.resize(expect);
-                for (uint32_t c = 0; c != n; ++c)
-                    for (uint32_t k = 0; k != found->arity; ++k)
-                        plane.i[size_t(c) * found->arity + k] = found->i[k];
+                int const *vals = found->i.cdata();
+                uint32_t const arity = found->arity;
+                plane.i.resize(expect, [vals, arity](int *b, int *e) {
+                    for (int *d = b; d != e;) {
+                        for (uint32_t k = 0; k != arity; ++k, ++d)
+                            new (d) int(vals[k]);
+                    }
+                });
             }
         } else if (found->interpolation == TfToken("uniform")) {
             if ((found->type == TfToken("float") &&
