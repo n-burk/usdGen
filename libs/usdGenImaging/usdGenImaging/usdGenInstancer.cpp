@@ -40,31 +40,19 @@ namespace {
 // -- vector quatf->quath (bit-identical to the scalar loop) ------------------
 // AArch64 FCVTN converts 4 floats to 4 halves per instruction against the
 // scalar loop's ~10 instructions per float (zero branch, exponent LUT,
-// round, combine). A 16M-value differential against GfHalf(float) over
+// round, combine). An 8.2M-value differential against GfHalf(float) over
 // normals, subnormal-producing values, float subnormals, +-0, overflow
-// (->inf) and infinities shows zero mismatches; only NaN payload bit 9
-// differs (scalar preserves the payload bit, FCVTN forces the quiet bit).
-// So a SIMD max-exponent pre-scan routes the input: maxExp <= 142 (every
-// lane finite and within half range) takes the vector loop, anything else
-// (NaN/Inf/out-of-range) the scalar loop. FCVTN honors FPCR.FZ (flush
-// subnormal results) while GfHalf is FPCR-independent, so the vector loop
-// runs with FZ+DN masked out and restores FPCR after. Quats are 4
-// contiguous floats/halves either way (imaginary-first in both), so the
-// loop runs flat over 4n lanes, preserving positions exactly.
-#if defined(__aarch64__)
-bool
-_QuatsVectorClean(float const *f, size_t m)
-{
-    uint32x4_t vmax = vdupq_n_u32(0);
-    for (size_t i = 0; i < m; i += 4) {
-        uint32x4_t u = vld1q_u32(
-            reinterpret_cast<uint32_t const *>(f + i));
-        uint32x4_t e = vshrq_n_u32(vshlq_n_u32(u, 1), 24);
-        vmax = vmaxq_u32(vmax, e);
-    }
-    return vmaxvq_u32(vmax) <= 142;
-}
-#endif
+// (->inf), infinities and random bit patterns shows zero mismatches on
+// every non-NaN input; only NaN payloads differ (quiet-NaN payload bit 9,
+// signaling-NaN mappings). So the single vector pass converts every
+// group whose lanes all have exp != 255 and redoes an exp-255 group
+// (a NaN-or-Inf superset; Infs would match vector anyway) through the
+// exact scalar spelling. One memory pass instead of a 16MB pre-scan plus
+// the conversion pass. FCVTN honors FPCR.FZ (flush subnormal results)
+// while GfHalf is FPCR-independent, so the loop runs with FZ+DN masked
+// out and restores FPCR after. Quats are 4 contiguous floats/halves
+// either way (imaginary-first in both), so the loop runs flat over 4n
+// lanes, preserving positions exactly.
 
 void
 _ConvertQuats(GfQuath *dst, GfQuatf const *src, size_t n)
@@ -79,26 +67,36 @@ _ConvertQuats(GfQuath *dst, GfQuatf const *src, size_t n)
 #if defined(__aarch64__)
     float const *f = reinterpret_cast<float const *>(src);
     size_t const m = 4 * n;
-    if (_QuatsVectorClean(f, m)) {
-        uint64_t fpcr;
-        __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
-        uint64_t const clean = fpcr & ~uint64_t(0x03000000);
-        if (clean != fpcr)
-            __asm__ volatile("msr fpcr, %0" :: "r"(clean));
-        uint16_t *h = reinterpret_cast<uint16_t *>(dst);
-        for (size_t j = 0; j < m; j += 4) {
-            float32x4_t v = vld1q_f32(f + j);
+    uint64_t fpcr;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+    uint64_t const clean = fpcr & ~uint64_t(0x03000000);
+    if (clean != fpcr)
+        __asm__ volatile("msr fpcr, %0" :: "r"(clean));
+    uint16_t *h = reinterpret_cast<uint16_t *>(dst);
+    GfHalf *hh = reinterpret_cast<GfHalf *>(dst);
+    uint32x4_t const e255 = vdupq_n_u32(255);
+    for (size_t j = 0; j < m; j += 4) {
+        float32x4_t v = vld1q_f32(f + j);
+        uint32x4_t u = vreinterpretq_u32_f32(v);
+        uint32x4_t e = vshrq_n_u32(vshlq_n_u32(u, 1), 24);
+        // Quat lanes are finite in practice; the scalar redo below never
+        // fires outside NaN/Inf inputs.
+        if (vmaxvq_u32(vceqq_u32(e, e255)) != 0) {
+            for (int k = 0; k < 4; ++k)
+                hh[j + k] = GfHalf(f[j + k]);
+        } else {
             vst1_u16(h + j, vreinterpret_u16_f16(vcvt_f16_f32(v)));
         }
-        if (clean != fpcr)
-            __asm__ volatile("msr fpcr, %0" :: "r"(fpcr));
-        return;
     }
-#endif
+    if (clean != fpcr)
+        __asm__ volatile("msr fpcr, %0" :: "r"(fpcr));
+    return;
+#else
     for (size_t k = 0; k < n; ++k) {
         GfQuatf const &q = src[k];
         dst[k] = GfQuath(GfHalf(q.GetReal()), GfVec3h(q.GetImaginary()));
     }
+#endif
 }
 
 // -- pinned draws (canonical: usdGenMath/usdGenMath/hash.h) -------------------

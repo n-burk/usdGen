@@ -789,9 +789,10 @@ static void CheckDataSources()
     // The vector conversion matches the scalar oracle bit for bit on
     // adversarial lanes: +-0, subnormal-producing magnitudes, float
     // subnormals, max-half, overflow (->inf), infinities and NaN payloads
-    // (the pre-scan routes NaN/Inf/out-of-range to the scalar loop).
-    // Runs twice: once clean (vector loop) and once with NaN/Inf lanes
-    // (scalar loop), plus once under FPCR.FZ to pin FPCR-independence.
+    // (an exp-255 group redoes its lanes through the scalar spelling).
+    // Runs twice: once clean (vector groups) and once with NaN/Inf lanes
+    // (mixed vector/scalar-redo groups), plus once under FPCR.FZ to pin
+    // FPCR-independence.
     {
         float const lanes[] = {
             0.0f, -0.0f, 1.0f, -1.0f, 0.5f, -0.3333333f, 0.1f,
