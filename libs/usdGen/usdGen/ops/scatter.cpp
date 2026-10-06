@@ -233,6 +233,20 @@ bool UsdGenScatterOp::Capture(
     }
     const bool flip = p ? p->GetBool(TfToken("flip"), false) : false;
 
+    // Hoisted SplitMix seed hashes (bit-identical CSE): every per-face and
+    // per-root hash below folds ctx.seed through UsdGenHash64(seed32, salt)
+    // first, and ctx.seed is loop-invariant, so the seed folding is computed
+    // once per Capture. Integer-only: no FP association changes anywhere.
+    // The uint32_t(int(ctx.seed)) round-trip reproduces ctx.seed exactly, so
+    // hSeedScatter matches both the faceKey spelling (which folds
+    // uint32_t(ctx.seed)) and the CurveId/Draw01 spellings (which fold
+    // uint32_t of the int seed).
+    uint64_t const seed32 = uint64_t(uint32_t(int(ctx.seed)));
+    uint64_t const hSeedScatter = UsdGenHash64(seed32, kSaltScatter);
+    uint64_t const hSeedBary0 = UsdGenHash64(seed32, kSaltScatterBary);
+    uint64_t const hSeedBary1 = UsdGenHash64(seed32, kSaltScatterBary + 1u);
+    uint64_t const hSeedBary2 = UsdGenHash64(seed32, kSaltScatterBary + 2u);
+
     // Per-face area-weighted emission (plan/04 :634-635).
     std::vector<float> ax, ay, az;
     std::vector<uint64_t> aids;
@@ -322,8 +336,10 @@ bool UsdGenScatterOp::Capture(
                                   "cardinality on face " + std::to_string(f));
             return false;
         }
-        uint64_t const faceKey = UsdGenHash64(uint64_t(uint32_t(ctx.seed)),
-                                              uint64_t(uint32_t(f)), kSaltScatter);
+        // UsdGenHash64(seed32, f32, kSaltScatter) with the hoisted seed
+        // fold: Hash64(Hash64(seed32, salt) ^ f32, salt), verbatim.
+        uint64_t const faceKey = UsdGenHash64(
+            hSeedScatter ^ uint64_t(uint32_t(f)), kSaltScatter);
         uint64_t const nf = uint64_t(whole)
                           + (UsdGenHash01(faceKey, kSaltScatter) < float(frac) ? 1u : 0u);
         size_t const maxCurves = std::numeric_limits<uint32_t>::max();
@@ -334,13 +350,18 @@ bool UsdGenScatterOp::Capture(
         }
 
         for (uint64_t k = 0; k < nf; ++k) {
-            uint64_t const curveId = UsdGenCurveId(ctx.seed, uint32_t(f), uint32_t(k));
+            // UsdGenCurveId(seed, f, k) is Hash64(faceKey ^ k, salt): faceKey
+            // above is exactly the id's documented inner fold, so one
+            // finalizer replaces three. The draws likewise reuse the hoisted
+            // seed folds via the Hash01 spelling Draw01 expands to.
+            uint64_t const curveId = UsdGenHash64(
+                faceKey ^ uint64_t(uint32_t(k)), kSaltScatter);
             // "low-discrepancy sample seeded by curveId" (plan/04 :638),
             // realized in M1 as: area-weighted fan-triangle pick + uniform
             // in-triangle point, three draws keyed only by curveId.
-            float const u0 = UsdGenDraw01(int(ctx.seed), curveId, kSaltScatterBary);
-            float const u1 = UsdGenDraw01(int(ctx.seed), curveId, kSaltScatterBary + 1u);
-            float const u2 = UsdGenDraw01(int(ctx.seed), curveId, kSaltScatterBary + 2u);
+            float const u0 = UsdGenHash01(hSeedBary0 ^ curveId, kSaltScatterBary);
+            float const u1 = UsdGenHash01(hSeedBary1 ^ curveId, kSaltScatterBary + 1u);
+            float const u2 = UsdGenHash01(hSeedBary2 ^ curveId, kSaltScatterBary + 2u);
             size_t ti = triArea.size() - 1;
             {
                 double cum = 0.0;
