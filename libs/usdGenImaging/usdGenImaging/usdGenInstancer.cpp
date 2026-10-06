@@ -674,8 +674,9 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
             yAxis = _Normalized(GfVec3d(curves.rootB[c]), &ok);
             if (!ok)
                 return _Fail("instance: degenerate rootB frame", error);
-            GfVec3d z = GfVec3d(curves.rootN[c]) - yAxis * GfDot(
-                GfVec3d(curves.rootN[c]), yAxis);
+            // Reuse N (bit-identical CSE): this path implies wantFrames,
+            // so N above already holds exactly GfVec3d(curves.rootN[c]).
+            GfVec3d z = N - yAxis * GfDot(N, yAxis);
             zAxis = _Normalized(z, &ok);
             if (!ok)
                 return _Fail("instance: rootN parallel to rootB", error);
@@ -700,7 +701,9 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
                     return _Fail("instance: degenerate tangent fallback",
                                  error);
             }
-            GfVec3d ref = GfVec3d(curves.rootN[c]);
+            // Reuse N (bit-identical CSE): this path implies wantFrames,
+            // so N above already holds exactly GfVec3d(curves.rootN[c]).
+            GfVec3d ref = N;
             // Squared parallel-fallback test (saves a normalize: 1 sqrt +
             // 3 divs): |dot(ref/len, y)| > 0.999 with len > 0 squares to
             // d*d > 0.999^2*l2. d and l2 are the exact dots; the
@@ -709,10 +712,15 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
             // Matches except within rounding of either boundary.
             double const rd = GfDot(ref, yAxis);
             double const rl2 = GfDot(ref, ref);
-            if (!(rl2 > 1.000000000000002e-24) ||
-                rd * rd > (0.999 * 0.999) * rl2)
+            bool const refFallback = !(rl2 > 1.000000000000002e-24) ||
+                rd * rd > (0.999 * 0.999) * rl2;
+            if (refFallback)
                 ref = GfVec3d(curves.rootT[c]);
-            GfVec3d z = ref - yAxis * GfDot(ref, yAxis);
+            // Reuse rd on the common path (bit-identical CSE): ref is
+            // unchanged when the fallback is not taken, so the tested dot
+            // is exactly the projection dot; the fallback re-dots verbatim.
+            double const rd2 = refFallback ? GfDot(ref, yAxis) : rd;
+            GfVec3d z = ref - yAxis * rd2;
             zAxis = _Normalized(z, &tok);
             if (!tok)
                 return _Fail("instance: tangent parallel to frame", error);
