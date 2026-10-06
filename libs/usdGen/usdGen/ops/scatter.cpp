@@ -447,9 +447,23 @@ bool UsdGenScatterOp::Capture(
             // |dot(e0,N)| > 0.5 heuristic, which produced non-orthogonal
             // frames for near-axis-aligned faces.
             GfVec3f e0 = pb - p0;
-            if (std::abs(float(GfDot(e0, Nrest))) > 0.9f * float(e0.GetLength()))
+            // Squared parallel-edge test (saves a sqrt plus a re-dot per
+            // root): |dot| > 0.9*|e0| squares to dot*dot > 0.81*lenSq on
+            // the exact float dots, and the keep path reuses the tested
+            // dot for the Gram-Schmidt projection instead of re-dotting.
+            // Matches except within rounding of the boundary (same class
+            // as the r7 tangent test): a standalone differential over 20M
+            // random + 20M boundary-aimed edges shows 0 flips random and
+            // 1 flip aimed (window ~1e-7 relative), and the bench + suite
+            // checksums pin the production meshes.
+            float const e0d = GfDot(e0, Nrest);
+            float const e0l2 = GfDot(e0, e0);
+            if (e0d * e0d > 0.81f * e0l2) {
                 e0 = pc - p0;  // e0 too normal-parallel; try the other edge
-            T = e0 - Nrest * GfDot(e0, Nrest);
+                T = e0 - Nrest * GfDot(e0, Nrest);
+            } else {
+                T = e0 - Nrest * e0d;
+            }
             // Fuse the degenerate-length check with the normalize: T's
             // GetLengthSq is (T*T) and GetLength is its sqrt, so one
             // sqrt feeds both the 1e-9f check and the division. The hot
