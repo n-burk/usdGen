@@ -27,14 +27,14 @@ namespace usdGen {
 constexpr uint64_t UsdGenDigestOffset = 14695981039346656037ull;
 constexpr uint64_t UsdGenDigestPrime = 1099511628211ull;
 
-// One FNV-1a word feed, byte order preserved (low byte first).
+// One word feed: xor the whole word, then the FNV prime (one multiply
+// instead of eight — xor-then-multiply-by-odd is bijective, so every
+// input bit still flips the lane). Values are internal keys (see
+// above), never persisted: the word feed is endian-sensitive.
 inline void UsdGenDigestMixWord(uint64_t &h, uint64_t word)
 {
-    for (int i = 0; i < 8; ++i) {
-        h ^= static_cast<uint64_t>(word & 0xffu);
-        h *= UsdGenDigestPrime;
-        word >>= 8;
-    }
+    h ^= word;
+    h *= UsdGenDigestPrime;
 }
 
 // Order-sensitive 4-lane fold with a splitmix-style final avalanche.
