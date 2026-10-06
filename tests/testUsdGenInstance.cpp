@@ -42,7 +42,10 @@
 #include "pxr/imaging/hd/xformSchema.h"
 
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <limits>
 #include <set>
 #include <string>
 #include <vector>
@@ -783,6 +786,113 @@ static void CheckDataSources()
             GfQuath(result.rotations[i]);
     }
     Check(quathExact, "instanceRotations match GfQuath(GfQuatf) exactly");
+    // The vector conversion matches the scalar oracle bit for bit on
+    // adversarial lanes: +-0, subnormal-producing magnitudes, float
+    // subnormals, max-half, overflow (->inf), infinities and NaN payloads
+    // (the pre-scan routes NaN/Inf/out-of-range to the scalar loop).
+    // Runs twice: once clean (vector loop) and once with NaN/Inf lanes
+    // (scalar loop), plus once under FPCR.FZ to pin FPCR-independence.
+    {
+        float const lanes[] = {
+            0.0f, -0.0f, 1.0f, -1.0f, 0.5f, -0.3333333f, 0.1f,
+            1e-6f, -1e-6f, 6e-5f, 5.96e-8f, 3e-8f, 1e-9f, 1e-40f,
+            65504.0f, -65504.0f, 65505.0f, 1e6f,
+            std::numeric_limits<float>::infinity(),
+            -std::numeric_limits<float>::infinity(),
+            std::numeric_limits<float>::quiet_NaN(),
+            -std::numeric_limits<float>::quiet_NaN(),
+        };
+        auto bitsOf = [](float v) {
+            uint32_t b;
+            std::memcpy(&b, &v, sizeof(b));
+            return b;
+        };
+        auto floatOf = [](uint32_t b) {
+            float v;
+            std::memcpy(&v, &b, sizeof(v));
+            return v;
+        };
+        uint32_t const nanPayloads[] = {
+            0x7fc00001u, 0x7f800001u, 0x7fffffffu, 0xffc12345u, 0x7fbfffffu,
+        };
+        for (int pass = 0; pass < 3; ++pass) {
+            UsdGenInstanceResult adv = result;
+            size_t const nq = 64;
+            adv.rotations.resize(nq);
+            adv.translations.resize(nq);
+            adv.scales.resize(nq);
+            for (size_t q = 0; q < nq; ++q) {
+                float c[4];
+                for (int k = 0; k < 4; ++k) {
+                    size_t const pick = (q * 4 + size_t(k)) %
+                        (sizeof(lanes) / sizeof(lanes[0]));
+                    c[k] = lanes[pick];
+                }
+                // Every eighth quat carries raw NaN payloads instead.
+                if (pass == 1 && (q % 8) == 7) {
+                    for (int k = 0; k < 4; ++k)
+                        c[k] = floatOf(nanPayloads[(q + size_t(k)) % 5]);
+                }
+                adv.rotations[q] = GfQuatf(c[0], c[1], c[2], c[3]);
+            }
+            // The clean pass must stay vector-routed: drop the NaN/Inf
+            // lanes the table above mixes in.
+            if (pass != 1) {
+                for (size_t q = 0; q < nq; ++q) {
+                    GfQuatf qq = adv.rotations[q];
+                    float cc[4] = {qq.GetReal(), qq.GetImaginary()[0],
+                                   qq.GetImaginary()[1], qq.GetImaginary()[2]};
+                    for (int k = 0; k < 4; ++k) {
+                        uint32_t const b = bitsOf(cc[k]);
+                        if (((b >> 23) & 0xff) >= 143)
+                            cc[k] = 0.25f;
+                    }
+                    adv.rotations[q] = GfQuatf(cc[0], cc[1], cc[2], cc[3]);
+                }
+            }
+#if defined(__aarch64__)
+            uint64_t savedFpcr = 0, fzFpcr = 0;
+            if (pass == 2) {
+                __asm__ volatile("mrs %0, fpcr" : "=r"(savedFpcr));
+                fzFpcr = savedFpcr | uint64_t(0x03000000);
+                __asm__ volatile("msr fpcr, %0" :: "r"(fzFpcr));
+            }
+#endif
+            HdContainerDataSourceHandle ac =
+                UsdGenInstancer::BuildInstancerDataSource(adv,
+                                                          SdfPath("/groom"));
+#if defined(__aarch64__)
+            if (pass == 2)
+                __asm__ volatile("msr fpcr, %0" :: "r"(savedFpcr));
+#endif
+            bool advOk = ac != nullptr;
+            VtValue av;
+            if (advOk) {
+                HdContainerDataSourceHandle apv = Child(ac, "primvars");
+                HdContainerDataSourceHandle arot = apv
+                    ? HdContainerDataSource::Cast(
+                          apv->Get(HdInstancerTokens->instanceRotations))
+                    : nullptr;
+                av = arot ? LeafValue(arot->Get(TfToken("primvarValue")))
+                          : VtValue();
+                advOk = av.IsHolding<VtQuathArray>() &&
+                    av.UncheckedGet<VtQuathArray>().size() == nq;
+            }
+            for (size_t q = 0; advOk && q < nq; ++q) {
+                GfQuath const got = av.UncheckedGet<VtQuathArray>()[q];
+                GfQuatf const src = adv.rotations[q];
+                GfQuath const want = GfQuath(
+                    GfHalf(src.GetReal()), GfVec3h(src.GetImaginary()));
+                // Bitwise compare (NaN lanes never compare ==).
+                advOk = std::memcmp(&got, &want, sizeof(got)) == 0;
+            }
+            Check(advOk, pass == 0
+                              ? "quath vector path matches scalar bit for bit"
+                              : pass == 1
+                              ? "quath scalar fallback matches bit for bit"
+                              : "quath matches under FPCR.FZ");
+        }
+    }
 
     // hdMoonray ignores primvar elementSize, so float varyings publish
     // packed (arity 3 -> VtVec3fArray) instead of flat float arrays; the

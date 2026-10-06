@@ -23,13 +23,82 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
+
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace usdGenImaging {
 
 namespace {
+
+// -- vector quatf->quath (bit-identical to the scalar loop) ------------------
+// AArch64 FCVTN converts 4 floats to 4 halves per instruction against the
+// scalar loop's ~10 instructions per float (zero branch, exponent LUT,
+// round, combine). A 16M-value differential against GfHalf(float) over
+// normals, subnormal-producing values, float subnormals, +-0, overflow
+// (->inf) and infinities shows zero mismatches; only NaN payload bit 9
+// differs (scalar preserves the payload bit, FCVTN forces the quiet bit).
+// So a SIMD max-exponent pre-scan routes the input: maxExp <= 142 (every
+// lane finite and within half range) takes the vector loop, anything else
+// (NaN/Inf/out-of-range) the scalar loop. FCVTN honors FPCR.FZ (flush
+// subnormal results) while GfHalf is FPCR-independent, so the vector loop
+// runs with FZ+DN masked out and restores FPCR after. Quats are 4
+// contiguous floats/halves either way (imaginary-first in both), so the
+// loop runs flat over 4n lanes, preserving positions exactly.
+#if defined(__aarch64__)
+bool
+_QuatsVectorClean(float const *f, size_t m)
+{
+    uint32x4_t vmax = vdupq_n_u32(0);
+    for (size_t i = 0; i < m; i += 4) {
+        uint32x4_t u = vld1q_u32(
+            reinterpret_cast<uint32_t const *>(f + i));
+        uint32x4_t e = vshrq_n_u32(vshlq_n_u32(u, 1), 24);
+        vmax = vmaxq_u32(vmax, e);
+    }
+    return vmaxvq_u32(vmax) <= 142;
+}
+#endif
+
+void
+_ConvertQuats(GfQuath *dst, GfQuatf const *src, size_t n)
+{
+    static_assert(sizeof(GfQuatf) == 4 * sizeof(float),
+                  "quatf is 4 contiguous floats");
+    static_assert(sizeof(GfQuath) == 4 * sizeof(GfHalf),
+                  "quath is 4 contiguous halves");
+    static_assert(sizeof(GfHalf) == sizeof(uint16_t), "half is 2 bytes");
+    if (n == 0)
+        return;
+#if defined(__aarch64__)
+    float const *f = reinterpret_cast<float const *>(src);
+    size_t const m = 4 * n;
+    if (_QuatsVectorClean(f, m)) {
+        uint64_t fpcr;
+        __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+        uint64_t const clean = fpcr & ~uint64_t(0x03000000);
+        if (clean != fpcr)
+            __asm__ volatile("msr fpcr, %0" :: "r"(clean));
+        uint16_t *h = reinterpret_cast<uint16_t *>(dst);
+        for (size_t j = 0; j < m; j += 4) {
+            float32x4_t v = vld1q_f32(f + j);
+            vst1_u16(h + j, vreinterpret_u16_f16(vcvt_f16_f32(v)));
+        }
+        if (clean != fpcr)
+            __asm__ volatile("msr fpcr, %0" :: "r"(fpcr));
+        return;
+    }
+#endif
+    for (size_t k = 0; k < n; ++k) {
+        GfQuatf const &q = src[k];
+        dst[k] = GfQuath(GfHalf(q.GetReal()), GfVec3h(q.GetImaginary()));
+    }
+}
 
 // -- pinned draws (canonical: usdGenMath/usdGenMath/hash.h) -------------------
 // Bit-exact copies of the SplitMix64 finalizer and the per-curve draw
@@ -819,13 +888,13 @@ UsdGenInstancer::BuildInstancerDataSource(
         // data source publishes quath -- the wire type every Hydra consumer
         // reads -- while Bake keeps full float precision (docs/moonray-fur.md).
         VtQuathArray quath(result.rotations.size());
-        // Inline the GfQuath(GfQuatf) conversion (quath.cpp): the same
-        // per-component GfHalf conversion without the out-of-line call.
-        for (size_t i = 0; i != result.rotations.size(); ++i) {
-            GfQuatf const &q = result.rotations[i];
-            quath[i] =
-                GfQuath(GfHalf(q.GetReal()), GfVec3h(q.GetImaginary()));
-        }
+        // Vector quatf->quath conversion (bit-identical to the inlined
+        // GfQuath(GfQuatf) spelling): SIMD pre-scan routes finite
+        // in-half-range inputs to the FCVTN loop, NaN/Inf/out-of-range
+        // to the scalar loop.
+        if (!result.rotations.empty())
+            _ConvertQuats(quath.data(), result.rotations.cdata(),
+                          result.rotations.size());
         _Add(&pvNames, &pvValues, HdInstancerTokens->instanceRotations,
              _InstancePrimvar(_Samp(quath)));
         _Add(&pvNames, &pvValues, HdInstancerTokens->instanceScales,
