@@ -5,6 +5,7 @@
 #include "deformEvaluateCpu.h"
 #include "fencePool.h"
 #include "usdGen/tbbFastCores.h"
+#include "usdGen/workerPool.h"
 
 #include <tbb/blocked_range.h>
 #include <tbb/parallel_for.h>
@@ -92,11 +93,11 @@ std::atomic<uint32_t> evalCacheFundedPrefix{0};
 // Heterogeneous suffix: the past-prefix suffix evaluates on the host
 // (deformEvaluateCpu.h, bitwise the direct shader) while the proof submit
 // runs the cached prefix on the device. 10 workers fill this host's fast
-// cores (8: 3.3ms, 10: 2.9ms); 2048-CV grains balance TBB dispatch
-// against work-stealing under contention. The fixed overhead covers the
-// extra copy submit + fence waits + TBB dispatch. The seed throughputs
-// are the measured GB10 figures (see the prefix comment above); the
-// policy replaces them with per-GPU measurements after the first poses.
+// cores (8: 3.3ms, 10: 2.9ms); 2048-CV grains keep the pool's claimed
+// chunks coarse. The fixed overhead covers the extra copy submit + fence
+// waits + pool dispatch. The seed throughputs are the measured GB10
+// figures (see the prefix comment above); the policy replaces them with
+// per-GPU measurements after the first poses.
 constexpr int kHeteroWorkers = 10;
 constexpr uint32_t kHeteroGrainsize = 2048;
 constexpr uint32_t kHeteroCalibCvs = 8192;
@@ -273,13 +274,24 @@ struct DeformPipeline::Native {
         int bypassLeft = 0;                   // direct poses left in backoff
         bool everFilled = false;
     } evalCache;
-    // Heterogeneous suffix execution: a pinned TBB arena plus the adaptive
-    // policy. The device copies the suffix CVs into the idle warped suffix
-    // (byte staging, no extra buffer) while the host evaluates the suffix
-    // (bitwise the direct shader) during the prefix proof. Guarded: Begin
-    // may run on several threads. Lock order is cacheMutex -> heteroMutex
-    // (the policy updates inside the cached proof phase); heteroMutex never
-    // nests the other way.
+    // Heterogeneous suffix execution: the worker pool (one thread per
+    // fast CPU, no per-region wakeup) plus the adaptive policy. The device
+    // copies the suffix CVs into the idle warped suffix (byte staging, no
+    // extra buffer) while the host evaluates the suffix (bitwise the
+    // direct shader) during the prefix proof. Guarded: Begin may run on
+    // several threads, and one pool serves one dispatch at a time, so a
+    // contended pose falls back to the pinned TBB arena (same partition
+    // contract, same bits). Lock order is cacheMutex -> heteroMutex (the
+    // policy updates inside the cached proof phase); heteroMutex never
+    // nests the other way. heteroPoolMutex is a leaf try-lock, never held
+    // across the policy. The pool is born lazily at its first suffix:
+    // pipeline creation precedes the first pose by longer than the spin
+    // budget, so an eager pool would sleep through setup and make the
+    // first suffix pay the full wake stagger (and talk the policy out of
+    // arming).
+    std::once_flag heteroPoolOnce;
+    std::unique_ptr<UsdGenWorkerPool> heteroPool;
+    std::mutex heteroPoolMutex;
     tbb::task_arena heteroArena{kHeteroWorkers};
     std::unique_ptr<tbb::task_scheduler_observer> heteroPinning;
     std::mutex heteroMutex;
@@ -734,16 +746,55 @@ uint32_t AffordableCachePrefix(size_t freeBytes, int n) {
     return uint32_t(p);
 }
 
-// Runs the past-prefix suffix [begin, end) on the hetero arena. `cvs` and
-// `warped` are the mapped warped buffer base (the device staged the suffix
-// CV bytes into warped[begin, end) first); the range writes its own warped
-// triples and ORs the non-finite flag. Every query is independent, so any
-// partition is bitwise the direct shader. Returns false only on a
-// programming error (nulls, bad n/m), which the caller quarantines: a
-// silent partial suffix must never reach apply.
-bool RunHeteroSuffix(tbb::task_arena& arena, DeformEvalCpuParams const& p,
-                     float const* cvs, float* warped,
-                     uint32_t begin, uint32_t end, uint32_t* flag)
+// Runs the past-prefix suffix [begin, end) on the hetero worker pool.
+// `cvs` and `warped` are the mapped warped buffer base (the device staged
+// the suffix CV bytes into warped[begin, end) first); the range writes its
+// own warped triples and ORs the non-finite flag. Every query is
+// independent, so any partition is bitwise the direct shader. Grains of
+// kHeteroGrainsize CVs keep the claimed-chunk traffic negligible. Returns
+// false only on a programming error (nulls, bad n/m), which the caller
+// quarantines: a silent partial suffix must never reach apply.
+bool RunHeteroSuffixPool(UsdGenWorkerPool& pool, DeformEvalCpuParams const& p,
+                         float const* cvs, float* warped,
+                         uint32_t begin, uint32_t end, uint32_t* flag)
+{
+    if (begin >= end) return true;
+    struct Payload {
+        DeformEvalCpuParams const* p;
+        float const* cvs;
+        float* warped;
+        uint32_t begin, end;
+        std::atomic<uint32_t>* bad;
+        std::atomic<bool>* ok;
+    };
+    std::atomic<uint32_t> bad{0};
+    std::atomic<bool> ok{true};
+    Payload payload{&p, cvs, warped, begin, end, &bad, &ok};
+    size_t const grains =
+        (size_t(end - begin) + kHeteroGrainsize - 1) / kHeteroGrainsize;
+    pool.ParallelFor(grains,
+                     [](size_t g, void* v) {
+                         auto* pl = static_cast<Payload*>(v);
+                         size_t const lo =
+                             size_t(pl->begin) + g * kHeteroGrainsize;
+                         size_t const hi =
+                             std::min(lo + kHeteroGrainsize, size_t(pl->end));
+                         uint32_t f = 0;
+                         if (!DeformEvaluateCpu(*pl->p, pl->cvs + lo * 3,
+                                     pl->warped + lo * 3, hi - lo, &f))
+                             pl->ok->store(false, std::memory_order_relaxed);
+                         if (f) pl->bad->fetch_or(f, std::memory_order_relaxed);
+                     },
+                     &payload);
+    if (bad.load(std::memory_order_relaxed)) *flag |= 1u;
+    return ok.load(std::memory_order_relaxed);
+}
+
+// Contended-pose fallback: the same suffix on the pinned hetero arena.
+// Bitwise RunHeteroSuffixPool (partition-independent queries, same flag).
+bool RunHeteroSuffixTbb(tbb::task_arena& arena, DeformEvalCpuParams const& p,
+                        float const* cvs, float* warped,
+                        uint32_t begin, uint32_t end, uint32_t* flag)
 {
     if (begin >= end) return true;
     std::atomic<uint32_t> bad{0};
@@ -1899,6 +1950,22 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                 region.size = VkDeviceSize(points - cacheActive) * 12u;
                 vkCmdCopyBuffer(cmds[2], info.points->buffer(),
                     s->warped->buffer(), 1, &region);
+                // Post-copy availability: the host suffix maps and reads
+                // these bytes right after the copy fence. The fence alone
+                // only orders queue completion; without this barrier the
+                // transfer writes' host visibility lags the signal by a
+                // timing window (wider under unified-memory pressure),
+                // and any fast-start reader (spin polling, a stagger-free
+                // pool) samples stale patches. The barrier forces the
+                // flush inside command execution, ahead of the signal.
+                VkMemoryBarrier copyDone{};
+                copyDone.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+                copyDone.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                copyDone.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+                vkCmdPipelineBarrier(cmds[2],
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &copyDone,
+                    0, nullptr, 0, nullptr);
                 r = vkEndCommandBuffer(cmds[2]);
             }
             if (r != VK_SUCCESS) { finish(r); return {}; }
@@ -1965,11 +2032,31 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                     xp.cz = rstate.center[2];
                     xp.invScale = invScale;
                     xp.scale = rstate.scale;
+                    // One pool serves one dispatch: the winning pose takes
+                    // it, a concurrent pose falls back to the arena (same
+                    // bits either way). The pool is born here, at its first
+                    // suffix, so its workers are fresh and spinning; the
+                    // warm dispatch parks them before the timed region, so
+                    // creation never pollutes the policy's throughput EMA
+                    // (an unstable first sample moves the balance split).
+                    std::call_once(native_->heteroPoolOnce, [&] {
+                        native_->heteroPool =
+                            std::make_unique<UsdGenWorkerPool>(kHeteroWorkers);
+                        native_->heteroPool->ParallelFor(
+                            1, [](size_t, void *) {}, nullptr);
+                    });
+                    std::unique_lock<std::mutex> poolLock(
+                        native_->heteroPoolMutex, std::try_to_lock);
                     auto tCpu0 = std::chrono::steady_clock::now();
-                    bool suffixOk = RunHeteroSuffix(native_->heteroArena, xp,
-                        static_cast<float const*>(warpMap),
-                        static_cast<float*>(warpMap),
-                        cacheActive, points, &heteroFlag);
+                    bool suffixOk = poolLock.owns_lock()
+                        ? RunHeteroSuffixPool(*native_->heteroPool, xp,
+                                              static_cast<float const*>(warpMap),
+                                              static_cast<float*>(warpMap),
+                                              cacheActive, points, &heteroFlag)
+                        : RunHeteroSuffixTbb(native_->heteroArena, xp,
+                                             static_cast<float const*>(warpMap),
+                                             static_cast<float*>(warpMap),
+                                             cacheActive, points, &heteroFlag);
                     heteroCpuNs = std::chrono::duration<double, std::nano>(
                         std::chrono::steady_clock::now() - tCpu0).count();
                     vkUnmapMemory(d, s->warped->memory());
