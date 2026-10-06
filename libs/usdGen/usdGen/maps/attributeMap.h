@@ -97,9 +97,10 @@ public:
 
     void Fill(float value);
 
-    // FNV-1a over the spec and every texel bit: the map digest a capture
-    // epoch folds in (07 §5.4 UsdGenMapLibrary::Digest). Bitwise-identical
-    // maps digest identically.
+    // 4-lane FNV-1a over the spec and every texel bit (usdGen/digest.h):
+    // the map digest a capture epoch folds in (07 §5.4
+    // UsdGenMapLibrary::Digest). Bitwise-identical maps digest identically;
+    // values are internal keys, never persisted or golden-tested.
     uint64_t Digest() const;
 
     // Direct row-major plane access for capture loops and tests:

@@ -2,6 +2,8 @@
 // See attributeMap.h for the model and its v1 limits.
 #include "usdGen/maps/attributeMap.h"
 
+#include "usdGen/digest.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -195,28 +197,21 @@ void UsdGenAttributeMap::Fill(float value)
 
 uint64_t UsdGenAttributeMap::Digest() const
 {
-    // FNV-1a, 64-bit, over the spec words then every texel bit.
+    // 4-lane FNV-1a (see digest.h) over the spec words then every texel
+    // bit: the spec feeds the single-lane header, whose hash seeds the
+    // bulk texel lanes. Same contract — bitwise-identical maps digest
+    // identically — at ~4x the throughput; values are internal keys.
     uint64_t hash = 14695981039346656037ull;
-    auto mix = [&](uint64_t word) {
-        for (int i = 0; i < 8; ++i) {
-            hash ^= static_cast<uint64_t>(word & 0xff);
-            hash *= 1099511628211ull;
-            word >>= 8;
-        }
-    };
-    mix(uint64_t(state_->spec.numFaces));
-    mix(uint64_t(state_->spec.resolution));
-    mix(uint64_t(state_->spec.channels));
-    mix(uint64_t(state_->spec.clamp01 ? 1 : 0));
+    UsdGenDigestMixWord(hash, uint64_t(state_->spec.numFaces));
+    UsdGenDigestMixWord(hash, uint64_t(state_->spec.resolution));
+    UsdGenDigestMixWord(hash, uint64_t(state_->spec.channels));
+    UsdGenDigestMixWord(hash, uint64_t(state_->spec.clamp01 ? 1 : 0));
     uint32_t defaultBits = 0;
     std::memcpy(&defaultBits, &state_->spec.defaultValue, sizeof(defaultBits));
-    mix(defaultBits);
-    for (float texel : state_->texels) {
-        uint32_t bits = 0;
-        std::memcpy(&bits, &texel, sizeof(bits));
-        mix(bits);
-    }
-    return hash;
+    UsdGenDigestMixWord(hash, defaultBits);
+    static_assert(sizeof(float) == 4, "float is 32 bits");
+    return UsdGenDigestBytes(state_->texels.data(),
+                             state_->texels.size() * sizeof(float), hash);
 }
 
 float const *UsdGenAttributeMap::Data() const { return state_->texels.data(); }
