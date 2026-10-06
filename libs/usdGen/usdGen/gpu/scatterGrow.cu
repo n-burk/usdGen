@@ -66,6 +66,13 @@ float DrawGrowHost(int seed, uint64_t id, uint32_t salt = 0x47726F77u) {
     uint64_t key = Hash64Host(uint64_t(uint32_t(seed)), salt) ^ id;
     return float(uint32_t(Hash64Host(key, salt) >> 32) >> 8) * 0x1.0p-24f;
 }
+// DrawGrowHost with the loop-invariant seed fold precomputed: keying by
+// (seedHash ^ id) is exactly DrawGrowHost's spelling with the hoisted
+// Hash64Host(seed32, salt). Integer-only; bit-identical by construction.
+float DrawGrowHostSeeded(uint64_t seedHash, uint64_t id, uint32_t salt) {
+    return float(uint32_t(Hash64Host(seedHash ^ id, salt) >> 32) >> 8) *
+           0x1.0p-24f;
+}
 float3 NormalizeHost(float3 v) {
     float const l2 = v.x*v.x + v.y*v.y + v.z*v.z;
     float const length = std::sqrt(l2);
@@ -433,6 +440,17 @@ ScatterGrowStatus CudaScatterGrow::ValidateRoots(
     // ties), so later math faults are moot.
     size_t const mLim = std::min(fBad, dBad);
     size_t mBad = mLim;
+    // Hoisted draw seed folds (bit-identical integer CSE): c.seed is
+    // loop-invariant, so each salt's Hash64Host(seed32, salt) runs once.
+    uint64_t const seed32 = uint64_t(uint32_t(c.seed));
+    uint64_t const hSeedAz = Hash64Host(seed32, 0x4772417Au);
+    uint64_t const hSeed = Hash64Host(seed32, 0x47726F77u);
+    // The azimuth draw is dead when azimuthRandom is +-0 (bit-identical):
+    // the computed azimuth is c.azimuth plus a +-0 product, which equals
+    // c.azimuth except for a -0/+0 edge that RotateAroundBHost's
+    // degrees==0 early-out treats identically (c.azimuth is validated
+    // finite, so no NaN/Inf lane can differ).
+    bool const noAzimuthRandom = c.azimuthRandom == 0.0f;
     for(size_t i=0;i<mLim;++i) {
         // Catch deterministic target and output overflow before reserving or
         // submitting any work.  The device repeats this check and reports a
@@ -441,12 +459,14 @@ ScatterGrowStatus CudaScatterGrow::ValidateRoots(
         float3 direction = c.direction == ScatterGrowDirection::RootNormal ? r->rootN[i] :
             c.direction == ScatterGrowDirection::RootTangent ? r->rootT[i] : c.literalDirection;
         direction = RotateAroundBHost(NormalizeHost(direction), r->rootB[i], c.lift);
-        float const azimuth = c.azimuth + c.azimuthRandom * 360.0f *
-            (DrawGrowHost(c.seed, r->stableIds[i], 0x4772417Au) - 0.5f);
+        float const azimuth = noAzimuthRandom ? c.azimuth :
+            c.azimuth + c.azimuthRandom * 360.0f *
+            (DrawGrowHostSeeded(hSeedAz, r->stableIds[i], 0x4772417Au) - 0.5f);
         direction = RotateAroundBHost(direction, r->rootN[i], azimuth);
         if (!Finite(direction)) { mBad = i; break; }
         double const targetDouble = c.length *
-            (c.randomLo + double(DrawGrowHost(c.seed, r->stableIds[i])) *
+            (c.randomLo + double(DrawGrowHostSeeded(hSeed, r->stableIds[i],
+                                                    0x47726F77u)) *
              (c.randomHi - c.randomLo));
         float const target = static_cast<float>(targetDouble);
         if (!Finite(target)) { mBad = i; break; }
@@ -460,13 +480,15 @@ ScatterGrowStatus CudaScatterGrow::ValidateRoots(
         // two finite magnitudes). The device repeats the full loop
         // unchanged.
         {
-            float const t = float(c.cvCount - 1) / float(c.cvCount - 1);
-            float const distance = target * t;
+            // t is exactly 1 (cvCount-1 is an exact small float, so x/x
+            // is 1) and target*1 is target, so distance is target and
+            // its finiteness is the target check above, verbatim values.
+            float const distance = target;
             float3 const output = make_float3(
                 r->positions[i].x + direction.x * distance,
                 r->positions[i].y + direction.y * distance,
                 r->positions[i].z + direction.z * distance);
-            if (!Finite(distance) || !Finite(output))
+            if (!Finite(output))
                 { mBad = i; break; }
         }
     }
