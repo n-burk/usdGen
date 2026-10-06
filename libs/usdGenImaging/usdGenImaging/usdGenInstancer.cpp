@@ -789,8 +789,13 @@ UsdGenInstancer::BuildInstancerDataSource(
         // data source publishes quath -- the wire type every Hydra consumer
         // reads -- while Bake keeps full float precision (docs/moonray-fur.md).
         VtQuathArray quath(result.rotations.size());
-        for (size_t i = 0; i != result.rotations.size(); ++i)
-            quath[i] = GfQuath(result.rotations[i]);
+        // Inline the GfQuath(GfQuatf) conversion (quath.cpp): the same
+        // per-component GfHalf conversion without the out-of-line call.
+        for (size_t i = 0; i != result.rotations.size(); ++i) {
+            GfQuatf const &q = result.rotations[i];
+            quath[i] =
+                GfQuath(GfHalf(q.GetReal()), GfVec3h(q.GetImaginary()));
+        }
         _Add(&pvNames, &pvValues, HdInstancerTokens->instanceRotations,
              _InstancePrimvar(_Samp(quath)));
         _Add(&pvNames, &pvValues, HdInstancerTokens->instanceScales,

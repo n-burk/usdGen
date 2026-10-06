@@ -774,6 +774,15 @@ static void CheckDataSources()
             Near(float(qi[2]), bi[2], 2e-3f);
     }
     Check(quathOk, "instanceRotations publish as VtQuathArray");
+    // The inline quath conversion matches the GfQuath(GfQuatf) oracle bit
+    // for bit.
+    bool quathExact = rValue.IsHolding<VtQuathArray>() &&
+        rValue.UncheckedGet<VtQuathArray>().size() == result.rotations.size();
+    for (size_t i = 0; quathExact && i != result.rotations.size(); ++i) {
+        quathExact = rValue.UncheckedGet<VtQuathArray>()[i] ==
+            GfQuath(result.rotations[i]);
+    }
+    Check(quathExact, "instanceRotations match GfQuath(GfQuatf) exactly");
 
     // hdMoonray ignores primvar elementSize, so float varyings publish
     // packed (arity 3 -> VtVec3fArray) instead of flat float arrays; the
