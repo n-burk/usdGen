@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -93,9 +94,16 @@ float3 NormalizeHost(float3 v) {
 // 32-bit); the caller routes larger inputs to SetFirstDup.
 size_t RadixFirstDup(uint64_t const* ids, size_t n) {
     if (n <= 1) return n;
-    std::vector<uint32_t> keys(n), tmpKeys(n);
-    std::vector<uint32_t> idx(n), tmpIdx(n);
-    std::vector<uint32_t> counts(65536);
+    // Uninitialized scratch (bit-identical): every slot of all four sort
+    // arrays is overwritten before its read (key/index fill, radix
+    // passes), and counts is filled before each pass, so std::vector's
+    // value-init (~16MB of zeroes) is pure waste; new[] leaves the
+    // trivial storage uninitialized. Same bytes in the same slots.
+    std::unique_ptr<uint32_t[]> keys(new uint32_t[n]);
+    std::unique_ptr<uint32_t[]> tmpKeys(new uint32_t[n]);
+    std::unique_ptr<uint32_t[]> idx(new uint32_t[n]);
+    std::unique_ptr<uint32_t[]> tmpIdx(new uint32_t[n]);
+    std::unique_ptr<uint32_t[]> counts(new uint32_t[65536]);
     uint32_t orKeys = 0, andKeys = ~uint32_t(0);
     for (size_t i = 0; i < n; ++i) {
         uint64_t const id = ids[i];
@@ -105,25 +113,26 @@ size_t RadixFirstDup(uint64_t const* ids, size_t n) {
         orKeys |= key;
         andKeys &= key;
     }
-    uint32_t* k = keys.data();
-    uint32_t* ix = idx.data();
-    uint32_t* kOut = tmpKeys.data();
-    uint32_t* ixOut = tmpIdx.data();
+    uint32_t* k = keys.get();
+    uint32_t* ix = idx.get();
+    uint32_t* kOut = tmpKeys.get();
+    uint32_t* ixOut = tmpIdx.get();
+    uint32_t* cnt = counts.get();
     uint32_t const vary = orKeys ^ andKeys;
     for (int pass = 0; pass < 2; ++pass) {
         int const shift = pass * 16;
         if (((vary >> shift) & 0xffffu) == 0) continue;
-        std::fill(counts.begin(), counts.end(), uint32_t(0));
-        for (size_t i = 0; i < n; ++i) ++counts[(k[i] >> shift) & 0xffffu];
+        std::fill(cnt, cnt + 65536, uint32_t(0));
+        for (size_t i = 0; i < n; ++i) ++cnt[(k[i] >> shift) & 0xffffu];
         uint32_t sum = 0;
         for (size_t c = 0; c < 65536; ++c) {
-            uint32_t const t = counts[c];
-            counts[c] = sum;
+            uint32_t const t = cnt[c];
+            cnt[c] = sum;
             sum += t;
         }
         for (size_t i = 0; i < n; ++i) {
             size_t const d = (k[i] >> shift) & 0xffffu;
-            uint32_t const p = counts[d]++;
+            uint32_t const p = cnt[d]++;
             kOut[p] = k[i];
             ixOut[p] = ix[i];
         }
