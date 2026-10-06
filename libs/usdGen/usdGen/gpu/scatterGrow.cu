@@ -225,6 +225,11 @@ ScatterGrowStatus CudaScatterGrow::validateStream(cudaStream_t stream) const {
 ScatterGrowStatus CudaScatterGrow::validate(
     std::shared_ptr<const ScatterGrowRoots> const& r, ScatterGrowControls const& c,
     size_t* total) const {
+    return ValidateRoots(r, c, total);
+}
+ScatterGrowStatus CudaScatterGrow::ValidateRoots(
+    std::shared_ptr<const ScatterGrowRoots> const& r, ScatterGrowControls const& c,
+    size_t* total) {
     if(!r || c.cvCount<2 || c.cvCount>64 || !Finite(c.length)||!Finite(c.randomLo)||
        !Finite(c.randomHi)||!Finite(c.lift)||!Finite(c.fallbackWidth)||c.length<0||
        c.randomLo<0||c.randomHi<0||c.fallbackWidth<0 || c.lift < -90.0f ||

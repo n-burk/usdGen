@@ -12,6 +12,7 @@
 //   instancer_draw_ms    BuildInstancerDataSource + primvar readback
 //   attr_cook_ms         UsdGenAttributeCookInstances over the scattered roots
 //   cuda_input_ms        PrepareCudaScatterInput (CPU capture + convert)
+//   cuda_validate_ms     CudaScatterGrow::ValidateRoots (CPU-only preflight)
 //   cuda_grow_begin_ms   CudaScatterGrow::BeginFresh (validate+alloc+H2D+launch)
 //   cuda_grow_finish_ms  FinishFreshAsync + sync + CommitFreshFinish
 //   vk_build_targets_ms  ScatterGrowPipeline::BuildTargets (host)
@@ -694,6 +695,53 @@ int RunCuda(Options const &opts, UsdGenGraphDesc const &desc)
     return 0;
 }
 
+// CPU-only grow preflight: needs no device, so it runs (and gates
+// validate optimizations) even when the grow legs SKIP on memory
+// pressure. Roots prep once outside the timer; the grow controls match
+// RunCuda's.
+int RunCudaValidate(Options const &opts, UsdGenGraphDesc const &desc)
+{
+    std::string reason;
+    std::shared_ptr<const gpu::ScatterGrowRoots> roots;
+    if (PrepareCudaScatterInput(desc, SdfPath("/groom/scatter"), &roots,
+                                &reason) != CudaScatterInputStatus::Ok) {
+        std::printf("cuda_validate error: %s\n", reason.c_str());
+        return 1;
+    }
+    gpu::ScatterGrowControls controls;
+    controls.cvCount = uint32_t(opts.cudaCv);
+    controls.seed = 42;
+    controls.length = 1.0;
+    controls.randomLo = 0.8;
+    controls.randomHi = 1.2;
+    std::vector<double> ms;
+    ms.reserve(size_t(opts.reps));
+    uint64_t sum = 0;
+    size_t total = 0;
+    for (int r = 0; r < opts.reps; ++r) {
+        auto const t0 = std::chrono::steady_clock::now();
+        gpu::ScatterGrowStatus const st =
+            gpu::CudaScatterGrow::ValidateRoots(roots, controls, &total);
+        auto const t1 = std::chrono::steady_clock::now();
+        if (st != gpu::ScatterGrowStatus::Ok) {
+            std::printf("cuda_validate error: status %d\n", int(st));
+            return 1;
+        }
+        ms.push_back(
+            std::chrono::duration<double, std::milli>(t1 - t0).count());
+        Fnv f;
+        int const s = int(st);
+        f.Add(&s, sizeof(s));
+        f.Add(&total, sizeof(total));
+        Fold(&sum, f.h);
+    }
+    char extra[64];
+    std::snprintf(extra, sizeof(extra), "roots=%zu cv=%d",
+                  roots->positions.size(), opts.cudaCv);
+    Report(opts, "cuda_validate", ms, sum, extra);
+    return 0;
+}
+
 }  // namespace
 #endif  // USDGEN_ENABLE_CUDA
 
@@ -1159,6 +1207,9 @@ int main(int argc, char **argv)
             return rc;
 
 #ifdef USDGEN_ENABLE_CUDA
+    if (WantStage(opts, "cuda_validate"))
+        if (int rc = RunCudaValidate(opts, desc))
+            return rc;
     if (WantStage(opts, "cuda_input") || WantStage(opts, "cuda_grow_begin") ||
         WantStage(opts, "cuda_grow_finish") || WantStage(opts, "")) {
         if (int rc = RunCuda(opts, desc))
@@ -1166,8 +1217,8 @@ int main(int argc, char **argv)
     }
 #else
     if (!opts.stage.empty() &&
-        (opts.stage == "cuda_input" || opts.stage == "cuda_grow_begin" ||
-         opts.stage == "cuda_grow_finish"))
+        (opts.stage == "cuda_input" || opts.stage == "cuda_validate" ||
+         opts.stage == "cuda_grow_begin" || opts.stage == "cuda_grow_finish"))
         ReportSkip(opts, opts.stage.c_str(), "CUDA build off");
 #endif
 #ifdef USDGEN_ENABLE_VULKAN_RUNTIME

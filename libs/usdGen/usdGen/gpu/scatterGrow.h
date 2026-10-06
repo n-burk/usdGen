@@ -102,6 +102,14 @@ public:
     // generation.  Staging roots have already been released by commit.
     void ReclassifyPublishedGeneration() noexcept;
     size_t ExclusiveRetainedBytes() const noexcept;
+    // CPU-only preflight of grow roots: the same checks BeginFresh runs
+    // before touching the device (controls, topology, finiteness,
+    // duplicate stable ids, per-curve overflow), without needing a
+    // stream or a device.  Writes the point total through `total`
+    // (which must be non-null) whenever it reports Ok.
+    static ScatterGrowStatus ValidateRoots(
+        std::shared_ptr<const ScatterGrowRoots> const& roots,
+        ScatterGrowControls const& controls, size_t* total);
 
 private:
     struct Storage {

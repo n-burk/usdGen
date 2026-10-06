@@ -2277,6 +2277,12 @@ if(USDGEN_ENABLE_CUDA)
     set_tests_properties(testUsdGenCudaScatterGrowPreflight PROPERTIES
         LABELS "T0;cuda;topology;scatter-grow" TIMEOUT 60 RESOURCE_LOCK usdgen_gpu
         SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    # ValidateRoots is CPU-only: no device, no SKIP, no GPU lock.
+    add_executable(testUsdGenCudaScatterGrowValidate tests/testUsdGenCudaScatterGrowValidate.cpp)
+    target_link_libraries(testUsdGenCudaScatterGrowValidate PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaScatterGrowValidate COMMAND testUsdGenCudaScatterGrowValidate)
+    set_tests_properties(testUsdGenCudaScatterGrowValidate PROPERTIES
+        LABELS "T0;cuda;scatter-grow;validate" TIMEOUT 120)
     add_executable(testUsdGenCudaScatterInput tests/testUsdGenCudaScatterInput.cpp)
     add_executable(testUsdGenCudaScatterGrowSession tests/testUsdGenCudaScatterGrowSession.cpp)
     add_executable(testUsdGenCudaScatterGrowWidthDag tests/testUsdGenCudaScatterGrowWidthDag.cpp)
