@@ -53,6 +53,23 @@ GfVec3f Normalize3(GfVec3f const &v)
     return l > 1e-12f ? v / l : GfVec3f(0.0f, 1.0f, 0.0f);
 }
 
+// Pooled per-thread sort scratch (bit-identical): the morton/order/tmp
+// vectors churn ~24MB of mmap/munmap per Capture; pooling across calls on
+// the thread turns every rep after the first into pure reuse.
+// Growth-only (resize never shrinks); every slot is overwritten before its
+// read (key loop, radix passes, per-pass counts fill), so pooled contents
+// never leak across calls. Deliberately sort-only: pooling the ~270MB
+// emission over-reserve too measurably slows the Bake stages' fresh large
+// allocs (cross-stage interference), dwarfing the extra capture win.
+// thread_local keeps concurrent captures on distinct scratch; Capture
+// never reenters itself, so one set per thread suffices.
+struct ScatterSortScratch {
+    std::vector<uint64_t> morton, tmpKeys;
+    std::vector<uint32_t> order, tmpIdx;
+    std::vector<uint32_t> counts;
+};
+thread_local ScatterSortScratch t_scatterSortScratch;
+
 inline uint64_t double_as_bits(double d)
 {
     uint64_t u;
@@ -468,11 +485,14 @@ bool UsdGenScatterOp::Capture(
     // linear cost. The even pass count lands the result back in the
     // morton/order pair.
     const size_t N = aids.size();
-    std::vector<uint64_t> morton(N);
+    ScatterSortScratch &ss = t_scatterSortScratch;
+    std::vector<uint64_t> &morton = ss.morton;
+    morton.resize(N);
     // Indices and digit populations are 32-bit: the emission loop caps the
     // root total at uint32 cardinality, so every index and every population
     // is below 2^32. Halves the permutation traffic of the sort.
-    std::vector<uint32_t> order(N);
+    std::vector<uint32_t> &order = ss.order;
+    order.resize(N);
     uint64_t orKeys = 0, andKeys = ~uint64_t(0);
     for (size_t i = 0; i < N; ++i) {
         uint64_t const key = UsdGenMortonKey3(ax[i], ay[i], az[i], 64.0f);
@@ -484,12 +504,13 @@ bool UsdGenScatterOp::Capture(
     uint32_t const *perm = order.data();
     // Scratch pair at function scope: an odd surviving-pass count leaves the
     // permutation in tmpIdx, which the gather below still reads.
-    std::vector<uint64_t> tmpKeys;
-    std::vector<uint32_t> tmpIdx;
+    std::vector<uint64_t> &tmpKeys = ss.tmpKeys;
+    std::vector<uint32_t> &tmpIdx = ss.tmpIdx;
     if (N > 1) {
-        tmpKeys.assign(N, 0);
-        tmpIdx.assign(N, 0);
-        std::vector<uint32_t> counts(65536);
+        tmpKeys.resize(N);
+        tmpIdx.resize(N);
+        std::vector<uint32_t> &counts = ss.counts;
+        counts.resize(65536);
         uint64_t *keys = morton.data();
         uint32_t *idx = order.data();
         uint64_t *keysOut = tmpKeys.data();
