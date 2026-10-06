@@ -90,41 +90,39 @@ float3 NormalizeHost(float3 v) {
 // the result is exact for any input. Skipping constant digits is exact
 // (a constant-digit counting pass is the identity permutation) and
 // keeps the surviving passes least- to most-significant. Two passes
-// over 8-byte items beat the fused loop's 36MB random set probes and
-// the 4-pass 12-byte full-id sort alike. n <= UINT32_MAX (indices are
-// 32-bit); the caller routes larger inputs to SetFirstDup.
+// over packed 8-byte (fold,index) items beat the fused loop's 36MB
+// random set probes and the 4-pass 12-byte full-id sort alike; packing
+// halves the scatter's permuted stores (one 8-byte line hit instead of
+// two 4-byte hits) for the same permutation. n <= UINT32_MAX (indices
+// are 32-bit); the caller routes larger inputs to SetFirstDup.
 size_t RadixFirstDup(uint64_t const* ids, size_t n) {
     if (n <= 1) return n;
-    // Uninitialized scratch (bit-identical): every slot of all four sort
-    // arrays is overwritten before its read (key/index fill, radix
-    // passes), and counts is filled before each pass, so std::vector's
-    // value-init (~16MB of zeroes) is pure waste; new[] leaves the
-    // trivial storage uninitialized. Same bytes in the same slots.
-    std::unique_ptr<uint32_t[]> keys(new uint32_t[n]);
-    std::unique_ptr<uint32_t[]> tmpKeys(new uint32_t[n]);
-    std::unique_ptr<uint32_t[]> idx(new uint32_t[n]);
-    std::unique_ptr<uint32_t[]> tmpIdx(new uint32_t[n]);
+    // Uninitialized scratch (bit-identical): every slot of both item
+    // arrays is overwritten before its read (pack fill, radix passes),
+    // and counts is filled before each pass, so std::vector's value-init
+    // (~16MB of zeroes) is pure waste; new[] leaves the trivial storage
+    // uninitialized. Same bytes in the same slots.
+    std::unique_ptr<uint64_t[]> items(new uint64_t[n]);
+    std::unique_ptr<uint64_t[]> tmpItems(new uint64_t[n]);
     std::unique_ptr<uint32_t[]> counts(new uint32_t[65536]);
     uint32_t orKeys = 0, andKeys = ~uint32_t(0);
     for (size_t i = 0; i < n; ++i) {
         uint64_t const id = ids[i];
         uint32_t const key = uint32_t(id) ^ uint32_t(id >> 32);
-        keys[i] = key;
-        idx[i] = uint32_t(i);
+        items[i] = (uint64_t(key) << 32) | uint32_t(i);
         orKeys |= key;
         andKeys &= key;
     }
-    uint32_t* k = keys.get();
-    uint32_t* ix = idx.get();
-    uint32_t* kOut = tmpKeys.get();
-    uint32_t* ixOut = tmpIdx.get();
+    uint64_t* w = items.get();
+    uint64_t* wOut = tmpItems.get();
     uint32_t* cnt = counts.get();
     uint32_t const vary = orKeys ^ andKeys;
     for (int pass = 0; pass < 2; ++pass) {
-        int const shift = pass * 16;
-        if (((vary >> shift) & 0xffffu) == 0) continue;
+        int const shift = 32 + pass * 16;
+        if (((vary >> (pass * 16)) & 0xffffu) == 0) continue;
         std::fill(cnt, cnt + 65536, uint32_t(0));
-        for (size_t i = 0; i < n; ++i) ++cnt[(k[i] >> shift) & 0xffffu];
+        for (size_t i = 0; i < n; ++i)
+            ++cnt[uint32_t(w[i] >> shift) & 0xffffu];
         uint32_t sum = 0;
         for (size_t c = 0; c < 65536; ++c) {
             uint32_t const t = cnt[c];
@@ -132,13 +130,11 @@ size_t RadixFirstDup(uint64_t const* ids, size_t n) {
             sum += t;
         }
         for (size_t i = 0; i < n; ++i) {
-            size_t const d = (k[i] >> shift) & 0xffffu;
-            uint32_t const p = cnt[d]++;
-            kOut[p] = k[i];
-            ixOut[p] = ix[i];
+            uint64_t const wi = w[i];
+            size_t const d = (uint32_t(wi >> shift)) & 0xffffu;
+            wOut[cnt[d]++] = wi;
         }
-        std::swap(k, kOut);
-        std::swap(ix, ixOut);
+        std::swap(w, wOut);
     }
     size_t dBad = n;
     size_t run = 0;
@@ -147,14 +143,16 @@ size_t RadixFirstDup(uint64_t const* ids, size_t n) {
     // scan below is exact. Sorted once per group, reused across groups.
     std::vector<uint32_t> big;
     for (size_t i = 1; i <= n; ++i) {
-        if (i < n && k[i] == k[run]) continue;
+        if (i < n && uint32_t(w[i] >> 32) == uint32_t(w[run] >> 32)) continue;
         size_t const g = i - run;
         if (g > 1) {
             // Members run..i-1 share a fold in ascending-index order.
             // Full-id loads below run in ascending index order, so they
             // stream rather than scatter.
             if (g > 64) {
-                big.assign(ix + run, ix + i);
+                big.resize(g);
+                for (size_t t = 0; t < g; ++t)
+                    big[t] = uint32_t(w[run + t]);
                 std::sort(big.begin(), big.end(), [&](uint32_t a, uint32_t b) {
                     return ids[a] != ids[b] ? ids[a] < ids[b] : a < b;
                 });
@@ -172,12 +170,14 @@ size_t RadixFirstDup(uint64_t const* ids, size_t n) {
                 for (size_t j = run + 1; j < i; ++j) {
                     // Member j is a true second occurrence exactly when
                     // one earlier member shares its full id.
+                    uint32_t const jj = uint32_t(w[j]);
                     int matches = 0;
                     for (size_t q = run; q < j; ++q) {
-                        if (ids[ix[j]] == ids[ix[q]] && ++matches > 1) break;
+                        if (ids[jj] == ids[uint32_t(w[q])] && ++matches > 1)
+                            break;
                     }
-                    if (matches == 1 && size_t(ix[j]) < dBad) {
-                        dBad = size_t(ix[j]);
+                    if (matches == 1 && size_t(jj) < dBad) {
+                        dBad = size_t(jj);
                         if (dBad == 1) return 1;
                     }
                 }
