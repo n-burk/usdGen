@@ -262,8 +262,13 @@ bool UsdGenScatterOp::Capture(
     aids.reserve(faceCount * 4); aPrim.reserve(faceCount * 4);
     aUv.reserve(faceCount * 4); aT.reserve(faceCount * 4);
     aN.reserve(faceCount * 4); aB.reserve(faceCount * 4);
-    std::vector<float> triArea;
-    triArea.reserve(16);
+    // Per-face triangle weights: stack-backed for the common small fan
+    // (quads need 2), spilling to a reused vector past 64 triangles or on
+    // the subdivision path. Same values, same order, no per-face vector
+    // traffic on the hot path.
+    float triStack[64];
+    std::vector<float> triSpill;
+    triSpill.reserve(16);
     size_t runBase = 0;
     for (size_t fi = 0; fi < faceCount; ++fi) {
         int const f = restricted ? faces[fi] : int(fi);
@@ -286,23 +291,29 @@ bool UsdGenScatterOp::Capture(
                 size_t(fvi[cbase + size_t(i)]) >= surf.restPoints.size()) { bad = true; break; }
         if (bad) continue;  // malformed face; skip rather than read out of bounds
         // Fan triangulation of face f (the same decomposition
-        // UsdGenPolygonRestArea uses): triArea[t] is the area of the triangle
+        // UsdGenPolygonRestArea uses): triW[t] is the area of the triangle
         // rest[c0], rest[c(t+1)], rest[c(t+2)], nAcc accumulates the face
         // normal. areaRest(f) = UsdGenPolygonRestArea (plan/04 :634); the
         // float sum below equals it up to fp-associativity and is used for the
         // sampling weights so the cumulative weights sum exactly to the
         // denominator.
         GfVec3f const p0 = rest[fvi[cbase]];
-        triArea.clear();
-        triArea.reserve(size_t(nc) - 2);
+        size_t const nFan = size_t(nc) - 2;
+        float *triW = triStack;
+        size_t ntri = nFan;
+        if (nFan > 64) {
+            triSpill.assign(nFan, 0.0f);
+            triW = triSpill.data();
+        }
         double areaRest = 0.0;
         GfVec3f nAcc(0.0f, 0.0f, 0.0f);
         for (int t = 1; t + 1 < nc; ++t) {
             GfVec3f const pb = rest[fvi[cbase + size_t(t)]];
             GfVec3f const pc = rest[fvi[cbase + size_t(t) + 1]];
-            triArea.push_back(UsdGenTriangleArea(
-                p0[0], p0[1], p0[2], pb[0], pb[1], pb[2], pc[0], pc[1], pc[2]));
-            areaRest += double(triArea.back());
+            float const w = UsdGenTriangleArea(
+                p0[0], p0[1], p0[2], pb[0], pb[1], pb[2], pc[0], pc[1], pc[2]);
+            triW[size_t(t) - 1] = w;
+            areaRest += double(w);
             nAcc += GfCross(pb - p0, pc - p0);
         }
         GfVec3f const Nrest = Normalize3(nAcc);
@@ -311,7 +322,7 @@ bool UsdGenScatterOp::Capture(
         // never on these quadrature triangles. Keep coarse face IDs for Ptex.
         int const grid=level ? (1<<level) : 0;
         if(level) {
-            triArea.clear();areaRest=0;
+            triSpill.clear();areaRest=0;
             std::vector<GfVec3f> samples((grid+1)*(grid+1));
             GfVec3f du,dv;
             for(int y=0;y<=grid;++y) for(int x=0;x<=grid;++x)
@@ -323,8 +334,9 @@ bool UsdGenScatterOp::Capture(
                 auto const& a=samples[y*(grid+1)+x];auto const& b=samples[y*(grid+1)+x+1];
                 auto const& c=samples[(y+1)*(grid+1)+x+1];auto const& d=samples[(y+1)*(grid+1)+x];
                 float a0=.5f*GfCross(b-a,c-a).GetLength(),a1=.5f*GfCross(c-a,d-a).GetLength();
-                triArea.push_back(a0);triArea.push_back(a1);areaRest+=double(a0)+double(a1);
+                triSpill.push_back(a0);triSpill.push_back(a1);areaRest+=double(a0)+double(a1);
             }
+            triW = triSpill.data(); ntri = triSpill.size();
         }
 
         double mult = 1.0;
@@ -376,12 +388,12 @@ bool UsdGenScatterOp::Capture(
             float const u0 = UsdGenHash01(hSeedBary0 ^ curveId, kSaltScatterBary);
             float const u1 = UsdGenHash01(hSeedBary1 ^ curveId, kSaltScatterBary + 1u);
             float const u2 = UsdGenHash01(hSeedBary2 ^ curveId, kSaltScatterBary + 2u);
-            size_t ti = triArea.size() - 1;
+            size_t ti = ntri - 1;
             {
                 double cum = 0.0;
                 double const target = double(u0) * areaRest;
-                for (size_t t = 0; t < triArea.size(); ++t) {
-                    cum += double(triArea[t]);
+                for (size_t t = 0; t < ntri; ++t) {
+                    cum += double(triW[t]);
                     if (target < cum) { ti = t; break; }
                 }
             }
