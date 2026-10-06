@@ -289,8 +289,12 @@ _Spans(usdGen::UsdGenCurveBuffer const &curves, std::vector<uint32_t> *spans,
             return _Fail("instance: uniform topology has non-integral CV count",
                          error);
         uint32_t const per = curves.totalCvs / n;
+        // Closed-form fill (bit-identical: (c+1)*per equals per added
+        // c+1 times in uint32 arithmetic): breaks the running-add chain
+        // so the fill vectorizes instead of serializing on 1M dependent
+        // adds.
         for (uint32_t c = 0; c != n; ++c)
-            (*spans)[c + 1] = (*spans)[c] + per;
+            (*spans)[c + 1] = (c + 1) * per;
         return true;
     }
     if (curves.cvOffsets.size() != size_t(n) + 1 || curves.cvOffsets.front() != 0)
