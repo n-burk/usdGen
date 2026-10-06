@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -447,8 +448,26 @@ ScatterGrowStatus CudaScatterGrow::ValidateRoots(
         size_t base = 0;
         size_t const w16 = words & ~size_t(15);
         for (; base < w16; base += 16) {
+#if defined(__aarch64__) && defined(__GNUC__)
+            // Vector OR over the 16-word group (verdict-identical): the
+            // same 16 words feed one OR, then the same exponent test and
+            // the same scalar rescan below. Replaces 16 scalar loads + a
+            // serial 8-deep OR chain with 4 vector loads + a 2-level OR
+            // tree; the lane extraction is plain ORs in another order.
+            // GCC vector extensions (not arm_neon.h: nvcc's frontend
+            // cannot parse that header); memcpy loads are alignment-safe.
+            typedef uint32_t u32x4 __attribute__((vector_size(16)));
+            u32x4 v0, v1, v2, v3;
+            std::memcpy(&v0, u + base + 0, sizeof(v0));
+            std::memcpy(&v1, u + base + 4, sizeof(v1));
+            std::memcpy(&v2, u + base + 8, sizeof(v2));
+            std::memcpy(&v3, u + base + 12, sizeof(v3));
+            u32x4 const o = v0 | v1 | v2 | v3;
+            uint32_t const acc = o[0] | o[1] | o[2] | o[3];
+#else
             uint32_t acc = 0;
             for (size_t k = 0; k < 16; ++k) acc |= u[base + k];
+#endif
             if ((acc & 0x7F800000u) == 0x7F800000u) {
                 for (size_t k = 0; k < 16; ++k) {
                     if ((u[base + k] & 0x7F800000u) == 0x7F800000u)
