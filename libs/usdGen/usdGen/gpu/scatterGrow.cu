@@ -433,11 +433,46 @@ ScatterGrowStatus CudaScatterGrow::ValidateRoots(
     // indices with that tie-break. Each leg is cache-streaming; the old
     // fused loop probed a 36MB dup set at random under a 56MB stream.
     // Finite-inputs leg: first failing index, verbatim condition.
+    // Multi-pass scan (verdict-identical): each plane's first non-finite
+    // float independently bounds the first failing root (a bad lane in
+    // root r's floats makes r bad; all-clean floats before it make every
+    // earlier root clean), so fBad is the minimum over planes. The inner
+    // exponent-OR scans 16 floats per iteration under one branch; a
+    // firing OR re-scans its group scalar for the exact first lane (an
+    // OR combination can false-positive but never false-negative, since
+    // any 0xFF lane sets the OR's exponent field).
+    auto firstBadRoot = [](uint32_t const *u, size_t roots, size_t stride,
+                           size_t lim) -> size_t {
+        size_t const words = std::min(roots, lim) * stride;
+        size_t base = 0;
+        size_t const w16 = words & ~size_t(15);
+        for (; base < w16; base += 16) {
+            uint32_t acc = 0;
+            for (size_t k = 0; k < 16; ++k) acc |= u[base + k];
+            if ((acc & 0x7F800000u) == 0x7F800000u) {
+                for (size_t k = 0; k < 16; ++k) {
+                    if ((u[base + k] & 0x7F800000u) == 0x7F800000u)
+                        return (base + k) / stride;
+                }
+            }
+        }
+        for (; base < words; ++base) {
+            if ((u[base] & 0x7F800000u) == 0x7F800000u)
+                return base / stride;
+        }
+        return lim;
+    };
     size_t fBad = n;
-    for(size_t i=0;i<n;++i) {
-        if(!Finite(r->positions[i])||!Finite(r->rootUV[i])||!Finite(r->rootT[i])||
-           !Finite(r->rootB[i])||!Finite(r->rootN[i])) { fBad = i; break; }
-    }
+    fBad = firstBadRoot(
+        reinterpret_cast<uint32_t const *>(r->positions.data()), n, 3, fBad);
+    fBad = firstBadRoot(
+        reinterpret_cast<uint32_t const *>(r->rootUV.data()), n, 2, fBad);
+    fBad = firstBadRoot(
+        reinterpret_cast<uint32_t const *>(r->rootT.data()), n, 3, fBad);
+    fBad = firstBadRoot(
+        reinterpret_cast<uint32_t const *>(r->rootB.data()), n, 3, fBad);
+    fBad = firstBadRoot(
+        reinterpret_cast<uint32_t const *>(r->rootN.data()), n, 3, fBad);
     // Duplicate leg: minimum second-occurrence index (radix; the set
     // form only past 32-bit index range).
     size_t const dBad = n > uint64_t(std::numeric_limits<uint32_t>::max())
