@@ -2121,6 +2121,100 @@ int main(int argc, char** argv) {
             CHECK(bitEq(hetHit, gpuHit));
             std::puts("Case 26 (balance cap caps full funding): PASS");
         }
+
+        // Case 27: small-split hetero transparency. The 6MiB budget funds
+        // only a few thousand prefix CVs at n=100, so forced hetero runs
+        // a ~4-16k prefix with a large host suffix (fill + hit), bitwise
+        // the forced-GPU run. The funded band pins the small-split shape:
+        // a future funding change that unfunds the pose (or funds past
+        // 16k) fails here instead of silently testing another shape.
+        {
+            DeviceContext::CreateInfo smallCi;
+            smallCi.instance = native->instance;
+            smallCi.physicalDevice = native->physical;
+            smallCi.device = native->device;
+            smallCi.computeQueue = native->queue;
+            smallCi.computeQueueFamily = native->family;
+            smallCi.physicalIndex = native->physicalIndex;
+            smallCi.resourceDeviceId = 8040;
+            smallCi.nativeLifetime = native;
+            smallCi.resources = {size_t{6} << 20, 0};
+            smallCi.shaderFloat64Enabled = true;
+            auto smallContext = DeviceContext::Create(smallCi);
+            CHECK(smallContext);
+            VkResult sstatus = VK_SUCCESS;
+            auto smallPipe = DeformPipeline::Create(smallContext, evalSpv, applySpv,
+                &sstatus, cacheSpv);
+            CHECK(smallPipe && sstatus == VK_SUCCESS);
+            auto runForced = [&](int force, DeformPipeline::BeginInfo info,
+                                 std::vector<float>* out) {
+                TestForceDeformHeteroSuffix(force);
+                DeformSemantic sem = DeformSemantic::Ok;
+                auto c = smallPipe->Begin(std::move(info), &sstatus, &sem);
+                bool ok = c && sstatus == VK_SUCCESS && Prove(native) &&
+                    c->Poll(&sem) == VK_SUCCESS && sem == DeformSemantic::Ok &&
+                    c->succeeded() && ReadOutput(native, smallContext, c, out);
+                TestForceDeformHeteroSuffix(0);
+                return ok;
+            };
+            uint32_t const curves = 2000, perCurve = 10, points = curves * perCurve;
+            int const n = 100;
+            std::vector<float> rest100(size_t(n) * 3);
+            for (int i = 0; i < n; ++i) {
+                rest100[size_t(i) * 3] = float(i % 10);
+                rest100[size_t(i) * 3 + 1] = float((i / 10) % 10);
+                rest100[size_t(i) * 3 + 2] = float(i % 3);
+            }
+            std::vector<float> posed100 = rest100;
+            for (size_t i = 0; i < posed100.size(); i += 3) posed100[i] += 0.1f;
+            std::vector<float> pts(size_t(points) * 3);
+            uint64_t state = 0x5eed2701u;
+            auto next = [&]() {
+                state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+                return float((state >> 11) & 0xffffff) / float(0xffffff) * 2.0f - 1.0f;
+            };
+            for (auto& v : pts) v = next();
+            std::vector<uint32_t> off(curves + 1);
+            for (uint32_t i = 0; i <= curves; ++i) off[i] = i * perCurve;
+            std::vector<float> tgt(size_t(curves) * 3);
+            for (uint32_t i = 0; i < curves; ++i)
+                for (int a = 0; a < 3; ++a)
+                    tgt[size_t(i) * 3 + size_t(a)] = pts[size_t(i) * perCurve * 3 + size_t(a)];
+            auto ptsBuf = Upload(smallContext, pts.data(), pts.size() * sizeof(float));
+            auto offBuf = UploadVulkanDeviceBytes(native, smallContext, off.data(),
+                off.size() * sizeof(uint32_t));
+            auto tgtBuf = Upload(smallContext, tgt.data(), tgt.size() * sizeof(float));
+            CHECK(ptsBuf && offBuf && tgtBuf);
+            auto mkSmall = [&]() {
+                DeformPipeline::BeginInfo info;
+                info.points = ptsBuf;
+                info.curveOffsets = offBuf;
+                info.rootTargets = tgtBuf;
+                info.curveCount = curves;
+                info.pointCount = points;
+                info.restSamples = rest100;
+                info.posedSamples = posed100;
+                info.sampleCount = n;
+                info.smoothing = 0.0;
+                info.mask = {1.0f, 1, nullptr, 0};
+                info.enabled = {1, 1, nullptr, 0};
+                info.lockRoots = {0, 1, nullptr, 0};
+                info.groomEnvelope = 1.0f;
+                return info;
+            };
+            uint64_t r0 = DeformHeteroSuffixRunsForTesting();
+            std::vector<float> hetFill, hetHit, gpuHit;
+            CHECK(runForced(1, mkSmall(), &hetFill));
+            CHECK(runForced(1, mkSmall(), &hetHit));
+            CHECK(DeformHeteroSuffixRunsForTesting() - r0 == 2);
+            uint32_t const funded = DeformEvalCacheFundedPrefixForTesting();
+            CHECK(funded >= 4096 && funded <= 16384);
+            CHECK(runForced(-1, mkSmall(), &gpuHit));
+            CHECK(DeformHeteroSuffixRunsForTesting() - r0 == 2);
+            CHECK(bitEq(hetFill, gpuHit));
+            CHECK(bitEq(hetHit, gpuHit));
+            std::puts("Case 27 (small-split hetero bitwise GPU): PASS");
+        }
     }
 
     std::puts("Vulkan deform pipeline: PASS");
