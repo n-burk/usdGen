@@ -189,13 +189,13 @@ bool UsdGenScatterOp::Capture(
     }
 
     // Face list: whole mesh or the GeomSubset restriction (R15). An empty
-    // subset selects no face.
+    // subset selects no face. Unrestricted capture walks faces 0..F-1
+    // directly (f == fi) instead of materializing the identity table.
+    bool const restricted = UsdGenSurfaceRestricted(surf);
     std::vector<int> faces;
-    if (UsdGenSurfaceRestricted(surf)) faces.assign(surf.subsetFaces.cbegin(), surf.subsetFaces.cend());
-    else {
-        faces.resize(surf.faceVertexCounts.size());
-        std::iota(faces.begin(), faces.end(), 0);
-    }
+    if (restricted) faces.assign(surf.subsetFaces.cbegin(), surf.subsetFaces.cend());
+    size_t const faceCount =
+        restricted ? faces.size() : surf.faceVertexCounts.size();
 
     UsdGenScatterCapture &cap = *static_cast<UsdGenScatterCapture *>(out);
     UsdGenCurveBuffer &buf = cap.MutableBuffer();
@@ -212,10 +212,15 @@ bool UsdGenScatterOp::Capture(
     }
 
     // faceVertexIndices are FACE-RELATIVE (02 §2.2): face f's corners are
-    // fvi[cornerOff[f] .. cornerOff[f] + fvc[f]).
-    std::vector<size_t> cornerOff(surf.faceVertexCounts.size() + 1, 0);
-    for (size_t f = 0; f < surf.faceVertexCounts.size(); ++f)
-        cornerOff[f + 1] = cornerOff[f] + size_t(fvc[f]);
+    // fvi[cornerOff[f] .. cornerOff[f] + fvc[f]). Unrestricted faces run in
+    // order, so the loop below accumulates the running base instead of the
+    // table; the table is built only for subset (out-of-order) capture.
+    std::vector<size_t> cornerOff;
+    if (restricted) {
+        cornerOff.assign(surf.faceVertexCounts.size() + 1, 0);
+        for (size_t f = 0; f < surf.faceVertexCounts.size(); ++f)
+            cornerOff[f + 1] = cornerOff[f] + size_t(fvc[f]);
+    }
 
     const double density = p ? p->GetDouble(TfToken("density"), 100.0) : 100.0;
     if (!std::isfinite(density) || density < 0.0) {
@@ -253,19 +258,28 @@ bool UsdGenScatterOp::Capture(
     std::vector<int> aPrim;
     std::vector<GfVec2f> aUv;
     std::vector<GfVec3f> aT, aN, aB;
-    ax.reserve(faces.size() * 4); ay.reserve(faces.size() * 4); az.reserve(faces.size() * 4);
-    aids.reserve(faces.size() * 4); aPrim.reserve(faces.size() * 4);
-    aUv.reserve(faces.size() * 4); aT.reserve(faces.size() * 4);
-    aN.reserve(faces.size() * 4); aB.reserve(faces.size() * 4);
+    ax.reserve(faceCount * 4); ay.reserve(faceCount * 4); az.reserve(faceCount * 4);
+    aids.reserve(faceCount * 4); aPrim.reserve(faceCount * 4);
+    aUv.reserve(faceCount * 4); aT.reserve(faceCount * 4);
+    aN.reserve(faceCount * 4); aB.reserve(faceCount * 4);
     std::vector<float> triArea;
     triArea.reserve(16);
-    for (size_t fi = 0; fi < faces.size(); ++fi) {
-        int const f = faces[fi];
+    size_t runBase = 0;
+    for (size_t fi = 0; fi < faceCount; ++fi) {
+        int const f = restricted ? faces[fi] : int(fi);
         if (f < 0 || size_t(f) >= surf.faceVertexCounts.size()) continue;  // bad subset
+        // Running corner base (unrestricted): fvc[f] is valid here (the
+        // range check passed), and this advance runs for every face —
+        // ahead of the skips below — so runBase == cornerOff[fi] exactly.
+        size_t cbase;
+        if (restricted) cbase = cornerOff[f];
+        else {
+            cbase = runBase;
+            runBase += size_t(fvc[f]);
+        }
         if(level && limit.IsHole(f)) continue;
         int const nc = fvc[f];
         if (nc < 3) continue;
-        size_t const cbase = cornerOff[f];
         bool bad = false;
         for (int i = 0; i < nc; ++i)
             if (fvi[cbase + size_t(i)] < 0 ||
