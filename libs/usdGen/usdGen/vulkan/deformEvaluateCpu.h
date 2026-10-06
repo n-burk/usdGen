@@ -14,7 +14,9 @@
 // The W-wide blocking mirrors rbfField.cpp's DisplaceBlocked: W queries
 // share one sample pass so the fp64 sqrt/FMA pipelines stay fed (a
 // one-CV-at-a-time port exposes the full sqrt latency and runs ~15x
-// slower). The tail runs the same scalar expression text as the block.
+// slower). Twelve is the measured sweet spot: eight leaves vector-sqrt
+// throughput exposed, sixteen spills, thirty-two falls off a cliff. The
+// tail runs the same scalar expression text as the block.
 
 #pragma once
 
@@ -161,7 +163,7 @@ inline bool DeformEvaluateCpu(DeformEvalCpuParams const& p, float const* qs, flo
     if (count == 0) return true;
     if (!qs || !ds || !p.samples || !p.coef || !flag || p.n < 1 || p.m != p.n + 4)
         return false;
-    constexpr size_t W = 8;
+    constexpr size_t W = 12;
     bool bad = false;
     size_t t = 0, blocks = count / W;
     for (size_t b = 0; b < blocks; ++b, t += W)
