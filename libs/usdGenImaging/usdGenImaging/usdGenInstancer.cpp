@@ -56,6 +56,16 @@ _Draw01(int seed, uint64_t curveId, uint32_t salt)
     return float(h >> 8) * 0x1.0p-24f;
 }
 
+// _Draw01 with the loop-invariant seed fold precomputed: keying by
+// (seedHash ^ curveId) is exactly _Draw01's spelling with the hoisted
+// _Hash64(seed32, salt). Integer-only; bit-identical by construction.
+float
+_Draw01Seeded(uint64_t seedHash, uint64_t curveId, uint32_t salt)
+{
+    const uint32_t h = uint32_t(_Hash64(seedHash ^ curveId, salt) >> 32);
+    return float(h >> 8) * 0x1.0p-24f;
+}
+
 // -- R11 scalar ramp (canonical: usdGenMath/usdGenMath/ramp.cpp EvalOne) ------
 // Same segment search, same clamped ends, same basis weights, same unknown-
 // token linear fallback. Empty / single-knot input is the flat 1.0 ramp.
@@ -504,6 +514,14 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
     double weightTotal = 0.0;
     for (float w : params.weights) weightTotal += double(w);
 
+    // Hoisted draw seed folds (bit-identical CSE): params.seed is
+    // loop-invariant, so each draw salt's _Hash64(seed32, salt) is computed
+    // once per Bake instead of once per curve per draw.
+    uint64_t const seed32 = uint64_t(uint32_t(params.seed));
+    uint64_t const seedProto = _Hash64(seed32, kSaltInstanceProto);
+    uint64_t const seedScale = _Hash64(seed32, kSaltInstanceScale);
+    uint64_t const seedTwist = _Hash64(seed32, kSaltInstanceTwist);
+
     UsdGenInstanceResult out;
     out.instancerPath = instancerPath;
     out.prototypePaths = protoPaths;
@@ -528,11 +546,11 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
         uint32_t proto = 0;
         if (params.weights.empty()) {
             float const d =
-                _Draw01(params.seed, curveId, kSaltInstanceProto);
+                _Draw01Seeded(seedProto, curveId, kSaltInstanceProto);
             proto = std::min(uint32_t(d * float(nProtos)), uint32_t(nProtos - 1));
         } else {
             float const d =
-                _Draw01(params.seed, curveId, kSaltInstanceProto);
+                _Draw01Seeded(seedProto, curveId, kSaltInstanceProto);
             double const x = double(d) * weightTotal;
             double accum = 0.0;
             proto = uint32_t(nProtos - 1);
@@ -548,7 +566,7 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
         out.instanceIndices[proto].push_back(int(c));
 
         float const sDraw =
-            _Draw01(params.seed, curveId, kSaltInstanceScale);
+            _Draw01Seeded(seedScale, curveId, kSaltInstanceScale);
         float const s = params.scale * (lo + (hi - lo) * sDraw);
 
         if (!isCards) {
@@ -610,7 +628,7 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
         float twDeg = params.twist;
         if (!twistConst) {
             float const tDraw =
-                _Draw01(params.seed, curveId, kSaltInstanceTwist);
+                _Draw01Seeded(seedTwist, curveId, kSaltInstanceTwist);
             twDeg =
                 params.twist + params.twistRandom * (tDraw * 2.0f - 1.0f);
         }
