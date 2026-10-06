@@ -430,6 +430,7 @@ struct NodeExecution
     bool reCaptured = false;
     bool expressionsChanged = false;
     bool shouldSweep = false;
+    bool sweptDirect = false;   // capture wrote the outputs; sweep skipped
     bool evalAll = false;
     bool anyChunkDirty = false;
     std::chrono::steady_clock::time_point captureStart;
@@ -908,6 +909,31 @@ UsdGenRunResult UsdGenScheduler::Run(
         cctx.upstreamCount = static_cast<uint32_t>(job->upstreamInputs.size());
         cctx.dispatcher = &dispatcher;
         cctx.diag = &nodeDiag;
+        // Capture-direct output: the node's previous-run point planes for
+        // an op that writes its sweep's result during capture, plus the
+        // chunk partition and this run's fused slots for extent recording
+        // (slots for the armed writer only). Captures verify counts,
+        // aliasing, and nesting before writing anything, and the
+        // interleave revalidates recorded spans, so anything unexpected
+        // fails closed into the sweep path. Progressive cooks keep the
+        // sweep (per-chunk completion), so they offer no direct planes.
+        if (!tileCompleted) {
+            UsdGenCurveBuffer const &nbuf = node.buffer;
+            bool const outSized = nbuf.totalCvs > 0 &&
+                nbuf.px.size() == nbuf.totalCvs &&
+                nbuf.py.size() == nbuf.totalCvs &&
+                nbuf.pz.size() == nbuf.totalCvs;
+            cctx.outPx = outSized ? const_cast<float *>(nbuf.px.cdata()) : nullptr;
+            cctx.outPy = outSized ? const_cast<float *>(nbuf.py.cdata()) : nullptr;
+            cctx.outPz = outSized ? const_cast<float *>(nbuf.pz.cdata()) : nullptr;
+            cctx.outPlaneCvs = outSized ? size_t(nbuf.totalCvs) : 0;
+            cctx.chunks = node.chunks.empty() ? nullptr : node.chunks.data();
+            cctx.chunkCount = node.chunks.size();
+            if (pos == extentWriter && extentWriter >= 0) {
+                cctx.chunkExtentSlots = extentScratch.data();
+                cctx.chunkExtentCount = extentChunks;
+            }
+        }
 
         // Connected parameters are evaluated ONCE per cook, here, over this
         // node's INPUT geometry and before its capture identity is taken --
@@ -1102,6 +1128,16 @@ UsdGenRunResult UsdGenScheduler::Run(
             pl.extentBase = extentScratch.data();
             pl.extentCap = extentChunks;
         }
+        // Capture-direct: this run's capture wrote the output planes, so
+        // no sweep to run. Freshness comes from the re-capture flag, never
+        // from the (possibly reused) capture alone. Preparation above
+        // still runs (topology inherit, pass-through planes); the
+        // post-frontier loop publishes what a full sweep would have.
+        if (job->reCaptured && node.capture && node.capture->WroteDirectOutput()) {
+            job->sweptDirect = true;
+            job->shouldSweep = false;
+            return true;
+        }
         job->shouldSweep = true;
         return true;
     };
@@ -1226,6 +1262,29 @@ UsdGenRunResult UsdGenScheduler::Run(
                     extentSwept = true;
                     for (uint8_t b : job.sweep.didEval)
                         if (!b) extentSwept = false;
+                }
+                if (int(frontier[j]) == extentWriter && job.sweptDirect &&
+                    node.capture && node.capture->RecordedChunkExtents())
+                    extentSwept = true;
+                if (job.sweptDirect) {
+                    // A capture-direct node wrote every output and recorded
+                    // (or, gateless, skipped) its extents: publish exactly
+                    // what a full sweep would have (fresh values, touched
+                    // tiles, cleared dirt, stats with no eval leg).
+                    node.buffer.valueVersion += 1;
+                    for (size_t c = 0; c < node.chunks.size(); ++c)
+                        if (node.chunks[c].tile < tileTouched.size())
+                            tileTouched[node.chunks[c].tile] = 1;
+                    std::fill(node.chunkDirty.begin(), node.chunkDirty.end(),
+                              UsdGenDirtyNone);
+                    auto const end = std::chrono::steady_clock::now();
+                    UsdGenNodeRunStats st;
+                    st.id = static_cast<UsdGenNodeId>(frontier[j]);
+                    st.captureMs = std::chrono::duration<double, std::milli>(
+                        job.captureEnd - job.captureStart).count();
+                    st.evalMs = 0.0;
+                    st.chunksEvaluated = node.chunks.size();
+                    result.nodeStats.push_back(st);
                 }
                 if (job.shouldSweep) {
                     bool wrote = job.reCaptured;

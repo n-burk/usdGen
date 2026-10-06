@@ -122,17 +122,21 @@ private:
 
 struct UsdGenDeformCapture final : public UsdGenCapture
 {
-    UninitFloatBuffer result;                     // 3 * totalCvs
+    UninitFloatBuffer result;                     // 3 * totalCvs, interleaved triples
     uint64_t upstreamTopologyVersion = 0;
     uint64_t upstreamValueVersion = 0;
     uint32_t upstreamCurves = 0;
     uint32_t upstreamCvs = 0;
     size_t samples = 0;                           // RBF samples used
+    bool wroteDirect = false;    // output planes written, no result to sweep
+    bool extentsRecorded = false;                 // per-chunk slots written
 
     std::unique_ptr<UsdGenCapture> Clone() const override
     {
         return std::make_unique<UsdGenDeformCapture>(*this);
     }
+    bool RecordedChunkExtents() const override { return extentsRecorded; }
+    bool WroteDirectOutput() const override { return wroteDirect; }
     bool ValidForTopology(UsdGenCurveBuffer const &upstream) const override
     {
         return upstream.topologyVersion == upstreamTopologyVersion &&
@@ -584,6 +588,28 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
         ? p->GetScalarField(sLockRoots, p->GetBool(sLockRoots, true) ? 1.0 : 0.0)
         : UsdGenParamField{1.0};
 
+    // Capture-direct output: with a uniform-1 mask the sweep would store
+    // the result verbatim, so the capture stores the output planes itself
+    // (planar, same floats the sweep would write) and the scheduler skips
+    // the sweep. The planes must be exactly this upstream's count, mutual
+    // distinct, and unaliased from the upstream planes; the strand spans
+    // tile [0, totalCvs), so every output CV is written exactly once.
+    // Anything unexpected keeps the result path below. Recording needs the
+    // chunk partition and the armed writer's slots on top of that.
+    UsdGenParamField const maskField = p
+        ? p->GetScalarField(sMask, 1.0) : UsdGenParamField{1.0};
+    bool const maskUniformOne =
+        maskField.Uniform() && maskField.Value(0, 0) == 1.0;
+    bool const direct = !wrap && maskUniformOne && R > 0 && totalCvs > 0 &&
+        ctx.outPx != nullptr && ctx.outPy != nullptr && ctx.outPz != nullptr &&
+        ctx.outPlaneCvs == totalCvs &&
+        ctx.outPx != ctx.outPy && ctx.outPy != ctx.outPz && ctx.outPx != ctx.outPz &&
+        ctx.outPx != upstream.px.cdata() && ctx.outPy != upstream.py.cdata() &&
+        ctx.outPz != upstream.pz.cdata();
+
+    // The result fills even in direct mode: a later sweep without
+    // re-capture (a value-only edit reuses the capture) must find the
+    // deformed values, not an empty buffer.
     cap.result.resizeUninit(totalCvs * 3);
     rbf::CubicField const &field = field_;
     UninitFloatBuffer &result = cap.result;
@@ -600,6 +626,15 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
     // per strand) L1-resident.
     size_t constexpr kGroupStrands = 32;
     size_t const groups = (R + kGroupStrands - 1) / kGroupStrands;
+    bool const recordExtents = direct && ctx.chunks != nullptr && ctx.chunkCount > 0 &&
+        ctx.chunkExtentSlots != nullptr &&
+        ctx.chunkCount == ctx.chunkExtentCount;
+    // One slot per strand group (disjoint across workers, so no locking);
+    // the serial reduce below folds them into chunk slots in group order,
+    // which visits every stored CV exactly once in the sweep's order.
+    std::vector<GfRange3f> groupExtents;
+    if (recordExtents) groupExtents.resize(groups);
+    float *outPx = ctx.outPx, *outPy = ctx.outPy, *outPz = ctx.outPz;
     ParallelFor(ctx.dispatcher, groups, [&](size_t g) {
         size_t const c0 = g * kGroupStrands, c1 = std::min(c0 + kGroupStrands, R);
         if (!wrap) {
@@ -624,6 +659,41 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
                     batchQ[o + cv - first] = GfVec3d(opUtil::Point(upstream, cv));
             }
             field.DisplaceBatch(batchQ.data(), batchD.data(), total);
+            if (direct) {
+                // Direct stores plus a local range: adjacent groups share
+                // cache lines in groupExtents, so the per-CV accumulation
+                // stays in registers and publishes once per group. The
+                // stored floats are exactly what the full-mask sweep would
+                // copy out of a result buffer. The result fills too, for a
+                // later sweep without re-capture (a value-only edit reuses
+                // this capture's deformed values).
+                GfRange3f groupRange;
+                for (size_t c = c0; c < c1; ++c) {
+                    size_t const first = spanAt(c), last = spanAt(c + 1);
+                    if (first >= last) continue;
+                    size_t const o = qoff[c - c0];
+                    GfVec3d const shift =
+                        lock.Value(c, first) != 0.0 ? batchD[o] : GfVec3d(0.0);
+                    for (size_t cv = first; cv < last; ++cv) {
+                        GfVec3d const x(opUtil::Point(upstream, cv));
+                        GfVec3d const moved = x + batchD[o + cv - first] - shift;
+                        float const f0 = float(moved[0]);
+                        float const f1 = float(moved[1]);
+                        float const f2 = float(moved[2]);
+                        outPx[cv] = f0;
+                        outPy[cv] = f1;
+                        outPz[cv] = f2;
+                        result[cv * 3] = f0;
+                        result[cv * 3 + 1] = f1;
+                        result[cv * 3 + 2] = f2;
+                        if (recordExtents) groupRange.ExtendBy(GfVec3f(f0, f1, f2));
+                        if (!std::isfinite(f0) || !std::isfinite(f1) || !std::isfinite(f2))
+                            nonFinite.store(true, std::memory_order_relaxed);
+                    }
+                }
+                if (recordExtents) groupExtents[g] = groupRange;
+                return;
+            }
             for (size_t c = c0; c < c1; ++c) {
                 size_t const first = spanAt(c), last = spanAt(c + 1);
                 if (first >= last) continue;
@@ -670,8 +740,79 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
             }
         }
     });
-    if (nonFinite.load(std::memory_order_relaxed))
+    if (nonFinite.load(std::memory_order_relaxed)) {
+        // Failure atomicity: direct mode leaves a partial mix of old and
+        // new values in the output planes; restore the input (the sweep's
+        // identity fallback) so a failed run never publishes mixed
+        // garbage. Failure-only cost.
+        if (direct) {
+            std::memcpy(outPx, upstream.px.cdata(), totalCvs * sizeof(float));
+            std::memcpy(outPy, upstream.py.cdata(), totalCvs * sizeof(float));
+            std::memcpy(outPz, upstream.pz.cdata(), totalCvs * sizeof(float));
+        }
         return fail("the deformation produced a non-finite point");
+    }
+    // Publish only on success: a failed capture claims neither flag, and
+    // the reduce below publishes the slots only on full success.
+    if (direct) cap.wroteDirect = true;
+    if (recordExtents) {
+        // Fold group ranges into the scheduler's chunk slots. Groups tile
+        // [0, R) and chunks must tile [0, R) contiguously, so every group
+        // nests in exactly one chunk; verify both before writing any slot
+        // so a future chunking change fails closed into the sweep's own
+        // recording. Unioning group ranges in group order reproduces the
+        // sweep's per-CV ExtendBy sequence bitwise (GfRange keeps the
+        // incumbent on ties under either spelling).
+        size_t chunk = 0;
+        bool nested = ctx.chunkCount > 0 && ctx.chunks[0].firstCurve == 0;
+        for (size_t k = 1; nested && k < ctx.chunkCount; ++k)
+            nested = ctx.chunks[k].firstCurve == ctx.chunks[k - 1].firstCurve +
+                ctx.chunks[k - 1].curveCount;
+        if (nested) {
+            UsdGenChunkDesc const &last = ctx.chunks[ctx.chunkCount - 1];
+            nested = size_t(last.firstCurve + last.curveCount) == R;
+        }
+        for (size_t g = 0; nested && g < groups; ++g) {
+            size_t const gFirst = g * kGroupStrands;
+            size_t const gLast = std::min(gFirst + kGroupStrands, R);
+            while (chunk < ctx.chunkCount &&
+                   size_t(ctx.chunks[chunk].firstCurve + ctx.chunks[chunk].curveCount) <=
+                       gFirst)
+                ++chunk;
+            nested = chunk < ctx.chunkCount &&
+                ctx.chunks[chunk].firstCurve <= gFirst &&
+                gLast <= size_t(ctx.chunks[chunk].firstCurve +
+                                ctx.chunks[chunk].curveCount);
+        }
+        if (nested) {
+            // Reduce into locals first: the slots publish only on full
+            // success, so an abandoned walk can never leave partial
+            // extents behind valid spans.
+            std::vector<UsdGenChunkExtent> local(ctx.chunkCount);
+            chunk = 0;
+            for (size_t g = 0; g < groups; ++g) {
+                size_t const gFirst = g * kGroupStrands;
+                while (chunk < ctx.chunkCount &&
+                       size_t(ctx.chunks[chunk].firstCurve +
+                              ctx.chunks[chunk].curveCount) <= gFirst)
+                    ++chunk;
+                if (chunk >= ctx.chunkCount) { nested = false; break; }
+                UsdGenChunkDesc const &cd = ctx.chunks[chunk];
+                UsdGenChunkExtent &slot = local[chunk];
+                slot.extent.UnionWith(groupExtents[g]);
+                slot.firstCurve = cd.firstCurve;
+                slot.curveCount = cd.curveCount;
+                slot.liveCount = cd.liveCount;
+                slot.firstCv = cd.firstCv;
+                slot.cvCount = cd.cvCount;
+            }
+            if (nested) {
+                for (size_t k = 0; k < ctx.chunkCount; ++k)
+                    ctx.chunkExtentSlots[k] = local[k];
+                cap.extentsRecorded = true;
+            }
+        }
+    }
     return true;
 }
 

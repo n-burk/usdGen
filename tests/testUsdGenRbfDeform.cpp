@@ -1170,48 +1170,11 @@ void CheckPlaybackNotices()
 
 } // namespace
 
-void CheckFusedTileExtents()
+void CheckTilesMatchSequential(UsdGenGraph const &graph, std::string const &what)
 {
-    // The tile interleave fuses per-chunk extents recorded by the deform
-    // sweep (the deepest points-writer here is the terminal deform) instead
-    // of re-reading every point. Two commits on one graph: the recompiled
-    // pose sweeps the deform, and every dirtied tile must publish bitwise
-    // the sequential extent and counts over the terminal points.
-    UsdStageRefPtr const stage = UsdStage::Open(kScene);
-    if (!stage) { Check(false, "fused extents: cannot open the scene"); return; }
-    auto build = [&](double time) {
-        usdGenImaging::UsdGenGraphDescBuildOptions options;
-        options.time = time;
-        return usdGenImaging::BuildGraphDescFromStage(stage, kDescription, options);
-    };
-    UsdGenCompiler compiler;
-    UsdGenGraph graph;
-    UsdGenGraphDesc desc = build(1.0);
-    if (!compiler.Compile(desc, &graph).ok) {
-        Check(false, "fused extents: the rest pose compiles"); return;
-    }
-    UsdGenScheduler scheduler(4);
-    UsdGenEvalContext context;
-    context.time = 1.0;
-    uint64_t gen = 0;
-    if (scheduler.Run(graph, context, ++gen).diagnostics.HasErrors()) {
-        Check(false, "fused extents: the rest pose cooks"); return;
-    }
-    desc = build(20.0);
-    context.time = 20.0;
-    if (!compiler.Recompile(desc, &graph).ok) {
-        Check(false, "fused extents: the pose recompiles"); return;
-    }
-    UsdGenRunResult const run = scheduler.Run(graph, context, ++gen);
-    if (run.diagnostics.HasErrors()) {
-        Check(false, "fused extents: the pose cooks"); return;
-    }
-    bool swept = false;
-    for (auto const &st : run.nodeStats)
-        if (graph.Node(st.id).type == TfToken("UsdGenDeform") && st.chunksEvaluated > 0)
-            swept = true;
-    Check(swept, "fused extents: the pose sweeps the deform");
-    if (!swept) return;
+    // Every dirtied tile must publish bitwise the sequential extent and
+    // counts over the terminal points. Untouched tiles keep their previous
+    // extent and are skipped.
     UsdGenCompiledNode const &tn = graph.Node(graph.TerminalNodeId());
     UsdGenCurveBuffer const &term = graph.Output();
     bool const ragged = !term.cvOffsets.empty();
@@ -1263,10 +1226,296 @@ void CheckFusedTileExtents()
                 std::memcmp(&tv.extent.GetMax(), &ref.GetMax(), sizeof(GfVec3f)) == 0;
         countsOk += tv.totalLiveCurves == liveCurves && tv.totalLiveCvs == liveCvs;
     }
-    Check(compared > 0, "fused extents: the pose dirties tiles");
+    Check(compared > 0, what + ": the pose dirties tiles");
     Check(compared > 0 && extentsOk == compared && countsOk == compared,
-          "fused tile extents and counts are bitwise the sequential pass (" +
+          what + ": tile extents and counts are bitwise the sequential pass (" +
               std::to_string(compared) + " tiles)");
+}
+
+void CheckFusedTileExtents()
+{
+    // The tile interleave fuses per-chunk extents recorded by the deform
+    // (the deepest points-writer here is the terminal deform) instead of
+    // re-reading every point. Two commits on one graph: the recompiled
+    // pose re-captures the deform, and every dirtied tile must publish
+    // bitwise the sequential extent and counts over the terminal points.
+    UsdStageRefPtr const stage = UsdStage::Open(kScene);
+    if (!stage) { Check(false, "fused extents: cannot open the scene"); return; }
+    auto build = [&](double time) {
+        usdGenImaging::UsdGenGraphDescBuildOptions options;
+        options.time = time;
+        return usdGenImaging::BuildGraphDescFromStage(stage, kDescription, options);
+    };
+    UsdGenCompiler compiler;
+    UsdGenGraph graph;
+    UsdGenGraphDesc desc = build(1.0);
+    if (!compiler.Compile(desc, &graph).ok) {
+        Check(false, "fused extents: the rest pose compiles"); return;
+    }
+    UsdGenScheduler scheduler(4);
+    UsdGenEvalContext context;
+    context.time = 1.0;
+    uint64_t gen = 0;
+    if (scheduler.Run(graph, context, ++gen).diagnostics.HasErrors()) {
+        Check(false, "fused extents: the rest pose cooks"); return;
+    }
+    desc = build(20.0);
+    context.time = 20.0;
+    if (!compiler.Recompile(desc, &graph).ok) {
+        Check(false, "fused extents: the pose recompiles"); return;
+    }
+    UsdGenRunResult const run = scheduler.Run(graph, context, ++gen);
+    if (run.diagnostics.HasErrors()) {
+        Check(false, "fused extents: the pose cooks"); return;
+    }
+    bool swept = false;
+    for (auto const &st : run.nodeStats)
+        if (graph.Node(st.id).type == TfToken("UsdGenDeform") && st.chunksEvaluated > 0)
+            swept = true;
+    Check(swept, "fused extents: the pose produces the deform outputs");
+    if (!swept) return;
+    // Engagement: this scene's deform has a uniform-1 mask, so the pose
+    // capture must have written direct with recorded extents; otherwise
+    // the comparison below exercises the point pass, not the fused path.
+    int deforms = 0;
+    bool direct = true, recorded = true;
+    for (size_t i = 0; i < size_t(graph.NodeCount()); ++i) {
+        UsdGenCompiledNode const &n = graph.Node(UsdGenNodeId(i));
+        if (n.type != TfToken("UsdGenDeform") || !n.capture) continue;
+        ++deforms;
+        direct = direct && n.capture->WroteDirectOutput();
+        recorded = recorded && n.capture->RecordedChunkExtents();
+    }
+    Check(deforms > 0, "fused extents: the scene has a deform");
+    Check(direct, "fused extents: the pose capture wrote direct");
+    Check(recorded, "fused extents: the pose capture recorded chunk extents");
+    CheckTilesMatchSequential(graph, "fused extents");
+}
+
+// Capture-direct through a chained pair: the upstream deform goes direct
+// without recording (slots belong to the deepest writer alone) while the
+// terminal deform records, and both publish bitwise-sequential tiles.
+void CheckCaptureDirectChained()
+{
+    UsdGenGraphDesc desc = MakeSmallSurfaceDeformDesc();
+    UsdGenNodeDesc second;
+    second.path = SdfPath("/groom/deform2");
+    second.type = TfToken("UsdGenDeform");
+    second.enabled = true;
+    second.seed = 45;
+    second.inputs.push_back(SdfPath("/groom/deform"));
+    second.surfaces.push_back(SdfPath("/groom/surface"));
+    desc.nodes.push_back(second);
+    for (auto &n : desc.nodes)
+        if (n.path == SdfPath("/groom/deform2")) {
+            n.params.push_back(UsdGenParamValue{TfToken("rbfSamples"), VtValue(100), false});
+            n.params.push_back(UsdGenParamValue{TfToken("lockRoots"), VtValue(true), false});
+        }
+    desc.terminal = SdfPath("/groom/deform2");
+    UsdGenCompiler compiler;
+    UsdGenGraph graph;
+    Check(compiler.Compile(desc, &graph).ok, "chained direct: the fixture compiles");
+    UsdGenNodeId const d1 = graph.NodeIdForPath(SdfPath("/groom/deform"));
+    UsdGenNodeId const d2 = graph.NodeIdForPath(SdfPath("/groom/deform2"));
+    if (d1 == kUsdGenInvalidNode || d2 == kUsdGenInvalidNode) {
+        Check(false, "chained direct: both deforms compile");
+        return;
+    }
+    UsdGenScheduler scheduler(2);
+    UsdGenEvalContext ctx;
+    uint64_t gen = 0;
+    auto runPose = [&]() -> bool {
+        UsdGenCompileResult const rr = compiler.Recompile(desc, &graph);
+        ctx.desc = &graph.Desc();
+        UsdGenRunResult const run = scheduler.Run(graph, ctx, ++gen);
+        return rr.ok && !run.diagnostics.HasErrors();
+    };
+    auto bend = [&](double t) {
+        VtVec3fArray const &rest = desc.surfaces[0].restPoints;
+        desc.surfaces[0].points.resize(rest.size());
+        for (size_t i = 0; i < rest.size(); ++i) {
+            GfVec3f const r = rest[i];
+            float const b = float(0.6 * std::sin(0.05 * r[0] + t) *
+                                   std::cos(0.04 * r[1] - 0.5 * t));
+            desc.surfaces[0].points[i] = GfVec3f(r[0], r[1], r[2] + b);
+        }
+    };
+    bend(0.0);
+    Check(runPose(), "chained direct: the rest pose cooks");
+    bend(1.0);
+    Check(runPose(), "chained direct: a bent pose cooks");
+    UsdGenCompiledNode const &n1 = graph.Node(d1);
+    UsdGenCompiledNode const &n2 = graph.Node(d2);
+    bool const d1direct = n1.capture && n1.capture->WroteDirectOutput();
+    bool const d1recorded = n1.capture && n1.capture->RecordedChunkExtents();
+    bool const d2direct = n2.capture && n2.capture->WroteDirectOutput();
+    bool const d2recorded = n2.capture && n2.capture->RecordedChunkExtents();
+    Check(d1direct && !d1recorded,
+          "chained direct: the upstream deform writes direct without recording");
+    Check(d2direct && d2recorded,
+          "chained direct: the terminal deform writes direct and records");
+    CheckTilesMatchSequential(graph, "chained direct");
+}
+
+// A mask edit reuses the direct capture without re-capturing: the sweep
+// must blend from the capture's deformed values (not the input), bitwise
+// the float lerp of the direct outputs.
+void CheckCaptureDirectMaskReuse()
+{
+    UsdGenGraphDesc desc = MakeSmallSurfaceDeformDesc();
+    UsdGenCompiler compiler;
+    UsdGenGraph graph;
+    Check(compiler.Compile(desc, &graph).ok, "mask reuse: the fixture compiles");
+    UsdGenNodeId const deformId = graph.NodeIdForPath(SdfPath("/groom/deform"));
+    UsdGenNodeId const growId = graph.Node(deformId).input;
+    auto *op = static_cast<UsdGenDeformOp *>(graph.Node(deformId).op.get());
+    UsdGenScheduler scheduler(2);
+    UsdGenEvalContext ctx;
+    uint64_t gen = 0;
+    auto runPose = [&]() -> bool {
+        UsdGenCompileResult const rr = compiler.Recompile(desc, &graph);
+        ctx.desc = &graph.Desc();
+        UsdGenRunResult const run = scheduler.Run(graph, ctx, ++gen);
+        return rr.ok && !run.diagnostics.HasErrors();
+    };
+    Check(runPose(), "mask reuse: the rest pose cooks");
+    // Bend the drivers so the direct cook differs from the rest cook.
+    VtVec3fArray const &rest = desc.surfaces[0].restPoints;
+    desc.surfaces[0].points.resize(rest.size());
+    for (size_t i = 0; i < rest.size(); ++i) {
+        GfVec3f const r = rest[i];
+        float const b = float(0.6 * std::sin(0.05 * r[0] + 0.35) *
+                               std::cos(0.04 * r[1] - 0.175));
+        desc.surfaces[0].points[i] = GfVec3f(r[0], r[1], r[2] + b);
+    }
+    Check(runPose(), "mask reuse: a bent pose cooks");
+    UsdGenCapture const *directCap = graph.Node(deformId).capture.get();
+    UsdGenEpoch const directEpoch = graph.Node(deformId).captureEpoch;
+    Check(directCap && directCap->WroteDirectOutput(),
+          "mask reuse: the bent cook goes direct");
+    if (!directCap || !directCap->WroteDirectOutput()) return;
+    UsdGenCurveBuffer const &up = graph.Node(growId).buffer;
+    std::vector<float> const beforeX(up.px.begin(), up.px.end());
+    std::vector<float> const beforeY(up.py.begin(), up.py.end());
+    std::vector<float> const beforeZ(up.pz.begin(), up.pz.end());
+    UsdGenCurveBuffer const &term = graph.Node(deformId).buffer;
+    std::vector<float> const directX(term.px.begin(), term.px.end());
+    std::vector<float> const directY(term.py.begin(), term.py.end());
+    std::vector<float> const directZ(term.pz.begin(), term.pz.end());
+    // Vacuity guard: the pose must actually move points, or the checks
+    // below compare against their own input and prove nothing.
+    Check(directX != beforeX || directY != beforeY || directZ != beforeZ,
+          "mask reuse: the pose displaces points");
+    // The direct capture carries its deformed values for any later sweep
+    // without re-capture (a value-only edit reuses the capture): a whole
+    // range hand re-evaluate must reproduce its outputs bitwise.
+    {
+        size_t const curves = term.totalCurves, total = term.totalCvs;
+        bool uniform = curves > 0 && total % curves == 0;
+        Check(uniform, "mask reuse: the fixture is uniform");
+        if (uniform) {
+            uint32_t const perCurve = uint32_t(total / curves);
+            UsdGenChunkDesc fullDesc;
+            fullDesc.firstCurve = 0;
+            fullDesc.curveCount = uint32_t(curves);
+            fullDesc.firstCv = 0;
+            fullDesc.cvCount = perCurve;
+            std::vector<float> hx(total), hy(total), hz(total);
+            UsdGenChunkView v{};
+            v.desc = &fullDesc;
+            v.px = hx.data();
+            v.py = hy.data();
+            v.pz = hz.data();
+            v.inPx = up.px.cdata();
+            v.inPy = up.py.cdata();
+            v.inPz = up.pz.cdata();
+            v.curveCount = uint32_t(curves);
+            v.cvCount = perCurve;
+            UsdGenEvalContext evalCtx; // params null: default mask 1.0
+            op->Evaluate(evalCtx, *directCap, &v);
+            Check(hx == directX && hy == directY && hz == directZ,
+                  "mask reuse: the direct capture carries its deformed values");
+        }
+    }
+    // A mask edit changes the desc, so the compiler re-captures through
+    // the result path (direct declined); the sweep blends bitwise the
+    // float lerp of the deformed values.
+    for (auto &n : desc.nodes)
+        if (n.path == SdfPath("/groom/deform"))
+            n.params.push_back(UsdGenParamValue{TfToken("mask"), VtValue(0.5), false});
+    Check(runPose(), "mask reuse: the mask edit cooks");
+    Check(graph.Node(deformId).captureEpoch != directEpoch,
+          "mask reuse: the mask edit re-captures");
+    Check(!graph.Node(deformId).capture->WroteDirectOutput(),
+          "mask reuse: the mask edit declines direct output");
+    UsdGenCurveBuffer const &out = graph.Node(deformId).buffer;
+    bool blendOk = out.px.size() == directX.size();
+    for (size_t i = 0; blendOk && i < directX.size(); ++i) {
+        float const e0 = beforeX[i] + (directX[i] - beforeX[i]) * 0.5f;
+        float const e1 = beforeY[i] + (directY[i] - beforeY[i]) * 0.5f;
+        float const e2 = beforeZ[i] + (directZ[i] - beforeZ[i]) * 0.5f;
+        blendOk = blendOk && out.px[i] == e0 && out.py[i] == e1 && out.pz[i] == e2;
+    }
+    Check(blendOk, "mask reuse: the mask edit blends bitwise the float lerp");
+}
+
+// A failing direct capture restores the input planes: the failed run must
+// not publish a mix of old and new values.
+void CheckCaptureDirectFailureRestore()
+{
+    UsdGenGraphDesc desc = MakeSmallSurfaceDeformDesc();
+    UsdGenCompiler compiler;
+    UsdGenGraph graph;
+    Check(compiler.Compile(desc, &graph).ok, "failure restore: the fixture compiles");
+    UsdGenNodeId const deformId = graph.NodeIdForPath(SdfPath("/groom/deform"));
+    UsdGenNodeId const growId = graph.Node(deformId).input;
+    UsdGenScheduler scheduler(2);
+    UsdGenEvalContext ctx;
+    uint64_t gen = 0;
+    auto runPose = [&]() -> UsdGenRunResult {
+        UsdGenCompileResult const rr = compiler.Recompile(desc, &graph);
+        ctx.desc = &graph.Desc();
+        UsdGenRunResult run = scheduler.Run(graph, ctx, ++gen);
+        if (!rr.ok) run.diagnostics.Error("recompile failed");
+        return run;
+    };
+    Check(!runPose().diagnostics.HasErrors(), "failure restore: the rest pose cooks");
+    // Bend the drivers so the second cook goes direct.
+    VtVec3fArray const &rest = desc.surfaces[0].restPoints;
+    desc.surfaces[0].points.resize(rest.size());
+    for (size_t i = 0; i < rest.size(); ++i) {
+        GfVec3f const r = rest[i];
+        float const b = float(0.6 * std::sin(0.05 * r[0] + 1.0) *
+                               std::cos(0.04 * r[1] - 0.5));
+        desc.surfaces[0].points[i] = GfVec3f(r[0], r[1], r[2] + b);
+    }
+    Check(!runPose().diagnostics.HasErrors(), "failure restore: a bent pose cooks");
+    UsdGenCapture const *cap = graph.Node(deformId).capture.get();
+    Check(cap && cap->WroteDirectOutput(),
+          "failure restore: the bent pose goes direct");
+    // Astronomical grow length: the cubic kernel overflows float at the
+    // far CVs, so the direct capture must refuse.
+    for (auto &n : desc.nodes)
+        if (n.path == SdfPath("/groom/grow"))
+            for (auto &pv : n.params)
+                if (pv.name == TfToken("length")) pv.value = VtValue(1e20);
+    UsdGenRunResult const failed = runPose();
+    bool refused = failed.diagnostics.HasErrors();
+    bool nonFinite = false;
+    for (auto const &e : failed.diagnostics.errors)
+        nonFinite = nonFinite || e.find("non-finite") != std::string::npos;
+    Check(refused && nonFinite,
+          "failure restore: the overflowing pose is refused, not published");
+    UsdGenCurveBuffer const &out = graph.Node(deformId).buffer;
+    UsdGenCurveBuffer const &up = graph.Node(growId).buffer;
+    bool restored = out.px.size() == up.px.size();
+    restored = restored && std::memcmp(out.px.cdata(), up.px.cdata(),
+                                       out.px.size() * sizeof(float)) == 0;
+    restored = restored && std::memcmp(out.py.cdata(), up.py.cdata(),
+                                       up.py.size() * sizeof(float)) == 0;
+    restored = restored && std::memcmp(out.pz.cdata(), up.pz.cdata(),
+                                       out.pz.size() * sizeof(float)) == 0;
+    Check(restored, "failure restore: the failed run restores the input planes");
 }
 
 int main()
@@ -1278,6 +1527,9 @@ int main()
     CheckDeformChosenDigest();
     CheckDeformEvaluateViewShapes();
     CheckFusedTileExtents();
+    CheckCaptureDirectChained();
+    CheckCaptureDirectMaskReuse();
+    CheckCaptureDirectFailureRestore();
     CheckCurveWrapField();
     CheckExample();
     CheckSurfaceExample();
