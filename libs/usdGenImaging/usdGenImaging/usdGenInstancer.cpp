@@ -766,17 +766,20 @@ UsdGenInstancer::BuildInstancerDataSource(
             } else if (plane.arity == 3 && plane.f.size() % 3 == 0) {
                 // hdMoonray ignores elementSize, so pack float3: a flat
                 // VtFloatArray would be misread as one scalar per instance.
+                // GfVec3f is 3 contiguous floats: one copy, same bytes.
                 VtVec3fArray packed(plane.f.size() / 3);
-                for (size_t i = 0; i != packed.size(); ++i)
-                    packed[i] = GfVec3f(plane.f[3 * i], plane.f[3 * i + 1],
-                                        plane.f[3 * i + 2]);
+                if (!plane.f.empty())
+                    std::memcpy(packed.data(), plane.f.cdata(),
+                                plane.f.size() * sizeof(float));
                 sampled = _Samp(packed);
                 if (plane.name == TfToken("displayColor"))
                     role = TfToken("color");
             } else if (plane.arity == 2 && plane.f.size() % 2 == 0) {
+                // Likewise: GfVec2f is 2 contiguous floats.
                 VtVec2fArray packed(plane.f.size() / 2);
-                for (size_t i = 0; i != packed.size(); ++i)
-                    packed[i] = GfVec2f(plane.f[2 * i], plane.f[2 * i + 1]);
+                if (!plane.f.empty())
+                    std::memcpy(packed.data(), plane.f.cdata(),
+                                plane.f.size() * sizeof(float));
                 sampled = _Samp(packed);
             } else {
                 sampled = _Samp(plane.f);
