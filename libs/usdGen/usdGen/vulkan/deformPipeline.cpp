@@ -97,13 +97,20 @@ std::atomic<uint32_t> evalCacheFundedPrefix{0};
 // chunks coarse. The fixed overhead covers the extra copy submit + fence
 // waits + pool dispatch. The seed throughputs are the measured GB10
 // figures (see the prefix comment above); the policy replaces them with
-// per-GPU measurements after the first poses.
+// per-GPU measurements after the first poses. The cached seed prices the
+// burdened prefix proof (submit + verify + cached eval + waits, median
+// 4.6-4.8ns/CV at 613k CVs over three quiet runs), not the 3.2ns marginal
+// the balance cap divided by before: the marginal seed froze the sticky
+// split ~15% past the leg crossing and left the pose proof-bound by half
+// a millisecond. The fixed seed is the median blocking copy wait (~0.2ms)
+// plus map/dispatch. Live EMAs converge to the same crossing (fresh caps
+// 531-542k), so seeds and policy agree; the direct seed is untouched.
 constexpr int kHeteroWorkers = 10;
 constexpr uint32_t kHeteroGrainsize = 2048;
 constexpr uint32_t kHeteroCalibCvs = 8192;
-constexpr double kHeteroFixedOverheadNs = 100000.0;
+constexpr double kHeteroFixedOverheadNs = 200000.0;
 constexpr double kHeteroSeedGpuDirectNsPerCv = 13.1;
-constexpr double kHeteroSeedCachedNsPerCv = 3.2;
+constexpr double kHeteroSeedCachedNsPerCv = 4.7;
 constexpr double kHeteroEmaAlpha = 0.3;
 constexpr int kHeteroProbeBase = 64;
 constexpr int kHeteroProbeMax = 1024;
