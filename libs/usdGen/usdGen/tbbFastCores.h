@@ -17,6 +17,7 @@
 #include <tbb/task_scheduler_observer.h>
 
 #include <memory>
+#include <vector>
 
 namespace usdGen {
 
@@ -35,5 +36,12 @@ std::unique_ptr<tbb::task_scheduler_observer> ObserveFastCores(
 // comparison. Non-Linux builds always return 0. Sizing an arena to this
 // count engages pinning by construction.
 int FastCoreCount();
+
+// The ordered process-allowed max-frequency CPU ids where the topology
+// qualifies and the fast count covers `workers`, else empty: the same
+// qualification FastCores applies for ObserveFastCores (declines rather
+// than oversubscribing). For non-TBB thread owners (the worker pool)
+// that pin their own threads. Non-Linux builds always return empty.
+std::vector<int> FastCoreList(int workers);
 
 } // namespace usdGen

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 // testUsdGenSchedulerAffinity — T0: on heterogeneous big.LITTLE Linux,
-// UsdGenScheduler pins its TBB arena workers to max-frequency cores.
+// UsdGenScheduler pins its worker-pool threads to max-frequency cores.
 // The thread-limit resolution checks run on every platform; the affinity
 // checks skip (77) on non-Linux, homogeneous, unreadable-topology, or
 // too-few-fast-core hosts.
@@ -13,8 +13,9 @@
 // Asserted (heterogeneous Linux only):
 //   1. A parallel region runs tasks on at least two distinct worker
 //      threads (parallelism actually happened).
-//   2. Every observed worker thread's affinity mask is exactly the
-//      process-allowed max-frequency set (fast cores, never widened).
+//   2. Every observed worker thread's affinity mask is a nonempty
+//      subset of the process-allowed max-frequency set (fast cores
+//      only, never widened; one worker per fast CPU).
 //   3. The calling thread's affinity is unchanged (never pinned).
 //   4. The product default is max(8, fast-core count), and the
 //      USDGEN_NO_FAST_CORE_PIN kill switch restores 8.
@@ -189,10 +190,19 @@ int main()
     for (TaskSlot const &slot : slots) {
         if (pthread_equal(slot.thread, mainThread)) continue;
         workerThreads.insert(slot.thread);
-        if (!CPU_EQUAL(&slot.mask, &fast)) masksOk = false;
+        // Nonempty subset of the fast set: at least one bit set, and
+        // every set bit is fast. The pool pins one worker per fast CPU,
+        // so masks are singletons in practice; the contract is the subset.
+        bool anySet = false, noneSlow = true;
+        for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+            if (!CPU_ISSET(cpu, &slot.mask)) continue;
+            anySet = true;
+            if (!CPU_ISSET(cpu, &fast)) noneSlow = false;
+        }
+        if (!(anySet && noneSlow)) masksOk = false;
     }
     Check(workerThreads.size() >= 2, "at least two distinct worker threads ran tasks");
-    Check(masksOk, "every worker mask equals the allowed fast-core set");
+    Check(masksOk, "every worker mask is a nonempty subset of the fast-core set");
 
     cpu_set_t mainAfter;
     CPU_ZERO(&mainAfter);

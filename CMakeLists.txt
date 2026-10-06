@@ -1258,6 +1258,10 @@ add_test(NAME testUsdGenSchedulerAffinity COMMAND testUsdGenSchedulerAffinity)
 set_tests_properties(testUsdGenSchedulerAffinity PROPERTIES
     LABELS "T0;scheduling;affinity" TIMEOUT 60
     SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+add_executable(testUsdGenWorkerPool tests/testUsdGenWorkerPool.cpp)
+target_link_libraries(testUsdGenWorkerPool PRIVATE usdGen)
+add_test(NAME testUsdGenWorkerPool COMMAND testUsdGenWorkerPool)
+set_tests_properties(testUsdGenWorkerPool PROPERTIES LABELS "T0;scheduling;pool" TIMEOUT 60)
 add_executable(testUsdGenExecutionTaskGraph tests/testUsdGenExecutionTaskGraph.cpp)
 target_link_libraries(testUsdGenExecutionTaskGraph PRIVATE usdGen)
 add_test(NAME testUsdGenExecutionTaskGraph COMMAND testUsdGenExecutionTaskGraph)

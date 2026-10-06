@@ -9,14 +9,13 @@
 //     produced geometry into another reference node;
 //   - re-capture when the capture epoch moved (03 §3.4); generators install
 //     their captured buffer and the graph re-partitions on topology change;
-//   - per-frontier chunk-evaluate sweep, tbb::parallel_for inside the private
-//     task_arena (I8 — never pxr work::, which would serialise under
+//   - per-frontier chunk-evaluate sweep over the scheduler's worker pool
+//     (I8 — never pxr work::, which would serialise under
 //     PXR_WORK_THREAD_LIMIT); chunk skip is governed by the dirty bytes plus
 //     the evaluation signature (param value digest + upstream valueVersion);
 //   - tile interleave: extents + dirty flags over dirty tiles only.
 //
-// I8: every parallel region is a plain tbb::parallel_for inside
-// _arena.execute, never pxr work::.
+// I8: every parallel region runs over the worker pool, never pxr work::.
 #include "usdGen/scheduler.h"
 
 #include "usdGen/debugCodes.h"
@@ -32,7 +31,6 @@
 #include "pxr/base/trace/trace.h"
 #include "pxr/base/vt/array.h"
 
-#include "tbb/parallel_for.h"
 #include "tbb/task_arena.h"
 
 #include <algorithm>
@@ -704,7 +702,8 @@ void InterleaveTile(size_t index, void *payload)
 
 UsdGenScheduler::UsdGenScheduler(int threadLimit)
     : _arena(ResolveThreadLimit(threadLimit)),
-      _threadLimit(ResolveThreadLimit(threadLimit))
+      _threadLimit(ResolveThreadLimit(threadLimit)),
+      _pool(_threadLimit)
 {
     _affinityObserver = ObserveFastCores(_arena, _threadLimit);
 }
@@ -716,25 +715,21 @@ int UsdGenScheduler::ThreadLimit() const noexcept { return _threadLimit; }
 void UsdGenWorkDispatcher::ParallelFor(
     size_t count, void (*body)(size_t, void *), void *payload)
 {
-    // 03 §5.3: every parallel region is a plain tbb::parallel_for run inside
-    // the private arena (never pxr work::, which honours the process-global
-    // PXR_WORK_THREAD_LIMIT and would serialise under PXR_WORK_THREAD_LIMIT=1).
-    // (E-7 pass 3: an explicit ceil(chunks/workers) grainsize REGRESSED E-1
-    // 35.5 vs 28.5 — reverted to the default auto-partitioner.)
-    _arena->execute([&]() {
-        tbb::parallel_for(
-            tbb::blocked_range<size_t>(0, count),
-            [&](tbb::blocked_range<size_t> const &range) {
-                for (size_t i = range.begin(); i < range.end(); ++i) {
-                    body(i, payload);
-                }
-            });
-    });
+    // Every parallel region runs over the scheduler's worker pool (never
+    // pxr work::, which honours the process-global PXR_WORK_THREAD_LIMIT
+    // and would serialise under PXR_WORK_THREAD_LIMIT=1, 03 §5.3 caveat).
+    // The pool replaced the private arena's tbb::parallel_for here: same
+    // body/count contract, without the arena's ~0.2ms per-region wakeup.
+    if (!_pool) {
+        for (size_t i = 0; i < count; ++i) body(i, payload);
+        return;
+    }
+    _pool->ParallelFor(count, body, payload);
 }
 
 UsdGenWorkDispatcher UsdGenScheduler::MakeWorkDispatcher() const
 {
-    return UsdGenWorkDispatcher(const_cast<tbb::task_arena *>(&_arena));
+    return UsdGenWorkDispatcher(const_cast<UsdGenWorkerPool *>(&_pool));
 }
 
 int CalibrateThreads()

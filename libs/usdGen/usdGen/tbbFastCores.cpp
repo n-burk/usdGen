@@ -154,4 +154,18 @@ int FastCoreCount()
 #endif
 }
 
+std::vector<int> FastCoreList(int workers)
+{
+    std::vector<int> out;
+#if defined(__linux__) && !defined(__ANDROID__)
+    auto fast = FastCores(workers);
+    if (!fast) return out;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu)
+        if (CPU_ISSET(cpu, fast)) out.push_back(cpu);
+#else
+    (void)workers;
+#endif
+    return out;
+}
+
 } // namespace usdGen

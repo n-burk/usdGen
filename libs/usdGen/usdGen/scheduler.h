@@ -7,7 +7,7 @@
 // 20-worker arena. USDGEN_THREAD_LIMIT (env) pins it explicitly;
 // otherwise one-time calibration (03 §5.3) picks the smallest
 // concurrency within 5 % of best.
-// All loops are tbb::parallel_for inside _arena.execute — never pxr work::
+// All loops run over the scheduler's worker pool — never pxr work::
 // (WorkHasConcurrency() reads the process-global PXR_WORK_THREAD_LIMIT and would
 // serialise under PXR_WORK_THREAD_LIMIT=1, 03 §5.3 caveat).
 #ifndef USDGEN_SCHEDULER_H
@@ -16,6 +16,7 @@
 #include "usdGen/graph.h"
 #include "usdGen/op.h"
 #include "usdGen/types.h"
+#include "usdGen/workerPool.h"
 
 #include <tbb/task_arena.h>
 #include <tbb/task_scheduler_observer.h>
@@ -54,11 +55,12 @@ struct UsdGenRunResult
 class UsdGenWorkDispatcher
 {
 public:
-    explicit UsdGenWorkDispatcher(tbb::task_arena *arena) : _arena(arena) {}
-    /// Run a per-index body 0..count-1 inside the arena (capture phase).
+    explicit UsdGenWorkDispatcher(UsdGenWorkerPool *pool) : _pool(pool) {}
+    /// Run a per-index body 0..count-1 over the scheduler's worker pool
+    /// (capture phase). A null pool runs the body inline, serially.
     void ParallelFor(size_t count, void (*body)(size_t, void *), void *payload);
 private:
-    tbb::task_arena *_arena;
+    UsdGenWorkerPool *_pool;
 };
 
 class UsdGenScheduler
@@ -86,12 +88,17 @@ public:
                         TileCompleted tileCompleted = {});
 
 private:
+    // Retained for the Arena() accessor; parallel regions run on _pool.
     tbb::task_arena _arena;
     int _threadLimit;
     // Heterogeneous-core placement (tbbFastCores.h): on big.LITTLE Linux
     // the arena workers prefer max-frequency cores. Null when homogeneous,
     // undetectable, or disabled. Declared after _arena so it detaches first.
     std::unique_ptr<tbb::task_scheduler_observer> _affinityObserver;
+    // Persistent fork/join pool behind MakeWorkDispatcher (workerPool.h):
+    // pinned workers parked on a generation counter, without the arena's
+    // per-region wakeup cost. Declared last so it joins before the arena.
+    UsdGenWorkerPool _pool;
 };
 
 /// One-shot process calibration (03 §5.3): sweeps concurrencies {2,4,8,16,
