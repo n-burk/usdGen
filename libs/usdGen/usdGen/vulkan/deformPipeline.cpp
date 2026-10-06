@@ -122,6 +122,33 @@ std::atomic<uint64_t> heteroRuns{0};
 
 uint32_t Groups(uint32_t n, uint32_t size) { return (n + size - 1) / size; }
 
+// Fence wait without the wakeup lottery: a blocking vkWaitForFences pays
+// the futex wakeup lottery (~180us median on the qualified driver, the
+// same lottery the bench's apply poll spins past), while the work these
+// proof fences guard is sub-millisecond with a host overlap already
+// scheduled. Spinning observes the signal within one vkGetFenceStatus;
+// the deadline matches the retired blocking timeout (10s) and fails the
+// pose the same way a blocking timeout did. Error returns (device loss,
+// driver errors) propagate exactly like the blocking wait's.
+VkResult SpinWaitForFence(VkDevice device, VkFence fence)
+{
+    auto const deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    for (unsigned spin = 0;; ++spin) {
+        VkResult const r = vkGetFenceStatus(device, fence);
+        if (r != VK_NOT_READY) return r;
+        // The clock is sampled sparingly (a vDSO read per poll would
+        // double the spin's cost against a contested driver lock).
+        if ((spin & 255) == 0 && std::chrono::steady_clock::now() >= deadline)
+            return VK_TIMEOUT;
+#if defined(__aarch64__)
+        __asm__ volatile("yield" ::: "memory");
+#elif defined(__x86_64__) || defined(_M_X64)
+        __asm__ volatile("pause" ::: "memory");
+#endif
+    }
+}
+
 // Scratch pooling: a pose allocates 8 buffers and frees them at candidate
 // destruction, and vkAllocateMemory/vkFreeMemory cost ~70/80us (median) each
 // on the qualified driver, so ~1.2ms of every pose is allocation lifecycle.
@@ -2023,7 +2050,7 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
             // Wait the staged CVs, run the suffix on the arena while the
             // prefix proof runs, then wait the proof. A failed map runs the
             // quarantine path like any proof failure: no output escapes.
-            r = vkWaitForFences(d, 1, &copyFence, VK_TRUE, 10000000000ull);
+            r = SpinWaitForFence(d, copyFence);
             if (r == VK_SUCCESS) {
                 native_->fencePool.Release(d, copyFence);
                 copyFence = VK_NULL_HANDLE;
@@ -2075,7 +2102,7 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
             }
         }
         if (r == VK_SUCCESS)
-            r = vkWaitForFences(d, 1, &s->proofFence, VK_TRUE, 10000000000ull);
+            r = SpinWaitForFence(d, s->proofFence);
         // Submit-to-signal: the GPU prefix (plus the GPU suffix on direct
         // poses) regardless of host overlap. Drives the hetero policy.
         double const proofNs = std::chrono::duration<double, std::nano>(
