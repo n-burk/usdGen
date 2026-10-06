@@ -614,9 +614,16 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
                                  error);
             }
             GfVec3d ref = GfVec3d(curves.rootN[c]);
-            bool rok = false;
-            GfVec3d const rn = _Normalized(ref, &rok);
-            if (!rok || std::abs(GfDot(rn, yAxis)) > 0.999)
+            // Squared parallel-fallback test (saves a normalize: 1 sqrt +
+            // 3 divs): |dot(ref/len, y)| > 0.999 with len > 0 squares to
+            // d*d > 0.999^2*l2. d and l2 are the exact dots; the
+            // degenerate threshold sits a few ulp above (1e-12)^2 so a
+            // truly-degenerate ref always falls back, as !rok does.
+            // Matches except within rounding of either boundary.
+            double const rd = GfDot(ref, yAxis);
+            double const rl2 = GfDot(ref, ref);
+            if (!(rl2 > 1.000000000000002e-24) ||
+                rd * rd > (0.999 * 0.999) * rl2)
                 ref = GfVec3d(curves.rootT[c]);
             GfVec3d z = ref - yAxis * GfDot(ref, yAxis);
             zAxis = _Normalized(z, &tok);
