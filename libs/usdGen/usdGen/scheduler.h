@@ -52,6 +52,9 @@ public:
     explicit UsdGenWorkDispatcher(tbb::task_arena *arena) : _arena(arena) {}
     /// Run a per-index body 0..count-1 inside the arena (capture phase).
     void ParallelFor(size_t count, void (*body)(size_t, void *), void *payload);
+    /// Arena worker count, so Capture() can stay serial when only one
+    /// worker would run every partition anyway.
+    int MaxConcurrency() const { return _arena->max_concurrency(); }
 private:
     tbb::task_arena *_arena;
 };

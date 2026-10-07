@@ -6,6 +6,7 @@
 #include "usdGen/scheduler.h"
 #include <cmath>
 #include <cstdio>
+#include <vector>
 using namespace usdGen;
 PXR_NAMESPACE_USING_DIRECTIVE
 #define CHECK(c) do {if(!(c)){std::fprintf(stderr,"FAIL %d: %s\n",__LINE__,#c);return 1;}}while(false)
@@ -26,6 +27,36 @@ static bool Run(UsdGenGraphDesc const& d,UsdGenCurveBuffer* out,int threads=2) {
     UsdGenScheduler scheduler(threads);UsdGenEvalContext ctx;ctx.desc=&graph.Desc();
     auto run=scheduler.Run(graph,ctx,1);if(run.diagnostics.HasErrors())return false;
     *out=graph.Output();return true;
+}
+static UsdGenSurfaceDesc BigGrid(int w,int h) {
+    UsdGenSurfaceDesc s;s.path=SdfPath("/Scalp");s.subdivisionScheme=TfToken("catmullClark");
+    for(int y=0;y<=h;++y)for(int x=0;x<=w;++x)s.restPoints.push_back(GfVec3f(float(x),float(y),0));
+    for(int y=0;y<h;++y)for(int x=0;x<w;++x){s.faceVertexCounts.push_back(4);int i0=y*(w+1)+x;for(int i:{i0,i0+1,i0+w+2,i0+w+1})s.faceVertexIndices.push_back(i);}
+    s.points=s.restPoints;return s;
+}
+static UsdGenGraphDesc BigDesc(UsdGenSurfaceDesc const& s) {
+    UsdGenGraphDesc d;d.description=SdfPath("/Groom");d.surfaces={s};
+    UsdGenNodeDesc n;n.path=SdfPath("/Scatter");n.type=TfToken("UsdGenScatter");n.surfaces={s.path};
+    n.params={{TfToken("density"),VtValue(4.0f),false},{TfToken("subdivisionLevel"),VtValue(0),false}};
+    d.nodes={n};d.terminal=n.path;return d;
+}
+static bool RunDirect(UsdGenGraphDesc const& d,UsdGenCurveBuffer* out) {
+    UsdGenNodeDesc const& node=d.nodes[0];
+    UsdGenParamView params{&d,&node};
+    UsdGenScatterOp op;UsdGenDiagnostics diag;
+    if(!op.Bind(params,&diag))return false;
+    auto cap=op.CreateCapture();if(!cap)return false;
+    UsdGenCaptureContext ctx;ctx.desc=&d;ctx.params=&params;ctx.surface=0;
+    ctx.seed=uint32_t(node.seed);ctx.diag=&diag;
+    UsdGenCurveBuffer empty;
+    if(!op.Capture(ctx,empty,cap.get(),&diag))return false;
+    *out=cap->Buffer();return true;
+}
+static bool SameRoots(UsdGenCurveBuffer const& a,UsdGenCurveBuffer const& b) {
+    return a.totalCurves==b.totalCurves && a.totalCvs==b.totalCvs &&
+        a.px==b.px && a.py==b.py && a.pz==b.pz && a.curveId==b.curveId &&
+        a.rootPrim==b.rootPrim && a.rootUV==b.rootUV && a.rootT==b.rootT &&
+        a.rootN==b.rootN && a.rootB==b.rootB && a.hairT==b.hairT;
 }
 int main() {
     usdGenRegisterM1Operators();auto s=Surface();std::string error;
@@ -126,6 +157,31 @@ int main() {
           s1.curveId == s4.curveId && s1.rootPrim == s4.rootPrim);
     for (size_t i = 0; i < s1.totalCurves; ++i)
         CHECK(s1.rootPrim[i] == 7 || s1.rootPrim[i] == 2 || s1.rootPrim[i] == 5);
+    // Threaded capture equivalence: 40K-face level-0 grids sit far above
+    // the threading threshold, so scheduler(1), scheduler(4) and a direct
+    // dispatcher-less Capture must agree bitwise on every plane — both
+    // unrestricted (partition corner bases) and shuffled-subset (corner
+    // table). Any scheduling-dependent byte fails here.
+    {
+        auto big = BigGrid(200, 200);
+        auto bd = BigDesc(big);
+        UsdGenCurveBuffer t1, t4, td;
+        CHECK(Run(bd,&t1,1));CHECK(Run(bd,&t4,4));CHECK(RunDirect(bd,&td));
+        CHECK(t1.totalCurves > 100000);
+        CHECK(SameRoots(t1,t4) && SameRoots(t1,td));
+        auto bsub = big;
+        for (int f = int(big.faceVertexCounts.size()) - 1; f >= 0; f -= 3)
+            bsub.subsetFaces.push_back(f);
+        auto sd = BigDesc(bsub);
+        UsdGenCurveBuffer u1, u4, ud;
+        CHECK(Run(sd,&u1,1));CHECK(Run(sd,&u4,4));CHECK(RunDirect(sd,&ud));
+        CHECK(u1.totalCurves > 30000);
+        CHECK(SameRoots(u1,u4) && SameRoots(u1,ud));
+        std::vector<char> inSub(big.faceVertexCounts.size(), 0);
+        for (int f : bsub.subsetFaces) inSub[size_t(f)] = 1;
+        for (size_t i = 0; i < u1.totalCurves; ++i)
+            CHECK(inSub[size_t(u1.rootPrim[i])]);
+    }
     CHECK(!Run(Desc(s,7),&b));
     tags=s;tags.subdivisionScheme=TfToken("none");CHECK(!Run(Desc(tags,3),&b));
     tags=s;tags.creaseIndices={0,1};tags.creaseLengths={2};tags.creaseSharpnesses={3};CHECK(limit.Build(tags,3,&error));
