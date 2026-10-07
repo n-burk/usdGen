@@ -939,12 +939,16 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
     // Concatenate the per-range index lists in range order: identical to
     // the serial push_back order (same values; capacities may differ,
     // which no reader observes).
+    // Uninitialized sizing (bit-identical): total is the exact sum of the
+    // copied sizes and the loop below writes every lane contiguously, so
+    // resize's value-init (~4MB of zeroes here) is dead and folds into
+    // the noInit filler over uninitialized storage. Same bytes either way.
     for (size_t p = 0; p < nProtos; ++p) {
         size_t total = 0;
         for (auto const &s : slots)
             total += s.indices[p].size();
         VtIntArray &dst = out.instanceIndices[p];
-        dst.resize(total);
+        dst.resize(total, noInit);
         int *w = dst.empty() ? nullptr : dst.data();
         for (auto const &s : slots) {
             if (!s.indices[p].empty()) {
