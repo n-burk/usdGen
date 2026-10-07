@@ -300,6 +300,25 @@ void CheckThreadedEquivalence()
               serial.instanceIndices == threaded.instanceIndices &&
               serial.kept == threaded.kept && serial.digest == threaded.digest,
           "serial and threaded cooks agree bitwise");
+    // Huge prototype counts stay on the serial path (no chunk-local fan
+    // out): the cook still accepts and assigns every kept root in range.
+    {
+        UsdGenAttributeInstanceInput wide = input;
+        wide.numPrototypes = 5000;
+        UsdGenAttributeInstanceResult got;
+        CHECK(UsdGenAttributeCookInstances(wide, &got, &error),
+              "wide-prototype cook accepts");
+        CHECK(got.kept == serial.kept, "wide kept total matches");
+        CHECK(got.values == serial.values && got.keep == serial.keep,
+              "wide planes match");
+        for (size_t i = 0; i < got.prototype.size(); ++i) {
+            if (got.keep[i])
+                CHECK(got.prototype[i] >= 0 && got.prototype[i] < 5000,
+                      "wide slots stay in range");
+            else
+                CHECK(got.prototype[i] == -1, "wide drops mark -1");
+        }
+    }
 }
 
 }  // namespace
