@@ -979,6 +979,11 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
             TF_WARN("usdGen stock-Storm GPU-resident BasisCurves handoff is not implemented");
             return;
         }
+        // USDGEN_COMMIT: time the scene-index publish (tile + scalp data
+        // source assembly, outside the cook phases) the way the cooker times
+        // the cook itself. Zero cost when the code is off (one atomic load).
+        bool const timePublish = TfDebug::IsEnabled(USDGEN_COMMIT);
+        auto const publishStart = std::chrono::steady_clock::now();
         auto fresh = std::make_shared<TileMap>();
         const auto render = RenderPath(g->description);
         for (auto const& tile : generation.tiles) {
@@ -1030,6 +1035,14 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         g->scalpShadow = std::move(freshScalp);
         g->scalpDigest = freshScalpDigest;
         ProcessPublishes().fetch_add(1, std::memory_order_acq_rel);
+        if (timePublish) {
+            double const ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - publishStart).count();
+            TF_DEBUG(USDGEN_COMMIT).Msg(
+                "usdGen publish   %s gen %llu: %zu tiles + scalp in %.2f ms\n",
+                g->description.GetText(), (unsigned long long)generation.id,
+                generation.tiles.size(), ms);
+        }
         Notify(added, removed, dirtied);
     }
     void PublishProgress(std::shared_ptr<Groom> const& g,
