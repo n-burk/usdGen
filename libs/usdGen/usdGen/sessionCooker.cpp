@@ -2249,6 +2249,33 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
     bool hasDep = false;
     bool firstChunk = true;
 
+    // Hoisted tile-uniform color dispatch (bit-identical): preview, the
+    // displayColor/sourceColor planes, bakeTarget and authoredLook never
+    // change within a tile, but the curve loop re-evaluated
+    // `bakeTarget != TfToken("none")` -- a token-registry lookup -- for
+    // every curve (1M lookups at bench scale, and a mutex convoy under
+    // tile threading). The mode below selects the identical branch.
+    enum ColorMode { NoColor, Preview, Plane, SourcePlane, Root };
+    ColorMode colorMode = NoColor;
+    if (_previewColors.active)
+        colorMode = Preview;
+    else if (displayColor)
+        colorMode = Plane;
+    else if (_desc.look.bakeTarget != TfToken("none"))
+        colorMode = (!authoredLook && sourceColor) ? SourcePlane : Root;
+    // Extra planes partitioned once per tile (bit-identical): the CV loop
+    // gathered the vertex-interpolated planes and the curve loop the
+    // uniform ones, each re-comparing every plane's interpolation token
+    // per element. Same planes, same relative order, no per-element
+    // token work; constant planes stay out of both loops, as before.
+    std::vector<ExtraPlanePublication *> vertexPlanes, uniformPlanes;
+    for (auto &extra : extraPlanes) {
+        if (extra.output.interpolation == TfToken("vertex"))
+            vertexPlanes.push_back(&extra);
+        else if (extra.output.interpolation == TfToken("uniform"))
+            uniformPlanes.push_back(&extra);
+    }
+
     for (uint32_t i = 0; i < tv.chunkCount; ++i) {
         UsdGenChunkDesc const &cd = tn.chunks[tv.firstChunk + i];
         // id 0 is a legitimate surface (compiler.cpp assigns dense indices
@@ -2281,16 +2308,15 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
                 else if (!term.width.empty()) w = term.width.back();
                 pub.widths.push_back(w);
                 pub.hairT.push_back(p < term.hairT.size() ? term.hairT[p] : 0.0f);
-                for (auto& extra : extraPlanes)
-                    if (extra.output.interpolation == TfToken("vertex"))
-                        _GatherPlaneElement(*extra.source, p, &extra.output);
+                for (ExtraPlanePublication *extra : vertexPlanes)
+                    _GatherPlaneElement(*extra->source, p, &extra->output);
             }
             // hairId: UsdGenHash32(curveId, 0) / 2^32 in [0,1) (06, S29).
             pub.hairId.push_back(g < term.curveId.size()
                 ? UsdGenHairId(term.curveId[g]) : 0.0f);
             if (!term.rootUV.empty() && g < term.rootUV.size())
                 pub.st.push_back(term.rootUV[g]);
-            if (_previewColors.active) {
+            if (colorMode == Preview) {
                 std::vector<GfVec3f> const &colors = _previewColors.colors;
                 if (_previewColors.perCv) {
                     for (uint32_t v = 0; v < len; ++v)
@@ -2300,18 +2326,14 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
                     pub.displayColor.push_back(g < colors.size()
                         ? colors[g] : UsdGenPreviewMissingColor());
                 }
-            } else if (displayColor)
+            } else if (colorMode == Plane)
                 _GatherColor(*displayColor, g, p0, &pub.displayColor);
-            else if (_desc.look.bakeTarget != TfToken("none")) {
-                // `authoredLook` above carries the 02 §2.14 precedence rule.
-                if (!authoredLook && sourceColor)
-                    _GatherColor(*sourceColor, g, p0, &pub.displayColor);
-                else
-                    pub.displayColor.push_back(_desc.look.rootColor);
-            }
-            for (auto& extra : extraPlanes)
-                if (extra.output.interpolation == TfToken("uniform"))
-                    _GatherPlaneElement(*extra.source, g, &extra.output);
+            else if (colorMode == SourcePlane)
+                _GatherColor(*sourceColor, g, p0, &pub.displayColor);
+            else if (colorMode == Root)
+                pub.displayColor.push_back(_desc.look.rootColor);
+            for (ExtraPlanePublication *extra : uniformPlanes)
+                _GatherPlaneElement(*extra->source, g, &extra->output);
         }
     }
     for (auto& extra : extraPlanes)
