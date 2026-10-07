@@ -61,7 +61,9 @@ public:
     /// accumulators overlap. On AArch64 a fused 4-wide NEON block holds
     /// the accumulators in registers (scalar blocks elsewhere). Defined
     /// out of line; tails fall back to Displacement, and an unbound field
-    /// fills zeros.
+    /// fills zeros. Large batches split over an internal worker pool;
+    /// every query still runs the same operations, so the bits match the
+    /// serial loop.
     void DisplaceBatch(GfVec3d const *qs, GfVec3d *ds, size_t count) const;
 
     /// A planar run of queries: (dx[t], dy[t], dz[t]) is bitwise
@@ -71,7 +73,8 @@ public:
     /// planes, so this entry skips the AoS transpose (and the vld3/vst3
     /// shuffles) while running each query's operations in the same order
     /// as DisplaceBatch, so the bits match. Tails fall back to
-    /// Displacement, and an unbound field fills zeros.
+    /// Displacement, and an unbound field fills zeros. Large batches
+    /// split over an internal worker pool, bitwise as above.
     void DisplaceBatchPlanar(float const *qx, float const *qy, float const *qz,
                              double *dx, double *dy, double *dz,
                              size_t count) const;

@@ -26,6 +26,7 @@
 #include "usdGen/ops/rbfField.h"
 #include "usdGen/ops/curveWrap.h"
 #include "usdGen/scheduler.h"
+#include "usdGen/workerPool.h"
 #include "usdGenImaging/groomSceneIndexPlugin.h"
 #include "usdGenImaging/testHook.h"
 #include "usdGenImaging/usdGenGraphDescBuilderStage.h"
@@ -46,10 +47,12 @@
 #include "pxr/usdImaging/usdImaging/stageSceneIndex.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -307,6 +310,125 @@ void CheckBatchPlanarBitwise()
               std::memcmp(dy.data(), expect.data(), dy.size() * sizeof(double)) == 0 &&
               std::memcmp(dz.data(), expect.data(), dz.size() * sizeof(double)) == 0,
           "an unbound field batches planar zeros");
+}
+
+// Large batches split over the internal pool (16k queries and up, in
+// 1k-query slices): counts around the threshold and the slice edges
+// stay bitwise Displacement, on both entries and both scalar-seam
+// positions.
+void CheckBatchThreaded()
+{
+    size_t const samples = 100;
+    std::vector<GfVec3d> const rest = Cloud(samples, 7 + samples);
+    std::vector<GfVec3d> moved(rest.size());
+    for (size_t i = 0; i < rest.size(); ++i)
+        moved[i] = rest[i] + GfVec3d(0.2 * std::sin(3.0 * rest[i][1]),
+                                     0.1 * rest[i][0] * rest[i][2],
+                                     -0.15 * std::cos(2.0 * rest[i][0]));
+    rbf::CubicField field;
+    std::string error;
+    if (!field.Bind(rest, &error) || !field.Solve(moved, &error)) {
+        Check(false, "threaded batch fixture binds");
+        return;
+    }
+    size_t const n = 20000;
+    std::vector<GfVec3d> const cloud = Cloud(n, 1001);
+    std::vector<float> qx(n), qy(n), qz(n);
+    for (size_t i = 0; i < n; ++i) {
+        qx[i] = float(cloud[i][0]);
+        qy[i] = float(cloud[i][1]);
+        qz[i] = float(cloud[i][2]);
+    }
+    size_t worst = 0;
+    for (size_t count : {size_t(16383), size_t(16384), size_t(16385),
+                         size_t(17407), size_t(17408), size_t(17409),
+                         size_t(19999), size_t(20000)}) {
+        for (int force = 0; force <= 1 && !worst; ++force) {
+            rbf::TestForceScalarDisplace(force != 0);
+            std::vector<GfVec3d> batched(count), single(count);
+            field.DisplaceBatch(cloud.data(), batched.data(), count);
+            for (size_t t = 0; t < count; ++t)
+                single[t] = field.Displacement(cloud[t]);
+            if (std::memcmp(batched.data(), single.data(),
+                            count * sizeof(GfVec3d)) != 0) {
+                worst = count * 4 + size_t(force) + 1;
+                break;
+            }
+            std::vector<double> dx(count), dy(count), dz(count);
+            field.DisplaceBatchPlanar(qx.data(), qy.data(), qz.data(),
+                                      dx.data(), dy.data(), dz.data(), count);
+            for (size_t t = 0; t < count; ++t) {
+                GfVec3d const s =
+                    field.Displacement(GfVec3d(qx[t], qy[t], qz[t]));
+                if (std::memcmp(&dx[t], &s[0], sizeof(double)) != 0 ||
+                    std::memcmp(&dy[t], &s[1], sizeof(double)) != 0 ||
+                    std::memcmp(&dz[t], &s[2], sizeof(double)) != 0) {
+                    worst = count * 4 + size_t(force) + 3;
+                    break;
+                }
+            }
+        }
+        if (worst) break;
+    }
+    rbf::TestForceScalarDisplace(false);
+    Check(worst == 0, "threaded batches are bitwise Displacement" +
+                           (worst ? " (first diff at " + std::to_string(worst) + ")" : ""));
+}
+
+// The pool discipline holds: concurrent large batches from many threads
+// serialize and stay bitwise, and large batches issued from another
+// pool's workers block-join the displace pool without deadlocking.
+void CheckBatchConcurrent()
+{
+    size_t const samples = 100;
+    std::vector<GfVec3d> const rest = Cloud(samples, 7 + samples);
+    std::vector<GfVec3d> moved(rest.size());
+    for (size_t i = 0; i < rest.size(); ++i)
+        moved[i] = rest[i] + GfVec3d(0.2 * std::sin(3.0 * rest[i][1]),
+                                     0.1 * rest[i][0] * rest[i][2],
+                                     -0.15 * std::cos(2.0 * rest[i][0]));
+    rbf::CubicField field;
+    std::string error;
+    if (!field.Bind(rest, &error) || !field.Solve(moved, &error)) {
+        Check(false, "concurrent batch fixture binds");
+        return;
+    }
+    size_t const n = 20000;
+    std::vector<GfVec3d> const cloud = Cloud(n, 1001);
+    std::vector<GfVec3d> expect(n);
+    for (size_t t = 0; t < n; ++t) expect[t] = field.Displacement(cloud[t]);
+    std::atomic<size_t> bad{0};
+    auto run = [&]() {
+        for (int k = 0; k < 4; ++k) {
+            std::vector<GfVec3d> got(n);
+            field.DisplaceBatch(cloud.data(), got.data(), n);
+            if (std::memcmp(got.data(), expect.data(), n * sizeof(GfVec3d)) != 0)
+                bad.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 8; ++i) threads.emplace_back(run);
+    for (std::thread &t : threads) t.join();
+    Check(bad.load() == 0, "concurrent large batches stay bitwise");
+    struct Nested {
+        rbf::CubicField const *field;
+        GfVec3d const *qs;
+        GfVec3d *ds0, *ds1;
+        size_t count;
+    };
+    std::vector<GfVec3d> nestedOut0(n), nestedOut1(n);
+    Nested nested{&field, cloud.data(), nestedOut0.data(), nestedOut1.data(), n};
+    UsdGenWorkerPool outer(2);
+    outer.ParallelFor(2,
+                      [](size_t i, void *p) {
+                          Nested const &job = *static_cast<Nested const *>(p);
+                          job.field->DisplaceBatch(job.qs, i == 0 ? job.ds0 : job.ds1,
+                                                  job.count);
+                      },
+                      &nested);
+    Check(std::memcmp(nestedOut0.data(), expect.data(), n * sizeof(GfVec3d)) == 0 &&
+              std::memcmp(nestedOut1.data(), expect.data(), n * sizeof(GfVec3d)) == 0,
+          "batches nested in pool workers stay bitwise");
 }
 
 // --- the example, through the engine ---------------------------------------------
@@ -1590,6 +1712,8 @@ int main()
     CheckBatchBitwise();
     CheckBatchPathsAgree();
     CheckBatchPlanarBitwise();
+    CheckBatchThreaded();
+    CheckBatchConcurrent();
     CheckDeformChosenDigest();
     CheckDeformEvaluateViewShapes();
     CheckFusedTileExtents();

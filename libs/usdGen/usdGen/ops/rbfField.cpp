@@ -1,4 +1,6 @@
 #include "usdGen/ops/rbfField.h"
+#include "usdGen/tbbFastCores.h"
+#include "usdGen/workerPool.h"
 
 #include "pxr/base/gf/vec3i.h"
 
@@ -7,6 +9,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <mutex>
 #include <type_traits>
 #include <unordered_set>
 
@@ -411,6 +414,227 @@ void DisplaceBlockedNeon4T(GfVec3d const &centre, double invScale, double scale,
 }
 #endif
 
+// Shared per-range parameters for the serial loops below: every query
+// runs the same operations whatever its batch position, so any partition
+// (one serial run, or one slice per pool worker) is bitwise identical.
+struct DisplaceParams {
+    GfVec3d centre{0.0};
+    double invScale = 1.0;
+    double scale = 1.0;
+    double const *rx = nullptr, *ry = nullptr, *rz = nullptr;
+    double const *cx = nullptr, *cy = nullptr, *cz = nullptr;
+    size_t n = 0;
+};
+
+// The DisplaceBatch serial loop over [qs, qs+count): NEON blocks of 4
+// (scalar blocks when forced, or off AArch64) plus the Displacement
+// tail. One text for the serial entry and the pool workers' slices.
+void DisplaceRangeAos(CubicField const &field, DisplaceParams const &p,
+                      bool scalar, GfVec3d const *qs, GfVec3d *ds,
+                      size_t count)
+{
+#if defined(__aarch64__) || defined(_M_ARM64)
+    if (!scalar) {
+        while (count >= 4) {
+            DisplaceBlockedNeon4T(p.centre, p.invScale, p.scale, p.rx, p.ry,
+                                  p.rz, p.cx, p.cy, p.cz, p.n,
+                                  AosBlock4{qs, ds});
+            qs += 4;
+            ds += 4;
+            count -= 4;
+        }
+        for (size_t t = 0; t < count; ++t) ds[t] = field.Displacement(qs[t]);
+        return;
+    }
+#else
+    (void)scalar;
+#endif
+    while (count >= 8) {
+        DisplaceBlocked<8>(p.centre, p.invScale, p.scale, p.rx, p.ry, p.rz,
+                           p.cx, p.cy, p.cz, p.n, qs, ds);
+        qs += 8;
+        ds += 8;
+        count -= 8;
+    }
+    if (count >= 4) {
+        DisplaceBlocked<4>(p.centre, p.invScale, p.scale, p.rx, p.ry, p.rz,
+                           p.cx, p.cy, p.cz, p.n, qs, ds);
+        qs += 4;
+        ds += 4;
+        count -= 4;
+    }
+    for (size_t t = 0; t < count; ++t) ds[t] = field.Displacement(qs[t]);
+}
+
+// The DisplaceBatchPlanar serial loop over its planes: the same NEON
+// block through the planar bundle (scalar widths transpose through the
+// stack, as before) plus the Displacement tails.
+void DisplaceRangePlanar(CubicField const &field, DisplaceParams const &p,
+                         bool scalar, float const *qx, float const *qy,
+                         float const *qz, double *dx, double *dy, double *dz,
+                         size_t count)
+{
+#if defined(__aarch64__) || defined(_M_ARM64)
+    if (!scalar) {
+        while (count >= 4) {
+            DisplaceBlockedNeon4T(p.centre, p.invScale, p.scale, p.rx, p.ry,
+                                  p.rz, p.cx, p.cy, p.cz, p.n,
+                                  PlanarFBlock4{qx, qy, qz, dx, dy, dz});
+            qx += 4;
+            qy += 4;
+            qz += 4;
+            dx += 4;
+            dy += 4;
+            dz += 4;
+            count -= 4;
+        }
+        for (size_t t = 0; t < count; ++t) {
+            GfVec3d const d = field.Displacement(GfVec3d(qx[t], qy[t], qz[t]));
+            dx[t] = d[0];
+            dy[t] = d[1];
+            dz[t] = d[2];
+        }
+        return;
+    }
+#else
+    (void)scalar;
+#endif
+    // Scalar widths transpose through the stack: the block template keeps
+    // its AoS spelling (and its FMA association), and the gather/scatter
+    // convert exactly.
+    while (count >= 8) {
+        GfVec3d q[8], d[8];
+        for (size_t t = 0; t < 8; ++t) q[t] = GfVec3d(qx[t], qy[t], qz[t]);
+        DisplaceBlocked<8>(p.centre, p.invScale, p.scale, p.rx, p.ry, p.rz,
+                           p.cx, p.cy, p.cz, p.n, q, d);
+        for (size_t t = 0; t < 8; ++t) {
+            dx[t] = d[t][0];
+            dy[t] = d[t][1];
+            dz[t] = d[t][2];
+        }
+        qx += 8;
+        qy += 8;
+        qz += 8;
+        dx += 8;
+        dy += 8;
+        dz += 8;
+        count -= 8;
+    }
+    if (count >= 4) {
+        GfVec3d q[4], d[4];
+        for (size_t t = 0; t < 4; ++t) q[t] = GfVec3d(qx[t], qy[t], qz[t]);
+        DisplaceBlocked<4>(p.centre, p.invScale, p.scale, p.rx, p.ry, p.rz,
+                           p.cx, p.cy, p.cz, p.n, q, d);
+        for (size_t t = 0; t < 4; ++t) {
+            dx[t] = d[t][0];
+            dy[t] = d[t][1];
+            dz[t] = d[t][2];
+        }
+        qx += 4;
+        qy += 4;
+        qz += 4;
+        dx += 4;
+        dy += 4;
+        dz += 4;
+        count -= 4;
+    }
+    for (size_t t = 0; t < count; ++t) {
+        GfVec3d const d = field.Displacement(GfVec3d(qx[t], qy[t], qz[t]));
+        dx[t] = d[0];
+        dy[t] = d[1];
+        dz[t] = d[2];
+    }
+}
+
+// Large-batch threading: a 200k-query batch is ~9ms of fp64 sqrt work on
+// one core, compute-bound and per-query independent, so batches at or
+// above kDisplaceThreadQueries split over a process-wide pool in
+// kDisplaceBlock-query slices (a multiple of the NEON width, so only
+// the last slice carries a tail). Production deform batches (~256
+// queries per strand group, already spread over the scheduler pool)
+// stay serial, as do nested calls from pool workers (the re-entry
+// guard); concurrent top-level dispatches serialize on the pool mutex
+// (one ParallelFor per pool at a time).
+size_t constexpr kDisplaceThreadQueries = 16384;
+size_t constexpr kDisplaceBlock = 1024;
+
+UsdGenWorkerPool &DisplacePool()
+{
+    // Leaked like the TBB market: joining workers at DSO unload waits
+    // for threads process shutdown may already have stopped.
+    static UsdGenWorkerPool *const pool = [] {
+        // The scheduler's sizing: the fast-core count where the topology
+        // qualifies (pinning engages by construction), else the 8-thread
+        // floor. 8/10/20 measured 1.44/1.14/1.30ms on the bench's 200k
+        // batch (the 20-wide float loses to 10 pinned fast cores).
+        return new UsdGenWorkerPool(std::max(8, FastCoreCount()));
+    }();
+    return *pool;
+}
+
+std::mutex &DisplacePoolMutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+
+thread_local bool t_inDisplaceBody = false;
+
+struct DisplaceBodyGuard {
+    DisplaceBodyGuard() { t_inDisplaceBody = true; }
+    ~DisplaceBodyGuard() { t_inDisplaceBody = false; }
+};
+
+struct AosJob {
+    CubicField const *field;
+    DisplaceParams params;
+    bool scalar;
+    GfVec3d const *qs;
+    GfVec3d *ds;
+    size_t count;
+};
+
+void DisplaceAosBlock(size_t b, void *payload)
+{
+    DisplaceBodyGuard guard;
+    AosJob const &job = *static_cast<AosJob const *>(payload);
+    size_t const lo = b * kDisplaceBlock;
+    size_t const hi = std::min(lo + kDisplaceBlock, job.count);
+    DisplaceRangeAos(*job.field, job.params, job.scalar, job.qs + lo,
+                     job.ds + lo, hi - lo);
+}
+
+struct PlanarJob {
+    CubicField const *field;
+    DisplaceParams params;
+    bool scalar;
+    float const *qx, *qy, *qz;
+    double *dx, *dy, *dz;
+    size_t count;
+};
+
+void DisplacePlanarBlock(size_t b, void *payload)
+{
+    DisplaceBodyGuard guard;
+    PlanarJob const &job = *static_cast<PlanarJob const *>(payload);
+    size_t const lo = b * kDisplaceBlock;
+    size_t const hi = std::min(lo + kDisplaceBlock, job.count);
+    DisplaceRangePlanar(*job.field, job.params, job.scalar, job.qx + lo,
+                        job.qy + lo, job.qz + lo, job.dx + lo, job.dy + lo,
+                        job.dz + lo, hi - lo);
+}
+
+// False when nested (the caller runs the serial range instead).
+bool DisplaceDispatch(size_t count, void (*body)(size_t, void *),
+                      void *payload)
+{
+    if (t_inDisplaceBody) return false;
+    std::lock_guard<std::mutex> lock(DisplacePoolMutex());
+    DisplacePool().ParallelFor((count + kDisplaceBlock - 1) / kDisplaceBlock,
+                               body, payload);
+    return true;
+}
+
 }  // namespace
 
 namespace {
@@ -430,38 +654,22 @@ void CubicField::DisplaceBatch(GfVec3d const *qs, GfVec3d *ds, size_t count) con
         for (size_t t = 0; t < count; ++t) ds[t] = GfVec3d(0.0);
         return;
     }
-    double const *cx = &_coefficients[0];
-    double const *cy = &_coefficients[m];
-    double const *cz = &_coefficients[2 * m];
-    double const *rx = _restX.data(), *ry = _restY.data(), *rz = _restZ.data();
-#if defined(__aarch64__) || defined(_M_ARM64)
-    if (!g_forceScalarDisplace.load(std::memory_order_relaxed)) {
-        while (count >= 4) {
-            DisplaceBlockedNeon4T(_centre, _invScale, _scale, rx, ry, rz,
-                                  cx, cy, cz, n, AosBlock4{qs, ds});
-            qs += 4;
-            ds += 4;
-            count -= 4;
-        }
-        for (size_t t = 0; t < count; ++t) ds[t] = Displacement(qs[t]);
-        return;
+    DisplaceParams const p{_centre,
+                           _invScale,
+                           _scale,
+                           _restX.data(),
+                           _restY.data(),
+                           _restZ.data(),
+                           &_coefficients[0],
+                           &_coefficients[m],
+                           &_coefficients[2 * m],
+                           n};
+    bool const scalar = g_forceScalarDisplace.load(std::memory_order_relaxed);
+    if (count >= kDisplaceThreadQueries) {
+        AosJob job{this, p, scalar, qs, ds, count};
+        if (DisplaceDispatch(count, DisplaceAosBlock, &job)) return;
     }
-#endif
-    while (count >= 8) {
-        DisplaceBlocked<8>(_centre, _invScale, _scale, rx, ry, rz,
-                           cx, cy, cz, n, qs, ds);
-        qs += 8;
-        ds += 8;
-        count -= 8;
-    }
-    if (count >= 4) {
-        DisplaceBlocked<4>(_centre, _invScale, _scale, rx, ry, rz,
-                           cx, cy, cz, n, qs, ds);
-        qs += 4;
-        ds += 4;
-        count -= 4;
-    }
-    for (size_t t = 0; t < count; ++t) ds[t] = Displacement(qs[t]);
+    DisplaceRangeAos(*this, p, scalar, qs, ds, count);
 }
 
 void CubicField::DisplaceBatchPlanar(float const *qx, float const *qy, float const *qz,
@@ -474,78 +682,22 @@ void CubicField::DisplaceBatchPlanar(float const *qx, float const *qy, float con
         for (size_t t = 0; t < count; ++t) dx[t] = dy[t] = dz[t] = 0.0;
         return;
     }
-    double const *cx = &_coefficients[0];
-    double const *cy = &_coefficients[m];
-    double const *cz = &_coefficients[2 * m];
-    double const *rx = _restX.data(), *ry = _restY.data(), *rz = _restZ.data();
-#if defined(__aarch64__) || defined(_M_ARM64)
-    if (!g_forceScalarDisplace.load(std::memory_order_relaxed)) {
-        while (count >= 4) {
-            DisplaceBlockedNeon4T(_centre, _invScale, _scale, rx, ry, rz,
-                                  cx, cy, cz, n,
-                                  PlanarFBlock4{qx, qy, qz, dx, dy, dz});
-            qx += 4;
-            qy += 4;
-            qz += 4;
-            dx += 4;
-            dy += 4;
-            dz += 4;
-            count -= 4;
-        }
-        for (size_t t = 0; t < count; ++t) {
-            GfVec3d const d = Displacement(GfVec3d(qx[t], qy[t], qz[t]));
-            dx[t] = d[0];
-            dy[t] = d[1];
-            dz[t] = d[2];
-        }
-        return;
+    DisplaceParams const p{_centre,
+                           _invScale,
+                           _scale,
+                           _restX.data(),
+                           _restY.data(),
+                           _restZ.data(),
+                           &_coefficients[0],
+                           &_coefficients[m],
+                           &_coefficients[2 * m],
+                           n};
+    bool const scalar = g_forceScalarDisplace.load(std::memory_order_relaxed);
+    if (count >= kDisplaceThreadQueries) {
+        PlanarJob job{this, p, scalar, qx, qy, qz, dx, dy, dz, count};
+        if (DisplaceDispatch(count, DisplacePlanarBlock, &job)) return;
     }
-#endif
-    // Scalar widths transpose through the stack: the block template keeps
-    // its AoS spelling (and its FMA association), and the gather/scatter
-    // convert exactly.
-    while (count >= 8) {
-        GfVec3d q[8], d[8];
-        for (size_t t = 0; t < 8; ++t) q[t] = GfVec3d(qx[t], qy[t], qz[t]);
-        DisplaceBlocked<8>(_centre, _invScale, _scale, rx, ry, rz,
-                           cx, cy, cz, n, q, d);
-        for (size_t t = 0; t < 8; ++t) {
-            dx[t] = d[t][0];
-            dy[t] = d[t][1];
-            dz[t] = d[t][2];
-        }
-        qx += 8;
-        qy += 8;
-        qz += 8;
-        dx += 8;
-        dy += 8;
-        dz += 8;
-        count -= 8;
-    }
-    if (count >= 4) {
-        GfVec3d q[4], d[4];
-        for (size_t t = 0; t < 4; ++t) q[t] = GfVec3d(qx[t], qy[t], qz[t]);
-        DisplaceBlocked<4>(_centre, _invScale, _scale, rx, ry, rz,
-                           cx, cy, cz, n, q, d);
-        for (size_t t = 0; t < 4; ++t) {
-            dx[t] = d[t][0];
-            dy[t] = d[t][1];
-            dz[t] = d[t][2];
-        }
-        qx += 4;
-        qy += 4;
-        qz += 4;
-        dx += 4;
-        dy += 4;
-        dz += 4;
-        count -= 4;
-    }
-    for (size_t t = 0; t < count; ++t) {
-        GfVec3d const d = Displacement(GfVec3d(qx[t], qy[t], qz[t]));
-        dx[t] = d[0];
-        dy[t] = d[1];
-        dz[t] = d[2];
-    }
+    DisplaceRangePlanar(*this, p, scalar, qx, qy, qz, dx, dy, dz, count);
 }
 
 std::vector<size_t> SelectSamples(std::vector<GfVec3d> const &points, size_t budget,
