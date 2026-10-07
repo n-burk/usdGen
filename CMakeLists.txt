@@ -3162,12 +3162,18 @@ set_tests_properties(testUsdGenPomadeApi PROPERTIES
 # the GuideInterpolate fill-in, Save groom, and gate TN-4 (reference-scale
 # swap <= 5 ms). Needs the schema plugin for the typed groom prims, so it
 # carries the same environment as every adapter-dependent T1 test.
+# TN-4 times steady_clock around each idle-slot copy. On the 4-vCPU
+# ctest -j runner that slot shares cores with the long imaging tests
+# (scene publication, native time, collide), and one preemption pushes
+# the worst slot past the 8 ms allowance. RUN_SERIAL keeps the wall-clock
+# gate on the same threshold without that contention.
 add_executable(testUsdGenPomadeCommit tests/testUsdGenPomadeCommit.cpp)
 target_link_libraries(testUsdGenPomadeCommit PRIVATE usdGenPomade usdGenImaging usd usdGeom sdf)
 add_test(NAME testUsdGenPomadeCommit COMMAND testUsdGenPomadeCommit)
 set_tests_properties(testUsdGenPomadeCommit PROPERTIES
     ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}"
     LABELS "T1;pomade;gate:TN-4" TIMEOUT 300
+    RUN_SERIAL TRUE
     SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 
 # Sparse Output: cage guides and a PTex ownership map feed runtime
@@ -3241,6 +3247,10 @@ set_tests_properties(testUsdGenPomadeKernels PROPERTIES
 # P4 hierarchy core (plan/17 section 8). T0: K14 subdivide/merge (Hausdorff
 # union bar, bit-exact round-trip via the persistent-parent hint,
 # determinism, edge mode) + K7 averaging (idempotence, propagation).
+# The TN-1 k6budget check averages steady_clock over 50 moves and asserts
+# under 4 ms. On the 4-vCPU ctest -j runner that average was ~6.3 ms while
+# the long imaging tests still held the other cores, so both retries missed.
+# The threshold stays. RUN_SERIAL takes this test off those cores.
 add_executable(testUsdGenPomadeHierarchy tests/testUsdGenPomadeHierarchy.cpp)
 target_link_libraries(testUsdGenPomadeHierarchy PRIVATE usdGenPomade)
 if(USDGEN_ENABLE_CUDA)
@@ -3248,7 +3258,8 @@ if(USDGEN_ENABLE_CUDA)
 endif()
 add_test(NAME testUsdGenPomadeHierarchy COMMAND testUsdGenPomadeHierarchy)
 set_tests_properties(testUsdGenPomadeHierarchy PROPERTIES
-    LABELS "T0;pomade" TIMEOUT 300)
+    LABELS "T0;pomade" TIMEOUT 300
+    RUN_SERIAL TRUE)
 
 # T1: the versioned .ptx through the real ptex() expression (per-strand
 # equality with the live primvar), the bake worker, the swap, and the
