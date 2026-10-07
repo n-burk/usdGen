@@ -1204,9 +1204,9 @@ UsdGenInstancer::BuildInstancerDataSource(
                 void const *packSrc = plane.f.cdata();
                 packed.resize(plane.f.size() / 2,
                               [packSrc](GfVec2f *b, GfVec2f *e) {
-                                  std::memcpy(b, packSrc,
-                                              size_t(e - b) *
-                                              sizeof(GfVec2f));
+                                  _MemcpyChunked(b, packSrc,
+                                                 size_t(e - b) *
+                                                 sizeof(GfVec2f));
                               });
                 sampled = _Samp(packed);
             } else {
