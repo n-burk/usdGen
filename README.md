@@ -1,20 +1,21 @@
 # usdGen
 
-usdGen generates and grooms hair and fur inside an OpenUSD pipeline. A groom is ordinary USD: a description, an operator stack, guides, maps, and looks. A Hydra scene index cooks that graph and publishes curves for Storm and other render delegates. usdview plugins author the groom and edit expressions on the stage.
+usdGen generates and grooms hair and fur inside an OpenUSD pipeline. A groom is ordinary USD: a description, an operator stack, guides, maps, and looks. A Hydra scene index cooks that graph and publishes curves for Storm and other render delegates.
 
-The intended result is a set of plugins and tools a studio pipeline can build, install, and load next to OpenUSD. Artists and TDs use the usdview tools. Engineers use the libraries, the schema, and the tests.
+The intended result is a set of libraries and plugins a studio pipeline can build, install, and load next to OpenUSD. Engineers use the libraries, the schema, and the tests. The Pomade usdview shelf, the expression editor, and the offline CLI utilities are maintained separately and are not built or installed here. The Noodles editor in `plugin/usdNoodles` is.
 
 ## What ships in this repository
 
 - **Engine** (`libs/usdGen`, `libs/usdGenMath`). A stage-free operator graph. Example scenes exercise scatter, grow, noise, length, width, clumping, guide interpolation, curve import, and deformation.
 - **Hydra** (`libs/usdGenImaging`, `plugin/usdGenImaging`). A groom scene index that publishes curve tiles into Hydra, including Storm shading and optional instanced fur.
 - **Schema** (`libs/usdGenSchema`, `plugin/usdGenSchema`). Codeless `usdGen:` types. The checked-in resources are generated from `libs/usdGenSchema/schema.usda`.
-- **Pomade** (`libs/usdGenPomade`, `plugin/usdGenPomadeTools`). A usdview tool for hierarchical groom authoring: tubes, fills, guides, and a commit back to USD. See [docs/pomade-tool.md](docs/pomade-tool.md).
-- **Expression editor** (`plugin/usdGenTools`). A usdview dock for SeExpr on `usdGen:expr:source`.
+- **Pomade** (`libs/usdGenPomade`, `plugin/usdGenPomade`). The hierarchical groom model and its Hydra scene index.
+- **Noodles** (`plugin/usdNoodles`). The usdview graph editor. Optional at configure time (`USDGEN_BUILD_USDNOODLES`).
 - **Shaders** (`usdGenShaders`). Storm materials for strand shading and self-shadowing. See [docs/storm-fur.md](docs/storm-fur.md).
+- **Visual manual** in [docs/site/index.html](docs/site/index.html). Rebuild it from [tools/docs/README.md](tools/docs/README.md).
 - **Examples** in [examples/](examples/README.md).
 
-Pomade is this repository's authoring tool. It is not a separate product name from an outside DCC.
+Pomade in this repository is the groom model and scene index.
 
 ## How it sits next to OpenUSD and usdRig
 
@@ -136,7 +137,7 @@ index path currently lacks that consumer for both CUDA and Vulkan.
 |---|---|
 | [Visual manual](docs/site/index.html) | Browse the groom workflow, operator reference, and illustrated examples locally |
 | [docs/README.md](docs/README.md) | Index of user-facing docs and historical notes |
-| [docs/pomade-tool.md](docs/pomade-tool.md) | Pomade workspace, modes, and hotkeys |
+| [docs/pomade-tool.md](docs/pomade-tool.md) | Where the Pomade model stops and the usdview shelf does not ship |
 | [docs/storm-fur.md](docs/storm-fur.md) | Storm hair shading and self-shadowing |
 | [docs/moonray-fur.md](docs/moonray-fur.md) | Instanced fur through the MoonRay Hydra delegate |
 | [examples/README.md](examples/README.md) | Scenes and how to view them |

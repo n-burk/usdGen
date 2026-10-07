@@ -18,7 +18,7 @@ def Xform "World"
             1: [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)],
             24: [(0, 0, 5), (1, 0, 5), (1, 1, 5), (0, 1, 5)],
         }
-        # Houdini-style explicit rest primvar
+        # a host application-style explicit rest primvar
         point3f[] primvars:rest = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)] (
             interpolation = "vertex"
         )

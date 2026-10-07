@@ -10,7 +10,7 @@
 // reproduces a host renderer's strand-hair shading as closely as stock Storm
 // allows. The model, the constants and the parameter names below are the host renderer's; see
 // usdGenHairStrandsBsdf.glslfx (which this file imports and which holds the
-// whole implementation) and docs/research/ue-hair-rendering.md.
+// whole implementation).
 //
 // NOT part of the C5 freeze (docs/freezes/C5.md), which covers the `inputs:`
 // block of the three usdGenHairPreview* files only. Those three are untouched;
@@ -26,7 +26,7 @@
 //
 // materialTag: "translucent", which routes the prims to HdxOitRenderTask, i.e.
 // order-independent transparency (pxr/imaging/hdx/taskController.cpp:331-336
-// vs :392-400). The the host renderer coverage compensation this file computes then becomes a
+// vs :392-400). The host renderer coverage compensation this file computes then becomes a
 // true partial alpha instead of a sample mask, which is smoother than the
 // opaque file's stochastic coverage -- but Storm's OIT has a HARD GLOBAL
 // BUDGET of 8 * width * height fragments over the whole frame, allocated from
@@ -62,7 +62,7 @@
     "parameters": {
         "baseColor": {
             "default": [0.035, 0.018, 0.008],
-            "documentation": "Linear albedo at the ROOT of the strand, UE's Base Color: the absorption colour the TT and TRT lobes transmit through. Used only when the prim carries no displayColor primvar; on a usdGen tile the baked per-curve displayColor takes this slot."
+            "documentation": "Linear albedo at the ROOT of the strand, the host renderer's Base Color: the absorption colour the TT and TRT lobes transmit through. Used only when the prim carries no displayColor primvar; on a usdGen tile the baked per-curve displayColor takes this slot."
         },
         "tipColor": {
             "default": [0.210, 0.115, 0.045],
@@ -74,7 +74,7 @@
         },
         "useMelanin": {
             "default": 0.0,
-            "documentation": "Blend from the root/tip colour (0) to the melanin colour (1). UE's hair colour is authored as melanin/redness/dye; GetHairColorFromMelanin maps them through d'Eon's absorption coefficients and Chiang's absorption-to-colour fit."
+            "documentation": "Blend from the root/tip colour (0) to the melanin colour (1). The host renderer's hair colour is authored as melanin/redness/dye; GetHairColorFromMelanin maps them through d'Eon's absorption coefficients and Chiang's absorption-to-colour fit."
         },
         "melanin": {
             "default": 0.5,
@@ -90,19 +90,19 @@
         },
         "roughness": {
             "default": 0.35,
-            "documentation": "UE's hair Roughness, i.e. Marschner's longitudinal beta. The three lobe variances are B = {roughness^2, roughness^2/2, roughness^2*2}; smaller is a tighter, brighter primary highlight."
+            "documentation": "The host renderer's hair Roughness, i.e. Marschner's longitudinal beta. The three lobe variances are B = {roughness^2, roughness^2/2, roughness^2*2}; smaller is a tighter, brighter primary highlight."
         },
         "specular": {
             "default": 0.5,
-            "documentation": "Scales the R (primary, uncoloured) lobe only, as `specular*2` — so the UE default 0.5 means a multiplier of exactly 1. TT and TRT are unaffected."
+            "documentation": "Scales the R (primary, uncoloured) lobe only, as `specular*2` — so the host renderer default 0.5 means a multiplier of exactly 1. TT and TRT are unaffected."
         },
         "scatter": {
             "default": 0.0,
-            "documentation": "UE's `Scatter` pin (GBuffer.Metallic): the strength of the wrapped-Lambert fake multiple-scattering term, added on top of dual scattering exactly where HairShading() adds it. 0 is UE's own default and what its strands path forces, relying on dual scattering alone. Raise it for a scene lit only by a headlight, where every Marschner lobe is near zero because they all need the light close to the specular cone: 0.3 is enough to read the coat, at the cost of a flat fill over the self-shadowing."
+            "documentation": "The host renderer's `Scatter` pin (GBuffer.Metallic): the strength of the wrapped-Lambert fake multiple-scattering term, added on top of dual scattering exactly where HairShading() adds it. 0 is the host renderer's own default and what its strands path forces, relying on dual scattering alone. Raise it for a scene lit only by a headlight, where every Marschner lobe is near zero because they all need the light close to the specular cone: 0.3 is enough to read the coat, at the cost of a flat fill over the self-shadowing."
         },
         "backlit": {
             "default": 1.0,
-            "documentation": "UE's Backlit pin. Scales the TT lobe fully, and the R lobe by lerp(1, backlit, saturate(-dot(V,L))) — i.e. only where the light is behind the fibre."
+            "documentation": "The host renderer's Backlit pin. Scales the TT lobe fully, and the R lobe by lerp(1, backlit, saturate(-dot(V,L))) — i.e. only where the light is behind the fibre."
         },
         "opacity": {
             "default": 1.0,
@@ -122,11 +122,11 @@
         },
         "selfShadow": {
             "default": 1.0,
-            "documentation": "Multiplier on the baked optical depth before it is used as UE's hair count: 0 disables self-shadowing and dual scattering, 1 uses the bake as-is, >1 makes the coat denser. furTauP/furTauN hold the world-axis depths; optional furTipTauP/furTipTauN enable instanced root/tip interpolation. Without them the shader falls back to the legacy hairT canopy approximation plus UE's Scatter fake."
+            "documentation": "Multiplier on the baked optical depth before it is used as the host renderer's hair count: 0 disables self-shadowing and dual scattering, 1 uses the bake as-is, >1 makes the coat denser. furTauP/furTauN hold the world-axis depths; optional furTipTauP/furTipTauN enable instanced root/tip interpolation. Without them the shader falls back to the legacy hairT canopy approximation plus the host renderer's Scatter fake."
         },
         "hairCoverageScale": {
             "default": 1.0,
-            "documentation": "UE's HairCoverageScale. Multiplies the coverage a strand earns from its true projected width, so a decimated groom can pay back the hair it dropped. 1 leaves the physical coverage alone."
+            "documentation": "The host renderer's HairCoverageScale. Multiplies the coverage a strand earns from its true projected width, so a decimated groom can pay back the hair it dropped. 1 leaves the physical coverage alone."
         },
         "minPixelWidth": {
             "default": 1.0,

@@ -31,28 +31,23 @@ the safe boundary for the stage scene index. A host other than usdview must set
 for asynchronous updates itself. This is currently a CPU publication path;
 there is no stock-Storm GPU-resident tile handoff.
 
-The timeline **Play** button waits for every enabled groom's complete current
-generation in Storm and for the viewport to present its converged image before advancing.
-Playback slows to the cook rate when necessary. **Stop** stays responsive, and
-manual timeline scrubbing continues to show progressively arriving tiles.
+`usdGenImaging` reports frame readiness through `PlaybackStatusJson`. A viewer
+can wait for every enabled groom's complete current generation in Storm and for
+the viewport to present its converged image before advancing. Playback then
+slows to the cook rate. Manual timeline scrubbing continues to show
+progressively arriving tiles. An unavailable or ambiguous scene-index binding
+reports an error instead of advancing on stale hair. Scenes without groom
+roots, and viewers launched with `USDGEN_ENABLE=0`, use the authored frame and
+a converged viewport. Groom publication gating is supported for Storm.
+`USDGEN_USDVIEW_FRAME_TIMEOUT` is the per-frame wait limit in seconds used by
+the external viewer controls (default 900; `0` waits until completion or
+cancellation).
 
-Use **Playblast**, next to Play, to save the displayed timeline range as an MP4.
-Choose the output with the file dialog. The tool captures each actual viewport
-frame after the same publication and presentation checks, then encodes it at the
-timeline FPS. Each timeline sample contributes one movie frame, including both
-ends of the displayed range. Keep the viewport size fixed during capture.
-Cancel stops capture or encoding and restores the previous frame and playback
-state; a failed or cancelled capture preserves any existing output movie.
-`ffmpeg` must be on `PATH`, or set `USDGEN_FFMPEG` to its executable. Native frame
-readiness support must be present in `usdGenImaging`; an unavailable or ambiguous
-scene-index binding reports an error instead of advancing or capturing stale hair.
-Scenes without groom roots, and viewers launched with `USDGEN_ENABLE=0`, use
-the authored frame and converged viewport presentation checks for Playblast.
-Other render delegates retain stock usdview Play behavior. Groom publication
-gating is supported for Storm; ordinary USD scenes can be playblasted with
-other delegates when their viewport converges.
-`USDGEN_USDVIEW_FRAME_TIMEOUT` controls the per-frame wait limit in seconds
-(default 900; `0` waits until completion or cancellation).
+The usdview Play and Playblast controls that consume that status are not in
+this repository. Playblast, when that control is installed, saves the displayed
+timeline range as an MP4 at timeline FPS after the same publication and
+presentation checks. `ffmpeg` must be on `PATH`, or `USDGEN_FFMPEG` names its
+executable. Keep the viewport size fixed during capture.
 
 ## Collide practice frames
 
@@ -71,10 +66,10 @@ control-polygon chord lengths cannot identify the prepared retained prefix.
 Use the incoming and prepared geometry for that measurement.
 
 Choose `Camera > Select Camera > CamMotion` and compare held frames 0, 27 and
-99 after the hair settles. Storm Play waits for the complete current-frame
-groom and its converged viewport presentation; scrubbing remains progressive.
-Use Playblast to capture the displayed range at timeline FPS when slow cooks
-make interactive playback take longer.
+99 after the hair settles. Scrubbing remains progressive. When the external
+viewer controls are installed, Play waits for the complete current-frame groom
+and its converged viewport presentation, and Playblast captures the displayed
+range at timeline FPS.
 
 To inspect the fur response without the sphere covering it, open
 `Window > Layer Editor` and choose **Session Layer** as the edit target. Select
@@ -98,12 +93,11 @@ hair. Its former self-shadow was a smoothstep of `hairT`, independent of strand
 density, nearby curves, and light direction. The previous specular/transmission
 functions also normalized zero-length projected directions for axial views.
 
-The old `tools/fur_gen.py` used cone prototypes, `points` instead of PointInstancer
+An earlier instanced generator used cone prototypes, `points` instead of PointInstancer
 `positions`, no `protoIndices`, repeated IDs, and invalid visibility/camera
-attributes. The generator now produces valid native instanced cubic curves,
-vertex taper/root-to-tip coordinates, unique IDs, per-instance colors, a bound
-hair material, and a combed coat. Existing files in `renders/fur` are historical;
-regenerate them into a new output path using the tool below.
+attributes. A valid native instanced coat uses cubic curves,
+vertex taper and root-to-tip coordinates, unique IDs, per-instance colors, a bound
+hair material, and a combed coat. Files under `renders/fur` are historical.
 
 ## Implementation
 
@@ -213,34 +207,16 @@ bound by naming them on the description's material. There is no new
 renderer plugin or OpenUSD patch. CUDA-to-stock-Storm publication remains
 unimplemented in this checkout; this change does not add that handoff.
 
-For native PointInstancer scenes, use the offline bake utility. It accepts one
-BasisCurves strand per prototype, with constant or vertex widths, default-time
-transforms, and instance masks. It includes all instancers in a shared volume,
-then stores root/tip optical depth as four float3 **instance** primvars. The
-viewport geometry stays instanced. Prototype `hairT` interpolates those values.
-Rebake after moving/deforming/replacing instances; rotating lights and cameras
-works without rebaking. Nested/mesh prototypes and animated bakes are not handled.
-
-From an environment configured like `bin/launch_usdview.ps1`:
-
-```powershell
-.\bin\build_usdgen.ps1
-python tools/fur_gen.py 200000 build/fur_200k.usda
-.\build\usdGenBakeFur.exe build/fur_200k.usda build/fur_200k_shadowed.usda
-.\bin\launch_usdview.ps1 build/fur_200k_shadowed.usda
-```
+Native PointInstancer scenes carry root/tip optical depth as four float3
+**instance** primvars. The viewport geometry stays instanced. Prototype
+`hairT` interpolates those values. Nested or mesh prototypes and animated
+bakes are outside that path.
 
 Select High or Very High complexity. `inputs:selfOcclusion = 0.5` applies the
 baked density; 0 disables it, 1 doubles extinction. Tune root/tip colors, lobe
 widths/gains, and transmission through the existing material inputs. Every Mesh
-on the stage is baked in as an opaque blocker, the way the procedural lane
-treats a groom's emitting surfaces. The optional third argument pins a cube of
-that many voxels (clamped to 8–128) instead of deriving the grid from the
-groom's bounds.
-
-The generator itself needs only Python. The bake executable needs the USD/core
-DLLs on PATH (the standard project launcher environment). A typical Windows
-prefix here is `<usdrig-src>/usd-install`.
+on the stage is treated as an opaque blocker, the way the procedural lane
+treats a groom's emitting surfaces.
 
 ## Verification and measured limits
 
@@ -273,7 +249,7 @@ CPU wall times, not isolated GPU timer queries. Baking and exporting the native
 instanced scene took 1.61 seconds. JSON and rendered evidence are under
 `build/fur_validation_200k`.
 
-Bake cost, on the same box (`bin/trace_playback.ps1`, the engine's own TRACE
+Bake cost, on the same box (the engine's own TRACE
 scopes; the scheduler's arena is eight threads by default):
 
 | workload | before | after |
@@ -324,7 +300,7 @@ composition passes. Achieving or exceeding that full feature/quality envelope
 requires renderer integration and matched scenes/hardware benchmarks, beyond
 the stock material/scene-index path implemented here.
 
-References: [the host vendor groom pipeline and performance](https://dev.epicgames.com/documentation/unreal-engine/groom-scalability-and-performance-with-unreal-engine),
+References: the host vendor groom pipeline and performance,
 [Pixar volumetric hair methods](https://graphics.pixar.com/library/Hair/paper.pdf).
 
 ## Strand-hair shading
@@ -421,12 +397,12 @@ the test that identifies the cause. The loss is by draw order, so it moves as
 the camera moves. Bind `UsdGenHairStrandsTranslucent` by hand for a hero still
 of a groom that fits the budget.
 
-One thing here is still not the host renderer's. the host renderer's default is `RasterizationScale = 0.5`
+One thing here is still not the host renderer's. The host renderer's default is `RasterizationScale = 0.5`
 with 8x MSAA, i.e. a strand is snapped to **one MSAA sample**, 1/8 of a pixel,
 and the geometry carries most of the sub-pixel coverage. A usdGen tile
 publishes `minScreenSpaceWidths = 1` (C2:35), the host renderer's *stable rasterization* mode,
 which maximises the coverage that has to be paid back in the mask — measured
-mean coverage over the hair pixels of the HeadCam frame is 0.54. the host renderer's own
+mean coverage over the hair pixels of the HeadCam frame is 0.54. The host renderer's own
 comment recommends 1.325 where there is no TAA, which is what we have; the
 value we use is 1 because it is the contract's, not because it is the best one.
 Lowering it is a C2 change, not a shader one.
@@ -452,11 +428,11 @@ head-hair-closeup at 1280, against a 4x supersampled reference:
 
 8 buys nearly all of the improvement for +12.6%; 16 costs +65% for almost
 nothing more and is indistinguishable in the crops
-(`renders/ue-parity/aa1_sheet_*.png`). Raising the count does not close the gap
+(`renders/hair-parity/aa1_sheet_*.png`). Raising the count does not close the gap
 to the reference — one shading sample per pixel and a finite mask cannot — but
 it is the cheapest large step.
 
-`record_usd.ps1 -Supersample N` and `render_ue_parity.ps1 -Supersample N`
+`record_usd.ps1 -Supersample N` and `render_hair_parity.ps1 -Supersample N`
 render at N x and box-downsample in linear light (`bin/downsample_linear.py`).
 That is the converged image, so it separates "the shader is wrong" from "this
 needs more samples", and it is how every number above was judged. Cost goes as
@@ -475,7 +451,7 @@ stops moving:
 | spike score | 0.000562 | 0.000184 | 0.000172 | 0.000169 |
 | mean luminance | 0.41503 | 0.41405 | 0.41390 | 0.41384 |
 
-`renders/ue-parity/final1_ss4_*` is the current converged set for all five
+`renders/hair-parity/final1_ss4_*` is the current converged set for all five
 cameras; `final1_*` is the same five at the 1x shipping defaults.
 
 **When comparing a supersampled reference to a 1x frame, compare `mean(alpha)`
@@ -499,7 +475,7 @@ against the converged reference on head-hair-closeup and both are worse:
 
 The reason is stratification. Lighting exactly k samples is a stratified
 estimate of the coverage; letting each sample decide for itself is plain
-Bernoulli with the same mean and higher variance. the host renderer can afford per-sample
+Bernoulli with the same mean and higher variance. The host renderer can afford per-sample
 because its visibility buffer resolves coverage analytically rather than
 stochastically — the mechanism being "more correct" does not survive the
 variance arithmetic here.
@@ -616,7 +592,7 @@ so they are that viewer's real output, not a reconstruction.
 
 The Kajiya term is not a fallback for missing dual-scattering data: it is
 always added, gated by `GBuffer.Metallic`, which `MaterialAttributeDefinitionMap`
-maps to the hair label **Scatter**. the host renderer's strands path is dark there only because
+maps to the hair label **Scatter**. The host renderer's strands path is dark there only because
 `HairSampleToGBufferData` hardcodes `Out.Metallic = 0`. This material keeps it
 as the input it is, added in the same place, and defaults it to **0** — the host renderer's own
 default and what its strands path forces.
@@ -639,7 +615,7 @@ scatter 0 with nothing artificial added.
 The default is 0 and not something larger because the term is added on top of
 dual scattering and is not attenuated by it, and `sqrt(BaseColor)` is about six
 times `BaseColor` for dark hair. Rendered side by side on the relit parity
-scene (`renders/ue-parity/ws1_scatter0_temple.png` against
+scene (`renders/hair-parity/ws1_scatter0_temple.png` against
 `ws1_scatter1_temple.png`), `scatter = 1` replaces a dark brown coat with deep
 self-shadowing and visible specular bands with a flat pale khaki one: it does
 not merely lift the shadows, it overrides the authored look entirely. There is
@@ -716,7 +692,7 @@ Cost: four constant values per tile. Constants are one value each rather than
 one per CV, so this is nowhere near the per-stage SSBO limit that forced
 `furTauP`/`furTauN` to be packed vec3s (§ *Why six directions and not more*),
 and it does not
-touch the instanced lane at all — `usdGenBakeFur` publishes *instance*
+touch the instanced lane at all — that lane publishes *instance*
 primvars on a PointInstancer, which is a different path.
 
 A look-only edit moves no point and changes no topology, so the look is now
@@ -741,7 +717,7 @@ Pinned by `tests/testUsdGenLookPrimvars.cpp`.
   because `a_f` enters as `Tf = a_f^n`: the theta-averaged fit the script also
   prints is max 38% / rms 15% on `a_f` inside +-60 degrees, and at ten
   crossings 15% on `a_f` is a factor of four in transmittance.
-- `delta_b` and `sigma_b` follow Zinke's published equations. the host renderer's shipped
+- `delta_b` and `sigma_b` follow Zinke's published equations. The host renderer's shipped
   lines multiply where the paper adds, and repeat one square root; both are
   small shifts of an already broad back-scatter lobe.
 - The hair count is the six-axis baked optical depth (`furTauP`/`furTauN`)
@@ -920,141 +896,12 @@ On `examples/head-hair-closeup.usda`, against the same frame without the cap,
 the skin brightens nowhere and darkens where the hair is: on HeadCam the
 120-200 band of the crop under the hairline moves -17.5 of 255 and the 60-120
 band -10.7, while the background moves 0.00 and the hair itself -0.05. On
-TempleCam the same bands move -27.6 and -12.1. `renders/ue-parity/ws3_*` are
+TempleCam the same bands move -27.6 and -12.1. `renders/hair-parity/ws3_*` are
 the before/after set.
 
-## Supersampling the viewport
+## Offline supersampling
 
-`record_usd.ps1 -Supersample N` renders offline at N x and box-downsamples in
-linear light, and that converged image is what every anti-aliasing number in
-this file is judged against. The same thing can be done interactively, at a
-price that is nowhere near N^2:
-
-    .\bin\launch_usdview.ps1 -Supersample 2 examples\head-hair-closeup.usda
-
-or `USDGEN_USDVIEW_SUPERSAMPLE=2` in the environment, or the **usdGen >
-Viewport Supersampling** menu (Off / 2x / 4x) once usdview is up. It is off
-unless asked for. No OpenUSD source is patched; the whole thing is
-`plugin/usdGenTools/python/usdGenTools/supersample.py`, which patches
-`StageView._paintGLWithRenderer` when the plugin container loads.
-
-**Why it needs a framebuffer of its own.** Asking the engine for a bigger
-render buffer is one line -- `StageView._paintGLWithRenderer` already calls
-`SetRenderBufferSize` and `SetFraming` (`stageView.py:1715-1720`) -- but the
-present step then draws the AOV at that size *into the window*. With a valid
-framing the task controller sets
-
-    dstRegion = (0, 0, renderBufferSize[0], renderBufferSize[1])
-
-(`hdx/taskControllerSceneIndex.cpp:2636`, `hdx/taskController.cpp:2148`), and
-`HgiInteropOpenGL::CompositeToInterop` does `glViewport(*dstRegion)` before its
-fullscreen triangle (`hgiInterop/opengl.cpp:246`). Nothing in
-`UsdImagingGLEngine` exposes that region, so an N x render buffer composites
-N x into the widget and all but the lower-left 1/N^2 falls off the edge. The
-smallest OpenUSD-side fix would be to let the application set the present
-region (an `HdxPresentTaskParams::dstRegion` that the app owns, reached through
-something like `UsdImagingGLEngine::SetPresentationRegion`, and Python-wrapped);
-`SetEnablePresentation`, `SetPresentationOutput`, `GetAovTexture` and
-`GetAovRenderBuffer` are all C++-only today (`usdImagingGL/wrapEngine.cpp`), so
-a Python plugin cannot take the AOV out of the engine either.
-
-What the application *can* choose is the framebuffer that is composited into:
-the present task's `dstFramebuffer` is empty in usdview, and HgiInterop then
-composites into whatever is bound (`hgiInterop/opengl.cpp:152`). So the plugin
-binds its own N x FBO for the whole paint -- the render, the axis, the camera
-guides, the mask and the reticles all land in it at N x, because everything
-they use comes from `GetPhysicalWindowSize`, which the patch scales for the
-duration of the paint -- and then resolves that texture down into the widget's
-framebuffer with an exact N x N box filter. The HUD is held back and drawn
-after the resolve, at window resolution, so its text stays crisp.
-
-**The resolve is in linear light.** `HdxColorCorrectionTask` has already
-applied the sRGB transfer function by the time the pixels reach the present
-step, so averaging those code values is not averaging the light: it loses
-energy exactly where the strands are. The resolve shader therefore decodes to
-linear, averages, and re-encodes, which is what `bin/downsample_linear.py` does
-offline. Measured on the TempleCam frame at 4x, averaging the code values
-instead darkens the frame by 5.5% of mean linear luminance and moves individual
-strand-edge pixels by up to 63 code values. `USDGEN_USDVIEW_SUPERSAMPLE_LINEAR=0`
-selects that (wrong, but cheaper-looking) behaviour; `=1` forces the decode when
-usdview's colour correction is off.
-
-head-hair-closeup TempleCam, 1280x960, `HDX_MSAA_SAMPLE_COUNT=8`, RTX 4090,
-12 timed frames each (wall time around `update()` + `glFinish()`), spike score
-as defined in the sample-count section above:
-
-| | 1x | 2x | 4x | offline 4x reference |
-|---|---|---|---|---|
-| frame time (min) | 19.1 ms | 29.5 ms | 63.4 ms | -- |
-| cost over 1x | -- | 1.55x | 3.3x | -- |
-| isolated-pixel spike score | 0.00522 | 0.00295 | 0.00165 | 0.00176 |
-| neighbour-gradient energy | 0.0582 | 0.0384 | 0.0260 | 0.0289 |
-
-Two things to read off that. The cost is well under N^2 (1.55x for 2x, 3.3x for
-4x) because this frame is not purely fill-bound. And 4x in the viewport reaches
-the offline reference: the same speckle metric the offline `-Supersample 4`
-reference scores 0.00176 on, the live viewport scores 0.00165 on. 2x is the
-interactive setting -- it removes 44% of the speckle for half a frame.
-
-**Limits.**
-
-- At 4x on a 1280x960 window the render buffer is 5120x3840, and Storm's OIT
-  fragment pool (`8 * width * height` elements) then exceeds `HdSt`'s maximum
-  buffer array size: `HdStVBOSimpleMemoryManager` posts *"Number of elements in
-  the buffer array range (0x9600000) is larger than the maximum ... 0x5600000
-  bytes of data will be skipped"* on the resize. The opaque strand variant this
-  file recommends does not read that pool, and the frames come out correct, but
-  the errors are real and a translucent-bound groom would lose fragments. 2x on
-  the same window stays inside the limit.
-- Memory goes as N^2 as well, and the MSAA colour target multiplies it by the
-  sample count: 4x at 1280x960 with 8 samples is a little over a gigabyte of
-  AOV.
-- Picking is untouched: it goes through a narrowed frustum built from
-  normalised window coordinates (`stageView.py computePickFrustum`) and
-  `HdxPickTask`'s own buffers, not the render buffer. The test asserts the pick
-  frustums and hits are identical at 1x and 2x.
-
-`plugin/usdGenTools/testenv/testUsdGenToolsSupersample.py` is the test (a
-testusdview script, like the expression editor's): it checks the resolved frame
-is the window size and matches the 1x frame quadrant by quadrant -- which is
-what fails if the present ever magnifies and crops again -- that switching back
-to 1x restores the stock frame, that the HUD draws over the resolved image
-without disturbing it, that the camera mask still crops, and the picking
-invariant above. `plugin/usdGenTools/testenv/shotUsdGenToolsSupersample.py` is
-the photographer that produced the table.
-
-### Turning it on and off at runtime
-
-The **usdGen > Viewport Supersampling** submenu is checkable and mutually
-exclusive (Off / 2x / 4x, the factor in force shown checked), and a change
-applies to the next frame with no restart. The menu callback deliberately makes
-**no GL call at all** -- it sets the factor, updates the check marks and asks
-for a repaint; every GL call, including allocating the N x target for the new
-factor, happens inside the paint, where usdview's context is current. Nothing
-is persisted across sessions: the plugin has no settings mechanism of its own
-and usdview's state file is not ours to add keys to, so `USDGEN_USDVIEW_SUPERSAMPLE`
-(or `launch_usdview.ps1 -Supersample N`) is how you start somewhere other than
-Off.
-
-One trap, worth writing down because it cost a user-visible bug: **under
-QOpenGLWidget the widget's framebuffer is not 0.** An early version of the
-resolve ended its target allocation with `glBindFramebuffer(GL_FRAMEBUFFER, 0)`
-and then read the "window" framebuffer back with
-`glGetIntegerv(GL_FRAMEBUFFER_BINDING)` -- so on exactly the frames that
-reallocate (every factor change) it captured 0, and that frame's resolve and
-HUD went to the window-system framebuffer instead of the widget's. The frame
-was lost, GL was left with an error pending, and PyOpenGL blamed it on the
-first checked call of the *next* frame:
-`GLError(err = 1280, baseOperation = glGetIntegerv, pyArgs = (GL_FRAMEBUFFER_BINDING, ...))`
--- one error per toggle, after which moving the camera "fixed" it, because the
-next frame took the early-out in the resize path and bound the right target.
-The fix is to ask Qt (`StageView.defaultFramebufferObject()`) before any GL
-call of ours, and never to bind 0. The test toggles Off -> 2x -> 4x -> Off -> 2x
-through the menu commands and fails if a toggle logs a rendering error or if the
-frame straight after it differs from the one after that.
-
-Picking is unchanged by any of this, but note what the assertion can and cannot
-say: usdGen's synthetic tiles are not pickable in usdview at all (see **Picking
-and the ID pass** above), so on a groom-only scene every pick returns nothing at
-every factor. What the test checks is that the pick frustums are bit-identical
-and the answer does not move with the factor.
+`bin/record_usd.ps1 -Supersample N` and `bin/render_hair_parity.ps1 -Supersample N`
+render offline at N times the requested width and box-downsample in linear
+light. That converged image is what the anti-aliasing numbers in this file
+are judged against.

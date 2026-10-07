@@ -1,8 +1,7 @@
 # Instanced fur in MoonRay (hdMoonray)
 
 usdGen's instanced curves render in MoonRay's Hydra delegate: a
-PointInstancer fur scene (`tools/fur_gen.py`, optionally baked with
-`usdGenBakeFur`) translates through `hd_usd2rdl` to an `RdlCurveGeometry`
+PointInstancer fur scene translates through `hd_usd2rdl` to an `RdlCurveGeometry`
 prototype plus an `RdlInstancerGeometry` carrying positions, orientations,
 scales and the per-instance primvars (`displayColor`, `hairId`, baked
 `furTau*`), and `moonray` renders it. One minimal MoonRay-side patch is
@@ -11,9 +10,9 @@ rendering bit-identical.
 
 ## What changed
 
-**Generator fallback material.** The generated `FurLook` material used to
-carry only `outputs:glslfx:surface`, which hdMoonray cannot see, so every
-strand fell back to MoonRay's error material. It now also carries a
+**Universal fallback material.** A PointInstancer fur material that carries
+only `outputs:glslfx:surface` is invisible to hdMoonray, so every strand
+falls back to MoonRay's error material. The material also needs a
 universal `outputs:surface` with a `UsdPreviewSurface` whose diffuseColor
 reads the per-instance `displayColor` through a `UsdPrimvarReader_float3`
 (fallback: the coat's mean brown). Storm prefers its `glslfx` render
@@ -22,8 +21,7 @@ context over the universal one, so its shading is unchanged; hdMoonray
 hair terminal (`HairMaterial_v3`) is deliberately not authored:
 UsdImaging drops material nodes whose `info:id` has no Sdr definition,
 and MoonRay's Sdr plugins are not on the translation path, so that
-terminal would resolve to no material at all. Pinned by
-`tests/checks/check_fur_gen_material.py` (`testUsdGenFurGenMaterial`).
+terminal would resolve to no material at all.
 
 **Imaging instancer wire format.** `UsdGenInstancer::BuildInstancerDataSource`
 now publishes USD's own PointInstancer encoding: `hydra:instanceRotations`
@@ -35,7 +33,7 @@ float arrays would be misread as one scalar per instance), and
 only the data source rounds. Storm accepts both encodings. Pinned by
 `tests/testUsdGenInstance.cpp` §(10).
 
-`usdGenBakeFur` needed no change: the baked `varying` float3 primvars
+Baked `varying` float3 primvars
 already translate to instancer `UserData`.
 
 **Synthetic tile materials.** Procedural groom tiles used to bind a
@@ -76,15 +74,7 @@ delegates log the error but emit the same geometry.
 
 ## Rendering
 
-From a shell with the MoonRay build and the USD prefix on `PATH`:
-
-```powershell
-$env:PATH = "$env:MOONRAY_BUILD\bin;$env:USD\lib;$env:USD\bin;" + $env:PATH
-python tools/fur_gen.py 200000 build/fur_200k.usda
-.\build\usdGenBakeFur.exe build/fur_200k.usda build/fur_200k_shadowed.usda
-hd_usd2rdl -in build/fur_200k.usda -out build/fur_200k.rdla
-moonray -in build/fur_200k.rdla -out build/fur_200k.exr
-```
+From a shell with the MoonRay build and the USD prefix on `PATH`, translate the stage with `hd_usd2rdl` and render with `moonray`.
 
 ## usdview
 

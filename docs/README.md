@@ -5,7 +5,7 @@ The product introduction is the [repository README](../README.md). This page is 
 ## Using usdGen
 
 - [Visual manual](site/index.html) — illustrated grooming workflow and operator reference. Open the generated `site/index.html` in a browser; see [the manual build guide](../tools/docs/README.md) to rebuild it from source.
-- [pomade-tool.md](pomade-tool.md) — Pomade, the usdview hierarchical groom tool
+- [pomade-tool.md](pomade-tool.md) — Pomade model in this repository; the usdview shelf is separate
 - [storm-fur.md](storm-fur.md) — Storm hair shading, self-shadowing, and how to launch a groom
 - [moonray-fur.md](moonray-fur.md) — Instanced fur through the MoonRay Hydra delegate (`hdMoonray`)
 - [grow-azimuth.md](grow-azimuth.md) — Grow azimuth

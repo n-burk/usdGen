@@ -26,14 +26,14 @@ during the research rounds, always with its `EV-nnn` row in `appendix-A-evidence
 
 ### 0.1 The request as recorded
 
-The request, verbatim (2026-09-04):
+The request (2026-09-04), with host-application names removed:
 
-> create a plan in ./plan to build a xgen like hair/fur instancing plugin for OpenUSD and Hydra 2.0
+> create a plan in ./plan to build a host-groomer-like hair/fur instancing plugin for OpenUSD and Hydra 2.0
 > (26.08 version). The result should be a grooming system whose nodes are hooked up and dynamically
 > executed similar to ../usdRig and expressed as prims in OpenUSD. This should generate curves for
 > rendering in hydra during run/rendertime and also be able to quickly load static curves and deform
-> them with a deforming surface. They should also have stylers and hair modifiers similar to xgen's
-> modifiers or unreal engine's curve modifiers for rigged or simulated curves. This system should
+> them with a deforming surface. They should also have stylers and hair modifiers similar to a host groomer's
+> modifiers or a host renderer's curve modifiers for rigged or simulated curves. This system should
 > work on top/after usdRig so the scene index should be expected to pickup the results of any
 > rigged/deformed surface from usdRig (or any other geometry modifiers in openUSD). This system
 > should also render hair/fur to the storm viewport and look similar to a rendered result with it's

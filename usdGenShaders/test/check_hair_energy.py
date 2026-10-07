@@ -252,7 +252,7 @@ def check_fits():
 
 
 def main():
-    print("UE hair BSDF (HairBsdf.ush / Karis 2016) -- CPU energy check")
+    print("The host renderer hair BSDF (HairBsdf.ush / Karis 2016) -- CPU energy check")
     print("Specular=%.2f  Backlit=%.2f  Area=%.2f  n=%.2f\n"
           % (hair.SPECULAR, hair.BACKLIT, hair.AREA, hair.IOR))
     check_albedo()

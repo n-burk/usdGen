@@ -3,7 +3,7 @@
     defaultPrim = "World"
     metersPerUnit = 1
     upAxis = "Y"
-    doc = "Head-hair close-up: a dense, dark, combed groom on a head-sized ellipsoid, fading to bare skin at a scalp-cap boundary -- a render-comparison scene for a character groom (renders/ue-parity)."
+    doc = "Head-hair close-up: a dense, dark, combed groom on a head-sized ellipsoid, fading to bare skin at a scalp-cap boundary -- a render-comparison scene for a character groom (renders/hair-parity)."
 )
 
 # Numbers are centimetres by convention (as in styled-fur-plane.usda: hair
@@ -27,7 +27,7 @@
 # reference photo, HeadCam is a medium shot of the whole head.
 #
 # View it:   .\bin\launch_usdview.ps1 examples\head-hair-closeup.usda
-# Record it: .\bin\render_ue_parity.ps1 -Label current
+# Record it: .\bin\render_hair_parity.ps1 -Label current
 
 def Xform "World"
 {

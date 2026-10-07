@@ -31,8 +31,8 @@ def main():
         sys.path.append(str(site_packages))
 
     plugin_dirs = [BUILD / "usd" / leaf / "resources" for leaf in (
-        "usdGenSchema", "usdGenImaging", "usdGenShaders", "usdGenTools",
-        "usdGenPomade", "usdGenPomadeTools")]
+        "usdGenSchema", "usdGenImaging", "usdGenShaders",
+        "usdGenPomade", "usdNoodles")]
     plugin_dirs += [USD / "plugin" / "usd", USD / "lib" / "usd"]
     os.environ["PXR_PLUGINPATH_NAME"] = os.pathsep.join(
         str(p) for p in plugin_dirs if p.exists())

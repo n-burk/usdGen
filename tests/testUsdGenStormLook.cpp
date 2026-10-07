@@ -292,7 +292,7 @@ int main(int argc, char **argv)
                " (" + std::to_string(nInputs) + ")")
                   .c_str());
     }
-    // ... and of the two the host renderer-parity strand defs (plan/16 WS1), which carry
+    // ... and of the two strand-hair defs (plan/16 WS1), which carry
     // their own 19-input contract. usdGenShaders/test/check_hair_strands_defs.py
     // checks their names, defaults and primvars in full; this only proves that
     // adding them did not break discovery in the same process as the C5 three.

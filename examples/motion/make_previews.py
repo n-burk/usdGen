@@ -1,7 +1,6 @@
-"""Assemble captured Storm frames and validate trace_playback logs (requires Pillow).
+"""Assemble captured Storm frames and validate motion trace logs (requires Pillow).
 
-Capture with check_animated_sphere.py first. Run bin/trace_playback.ps1 for each
-scene with -Frames 1:100 -Loops 1 -Pull and redirect stdout/stderr to
+Capture with check_animated_sphere.py first. The log for each scene is
 build/motion_<scene>_trace.log.
 """
 import collections

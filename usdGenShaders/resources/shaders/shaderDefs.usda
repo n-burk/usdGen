@@ -3,7 +3,7 @@
 # usdGen hair preview shader definitions (contract C5: docs/freezes/C5.md).
 #
 # One Shader prim per shipped glslfx file: the three C5-frozen hair looks, then
-# the value preview, then the two UE-parity strand looks (neither of the last
+# the value preview, then the two strand-hair looks (neither of the last
 # three is part of the C5 freeze; see the end of the file). The Sdr identifier IS the
 # prim name (pxr/usd/usdShade/shaderDefUtils.cpp:51-52) — UpperCamel, no
 # underscores (SdrFsHelpersSplitShaderIdentifier tokenises on '_'). Only the
@@ -135,9 +135,9 @@ def Shader "UsdGenValuePreview" (
     )
 }
 
-# The UE-parity strand looks (plan/16-ue-hair-parity.md WS1). A port of Unreal's
+# The strand-hair looks (plan/16-hair-shading-parity.md WS1). A port of a host renderer's
 # HairStrands shading -- Karis' R/TT/TRT lobes, Zinke dual scattering driven by
-# the baked hair count, UE coverage compensation -- with UE's own parameter
+# the baked hair count, the host renderer coverage compensation -- with the host renderer's own parameter
 # names and defaults. NOT part of the C5 freeze, which covers the `inputs:`
 # block of the three UsdGenHairPreview* defs above and nothing else: these two
 # are a separate contract and may change independently.
@@ -148,7 +148,7 @@ def Shader "UsdGenValuePreview" (
 # The two defs share every input; only the glslfx materialTag differs.
 
 def Shader "UsdGenHairStrands" (
-    doc = "usdGen UE-parity strand hair: Karis R/TT/TRT, dual scattering from the baked hair count, coverage compensation; opaque + alpha-to-coverage. The usdGen tile default."
+    doc = "usdGen strand hair: Karis R/TT/TRT, dual scattering from the baked hair count, coverage compensation; opaque + alpha-to-coverage. The usdGen tile default."
     sdrMetadata = { string primvars = "hairId|hairT|st|furTauP|furTauN|furTipTauP|furTipTauN|hairTipColor|hairColorRamp|hairRandomHue|hairRandomValue" }
 )
 {
@@ -178,7 +178,7 @@ def Shader "UsdGenHairStrands" (
     )
 }
 
-# Hair shadowing the skin it grows out of (plan/16-ue-hair-parity.md WS3). Not
+# Hair shadowing the skin it grows out of (plan/16-hair-shading-parity.md WS3). Not
 # a hair look and not part of the C5 freeze. The groom scene index binds it on
 # one synthetic Mesh per description, <description>/__usdGenRender/scalpShadow,
 # whose furTauP/furTauN are HAIR-ONLY optical depth over the emitting surface.
@@ -201,7 +201,7 @@ def Shader "UsdGenScalpShadow" (
 }
 
 def Shader "UsdGenHairStrandsTranslucent" (
-    doc = "usdGen UE-parity strand hair + translucent materialTag (OIT); for hero shots and very fine hair where alpha-to-coverage banding shows."
+    doc = "usdGen strand hair + translucent materialTag (OIT); for hero shots and very fine hair where alpha-to-coverage banding shows."
     sdrMetadata = { string primvars = "hairId|hairT|st|furTauP|furTauN|furTipTauP|furTipTauN|hairTipColor|hairColorRamp|hairRandomHue|hairRandomValue" }
 )
 {

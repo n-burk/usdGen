@@ -47,9 +47,7 @@ for _d in \
     "$GENBUILD/usd/usdGenSchema/resources" \
     "$GENBUILD/usd/usdGenImaging/resources" \
     "$GENBUILD/usd/usdGenShaders/resources" \
-    "$GENBUILD/usd/usdGenTools/resources" \
     "$GENBUILD/usd/usdGenPomade/resources" \
-    "$GENBUILD/usd/usdGenPomadeTools/resources" \
     "$GENBUILD/usd/usdNoodles/resources" \
     "$GENBUILD/python/usdgen" \
     "$USD/plugin/usd" \

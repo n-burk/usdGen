@@ -20,7 +20,7 @@ CTestTestfile.cmake
 *.pyc
 
 # Host-renderer comparison captures (regenerate locally; do not commit)
-renders/ue-parity/
+renders/hair-parity/
 # Raw manual render frames; curated web media lives in docs/site/media/.
 renders/docs/
 

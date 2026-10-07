@@ -17,20 +17,20 @@ mesh to compute an RBF deformation. It is distinct from the guide-to-strand
 interpolation controls, and can be selected per LOD. The documentation describes
 its purpose as preserving groom shape through substantial skin deformation; it
 does not specify the exact RBF kernel, regularization or linear solver.
-[the host vendor: Groom Interpolation](https://dev.epicgames.com/documentation/en-us/unreal-engine/groom-interpolation-in-unreal-engine).
+the host vendor: Groom Interpolation.
 
 the host vendor exposes the binding sample count and suggests about 100 or fewer samples
 as a general starting point, with increased samples trading cost for accuracy.
 This is guidance, not a mathematical limit or a performance measurement for
 usdGen. Source-to-target groom transfer based on UV correspondence is a separate
 binding operation, not permission to rematch a changing mesh every frame.
-[the host vendor: Setting Up Bindings](https://dev.epicgames.com/documentation/en-us/unreal-engine/setting-up-bindings-for-grooms-in-unreal-engine).
+the host vendor: Setting Up Bindings.
 
 the host vendor's public root-data API lists rest sample positions, mesh sample indices and
 an interpolation-weight matrix with sample-count-squared storage. That supports
 separating persistent binding data from changing animated samples; it does not
 establish any particular per-hair weight layout in our implementation.
-[the host vendor: FHairStrandsRootData](https://dev.epicgames.com/documentation/en-us/unreal-engine/API/Plugins/HairStrandsCore/FHairStrandsRootData).
+the host vendor: FHairStrandsRootData.
 
 **HiPhy:** the supplied video is “3. Use Motion Mapper to Transfer Motion” by
 HiPhyEngine. Its description links the supplied Motion Mapper documentation.
@@ -47,7 +47,7 @@ adjust bundling when guides separate. The documentation motivates binding as a
 way to avoid chatter from reconstructing hair using moving guides. It does **not**
 state that its interpolation is RBF. We should adopt the stable-binding and
 frame-aware motion-transfer concepts without attributing an undocumented algorithm.
-[HiPhy: Curves Motion Mapper](https://hiphyengine.github.io/aux-nodes/curves-motion-mapper-in-blender/).
+HiPhy: Curves Motion Mapper.
 
 ## Two motion roles
 

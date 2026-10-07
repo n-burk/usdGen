@@ -89,8 +89,8 @@ Remove-Item Env:\PYTHONEXECUTABLE -ErrorAction SilentlyContinue
 # HOUDINI_USD_DSO_PATH: Houdini assembles Plug's search list itself and
 # does not honor PXR_PLUGINPATH_NAME, which is still set for any stock-USD
 # tool pointed at this install. The trailing ;& keeps Houdini's own
-# entries. The usdview-only python plugins (usdGenTools, usdGenPomadeTools)
-# are deliberately left out.
+# entries. The Pomade shelf and the expression editor are not in this
+# repository, so they are not on this path.
 $usdDir = Join-Path $Install "lib\usd"
 $env:PATH = "$(Join-Path $Install 'lib');$(Join-Path $HoudiniRoot 'bin');$env:PATH"
 $env:PXR_PLUGINPATH_NAME = "$usdDir;$env:PXR_PLUGINPATH_NAME"

@@ -189,7 +189,7 @@ Skin motion should not be applied twice. If the skin deforms both render hair an
 
 SeExpr provides expressions and procedural noise, but it also adds a parser, evaluator, function system, build dependency, and execution model. The current usdGen implementation mainly uses its noise code. That may be too large a dependency for the actual requirement.
 
-VEX is tied to SideFX. MaterialX and Open Shading Language are designed mainly for shading. A general scripting language is difficult to restrict and optimize for millions of hair points.
+The host expression language is tied to the host vendor. MaterialX and Open Shading Language are designed mainly for shading. A general scripting language is difficult to restrict and optimize for millions of hair points.
 
 A small custom library could define only what usdGen needs:
 
@@ -205,16 +205,16 @@ The language should remain small. Complex grooming behavior should remain visibl
 
 ## Rendering value
 
-A DCC demonstrates why render-time hair generation is useful. Its Solaris Hair Procedural generates hair from guides or deforms existing curves. The host application also uses `HoudiniHairDeformAPI` and an `HD_HairDeform` Hydra scene-index plug-in to replace curve points during rendering.^8,9
+A DCC demonstrates why render-time hair generation is useful. Its hair procedural generates hair from guides or deforms existing curves. The host application also uses a hair-deform API and a hair-deform Hydra scene-index plug-in to replace curve points during rendering.^8,9
 
-This reduces stored geometry and evaluates deformation and motion-blur samples close to the renderer. The limitation is that the contract is defined by SideFX and depends on SideFX components.
+This reduces stored geometry and evaluates deformation and motion-blur samples close to the renderer. The limitation is that the contract is defined by the host vendor and depends on the host vendor components.
 
 usdGen could provide the same benefit through an open USD schema and evaluator:
 
 - The USD asset stores the skin, guides, follicles, attributes, and graph.
 - The evaluator generates or deforms hair when Hydra requests it.
 - Hydra receives ordinary `BasisCurves` with points, widths, IDs, primvars, bounds, and materials.
-- Storm, RenderMan, Karma, or another curve renderer receives standard geometry.
+- Storm, RenderMan, or another curve renderer receives standard geometry.
 - Optional baked `BasisCurves` support applications without usdGen.
 
 This allows preview and final density to come from one groom and avoids storing millions of curves until needed. Tiled generation can update only affected regions.
@@ -245,15 +245,15 @@ The case for usdGen is not that it replaces DCC grooming. The case is that host 
 
 ## References
 
-1. SideFX, [Hair and Fur](https://www.sidefx.com/docs/houdini/fur/index.html), the host application documentation.
+1. the host vendor, Hair and Fur, the host application documentation.
 2. Peregrine Labs, [Yeti Documentation](https://docs.peregrinelabs.com/).
 3. Daniela Hasenbring and Henrik Karlsson, [Hair Grooming with Imageworks Fyber](https://history.siggraph.org/wp-content/uploads/2022/06/2021-Talks-Hasenbring_Hair-Grooming-with-Imageworks-Fyber.pdf), SIGGRAPH 2021 Talks.
-4. the host vendor, [a character asset Groom Tools](https://dev.epicgames.com/documentation/character-asset/mh-groom-tools).
+4. the host vendor, a character asset Groom Tools.
 5. Sisir, [Hair Grooming for Character Artists](https://sisir.sisir-hairtool.workers.dev/).
-6. SideFX, [Hair Generate](https://www.sidefx.com/docs/houdini/nodes/obj/hairgen.html).
-7. SideFX, [Guide Interpolation Mesh](https://www.sidefx.com/docs/houdini/nodes/sop/guideinterpolationmesh.html).
-8. SideFX, [Configure Guide Deform](https://www.sidefx.com/docs/houdini/nodes/lop/configureguidedeform.html), the host application documentation.
-9. SideFX, [a DCC Procedural Hair](https://www.sidefx.com/docs/houdini/nodes/lop/houdinihairprocedural.html).
+6. the host vendor, Hair Generate.
+7. the host vendor, Guide Interpolation Mesh.
+8. the host vendor, Configure Guide Deform, the host application documentation.
+9. the host vendor, a DCC Procedural Hair.
 10. Local reference note, `_interp.md`.
-11. Local report, `houdini-22-hair-fur-research.md`.
+11. Local report, `a local host-application report`.
 12. n-burk, [usdGen repository](https://github.com/n-burk/usdGen).

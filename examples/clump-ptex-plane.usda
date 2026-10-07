@@ -28,8 +28,7 @@
 # have already been clumped once. The clumpId_0 / clumpId_1 primvars carry the
 # cell per strand for shading.
 #
-# Maps are baked from this file's skin by examples/tools/bake_maps.ps1
-# (usdGenBakePtex). Edit usdGen:map:file, or the maps themselves plus
+# Maps live beside this scene. Edit usdGen:map:file, or the maps themselves plus
 # usdGen:map:* on the map prims, and the clumps recook.
 #
 # View it:   .\bin\launch_usdview.ps1 examples\clump-ptex-plane.usda

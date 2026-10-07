@@ -1530,7 +1530,7 @@ current delegate sees, because render-context preference is UNVERIFIED (ASSUMPTI
 |---|---|---|---|
 | `outputs:surface` | `UsdPreviewSurface` reading `displayColor` + `st` (uniform, root UV) | universal fallback; every delegate; "plugin not installed" | MEASURED to work on curves, per-curve root-UV texture lookup verified (`G-storm-hair-look §4`) |
 | Storm-specific | `usdGen:HairPreview` / `…Translucent` glslfx | Storm | MEASURED: parses in Sdr (20 inputs), compiles and renders, 0 warnings; `$P/usdGenHairPreview.glslfx` EXISTS (S35) |
-| `outputs:mtlx:surface` | `ND_deon_hair_absorption_from_melanin` → `ND_chiang_hair_roughness` → `ND_chiang_hair_bsdf` → `ND_surface`, with an explicit `ND_geompropvalue_vector3(geomprop="hairTangentWorld")` into `curve_direction` | hdPrman / Karma / render time | compiles and renders in Storm but near-black there; correct at render time (S36, `G-storm-hair-look §3`) |
+| `outputs:mtlx:surface` | `ND_deon_hair_absorption_from_melanin` → `ND_chiang_hair_roughness` → `ND_chiang_hair_bsdf` → `ND_surface`, with an explicit `ND_geompropvalue_vector3(geomprop="hairTangentWorld")` into `curve_direction` | hdPrman / a host renderer / render time | compiles and renders in Storm but near-black there; correct at render time (S36, `G-storm-hair-look §3`) |
 
 The tool authors all three from one panel (`Groom → Create hair material`) with shared parameters
 (root/tip colour, melanin, roughness, specular), so the Storm preview and the render agree by

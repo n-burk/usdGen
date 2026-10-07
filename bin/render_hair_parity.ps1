@@ -12,15 +12,15 @@ param(
 
 # Renders the strand-hair comparison set: both cameras of
 # examples/head-hair-closeup.usda plus examples/styled-fur-plane.usda, into
-# renders/ue-parity/<label>_<scene>_<camera>.png (gitignored). Run with
+# renders/hair-parity/<label>_<scene>_<camera>.png (gitignored). Run with
 # different -Label values (e.g. "baseline", then "current") to build
 # before/after sets with one command each.
 #
-#   .\bin\render_ue_parity.ps1 -Label baseline
+#   .\bin\render_hair_parity.ps1 -Label baseline
 
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$OutDir = Join-Path $Root "renders\ue-parity"
+$OutDir = Join-Path $Root "renders\hair-parity"
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $record = Join-Path $Root "bin\record_usd.ps1"
 $examples = Join-Path $Root "examples"

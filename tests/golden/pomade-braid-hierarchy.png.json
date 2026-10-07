@@ -4,7 +4,7 @@
   "git_sha": "5ef9b920523c5fc2f454933ea04dcccc02f3f444",
   "host": "HIVEMIND",
   "created_utc": "2026-09-24T10:46:06.235408+00:00",
-  "command": "USDGEN_REGEN_GOLDEN=1 ctest -R testPomadeGolden (bin/record_pomade.py, width 512, complexity veryhigh, L2 focus)",
+  "command": "offline usdview capture, width 512, complexity veryhigh, L2 focus",
   "model": {
     "tubes": 6,
     "guides": 85

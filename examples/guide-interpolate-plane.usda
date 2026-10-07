@@ -44,8 +44,7 @@
 # View it:   .\bin\launch_usdview.ps1 examples\guide-interpolate-plane.usda
 # Record it: .\bin\record_usd.ps1 -Scene examples\guide-interpolate-plane.usda `
 #                -Output out.png -Camera /World/Cam -Complexity veryhigh
-# Regenerate: python examples\tools\make_examples.py, then
-#             .\examples\tools\bake_maps.ps1
+# Regenerate: python examples\tools\make_examples.py
 
 def Xform "World"
 {

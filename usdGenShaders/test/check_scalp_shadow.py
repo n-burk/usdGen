@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Sdr + Storm checks for the scalp-shadow material.
 
-`UsdGenScalpShadow` (plan/16-ue-hair-parity.md WS3) is what makes hair shadow
+`UsdGenScalpShadow` (plan/16-hair-shading-parity.md WS3) is what makes hair shadow
 the skin it grows out of, on a renderer that casts no shadows at all. The
 engine publishes one synthetic Mesh over the groom's emitting surface carrying
 HAIR-ONLY furTauP/furTauN, and this material turns those into the fraction of

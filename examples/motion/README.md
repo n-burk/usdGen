@@ -130,10 +130,10 @@ These direct region-map operators currently run on the CPU lane.
 
 The small scene has 2 strands / 128 CVs; the dense scene has 762 strands /
 48,768 CVs. Rest root binding, growth and width capture once; only the final
-deformer updates across the 100 frames. `make_region_braids.py` regenerates
-both scenes and calls `build/usdGenBakePtex.exe` to bake the maps. Run it with
-OpenUSD Python, Pillow, and the USD/usdGen DLL directories on PATH. The swapped
-map is a regression fixture: reversing its texels must reverse driver assignment.
+deformer updates across the 100 frames. `make_region_braids.py` regenerates both scenes. Run it with OpenUSD Python
+and Pillow. The categorical Ptex maps under `maps/` are inputs to the scenes.
+The swapped map is a regression fixture: reversing its texels must reverse
+driver assignment.
 
 Run `make_motion_examples.py` with the usdGen/OpenUSD Python environment to
 regenerate the original four scenes. `make_animated_sphere.py` also regenerates the first

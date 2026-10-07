@@ -1009,7 +1009,7 @@ main(int argc, char **argv)
         Check(pomade->GetPrim(gizmo).primType == TfToken("basisCurves"),
               "the gizmo is basisCurves");
         Check(ArraySize<VtVec3fArray>(*pomade, gizmo, "points", 50),
-              "a translate gizmo has Maya axes, arrows and move squares");
+              "a translate gizmo has colored axes, arrows and move squares");
         {
             VtIntArray handles;
             VtIntArray active;
