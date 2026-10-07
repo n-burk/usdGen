@@ -502,11 +502,23 @@ bool UsdGenScatterOp::Capture(
         for (int t = 1; t + 1 < nc; ++t) {
             GfVec3f const pb = rest[fvi[cbase + size_t(t)]];
             GfVec3f const pc = rest[fvi[cbase + size_t(t) + 1]];
-            float const w = UsdGenTriangleArea(
-                p0[0], p0[1], p0[2], pb[0], pb[1], pb[2], pc[0], pc[1], pc[2]);
+            // Inline UsdGenTriangleArea (kernels.cpp is canonical) and fuse
+            // it with the nAcc cross: the area IS 0.5*|cross|, so one cross
+            // feeds both the weight and the normal accumulator. Same float
+            // ops in the same order (GfVec3f::operator- and GfCross spell
+            // the identical subtractions/products as kernels.cpp); the
+            // bench + suite checksums pin the bits. Drops the cross-TU
+            // call per fan triangle plus the duplicate cross. This TU
+            // builds with default contraction, so any respelling here
+            // must re-verify against kernels.cpp.
+            GfVec3f const eb = pb - p0;
+            GfVec3f const ec = pc - p0;
+            GfVec3f const x = GfCross(eb, ec);
+            float const w = 0.5f * std::sqrt(
+                x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
             triW[size_t(t) - 1] = w;
             areaRest += double(w);
-            nAcc += GfCross(pb - p0, pc - p0);
+            nAcc += x;
         }
         GfVec3f const Nrest = Normalize3(nAcc);
         // Area quadrature uses a 2^level grid on each coarse patch. Actual
