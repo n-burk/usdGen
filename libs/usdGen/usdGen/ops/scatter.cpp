@@ -245,32 +245,69 @@ UsdGenEpoch UsdGenScatterOp::CaptureDigest(UsdGenCaptureContext const &ctx) cons
     UsdGenGraphDesc const *desc = ctx.desc;
     if (desc && ctx.surface < desc->surfaces.size()) {
         auto const &surface = desc->surfaces[ctx.surface];
-        auto array = [&](char const *name, auto const &values) {
-            uint64_t const hash = UsdGenDigestBytes(
-                values.cdata(), values.size() * sizeof(*values.cdata()),
-                1469598103934665603ULL);
-            feed(name, hash); feed(name, uint64_t(values.size()));
-        };
-        array("restPoints", surface.restPoints);
-        array("faceCounts", surface.faceVertexCounts);
-        array("faceIndices", surface.faceVertexIndices);
-        array("subset", surface.subsetFaces);
-        feed("isSubset", surface.isSubset ? 1u : 0u);
-        array("uv", surface.uv);
-        // Tags-only subdivision cover: faceCounts/faceIndices already feed
-        // this digest directly above, so re-hashing them here would stream
-        // ~20MB twice. Coverage is unchanged (tags digest + both arrays).
-        feed("subdivision", UsdGenSubdivisionTagsDigest(surface));
         // The paint primvar edits no generation, so the multiplier content
         // itself joins the digest: without this a paint stroke would read
         // back the cached pre-stroke roots.
         auto const &mult = desc->surfaces[ctx.surface].densityMultiplier;
-        feed("densityMultSize", uint64_t(mult.size()));
         static_assert(sizeof(float) == 4, "float is 32 bits");
-        uint64_t const mh = UsdGenDigestBytes(
-            mult.cdata(), mult.size() * sizeof(float),
-            1469598103934665603ULL);
-        feed("densityMult", mh);
+        // Bulk hashes first, feeds after: the six array hashes plus the
+        // tags digest are pure functions of the surface bytes, so big
+        // digests (>1MB of bulk: dispatch costs more than the hashing
+        // below that) compute all seven on workers and feed the results
+        // serially in the same order below. Same values, same feed order,
+        // so the epoch is bit-identical. Small digests stay serial.
+        struct BulkHash { void const *data; size_t bytes; };
+        BulkHash const bulks[6] = {
+            {surface.restPoints.cdata(),
+             surface.restPoints.size() * sizeof(*surface.restPoints.cdata())},
+            {surface.faceVertexCounts.cdata(),
+             surface.faceVertexCounts.size() *
+                 sizeof(*surface.faceVertexCounts.cdata())},
+            {surface.faceVertexIndices.cdata(),
+             surface.faceVertexIndices.size() *
+                 sizeof(*surface.faceVertexIndices.cdata())},
+            {surface.subsetFaces.cdata(),
+             surface.subsetFaces.size() * sizeof(*surface.subsetFaces.cdata())},
+            {surface.uv.cdata(),
+             surface.uv.size() * sizeof(*surface.uv.cdata())},
+            {mult.cdata(), mult.size() * sizeof(float)},
+        };
+        uint64_t bulkHash[7];
+        auto hashBulk = [&](size_t i) -> uint64_t {
+            if (i < 6)
+                return UsdGenDigestBytes(bulks[i].data, bulks[i].bytes,
+                                         1469598103934665603ULL);
+            return UsdGenSubdivisionTagsDigest(surface);
+        };
+        size_t bulkTotal = 0;
+        for (auto const &b : bulks)
+            bulkTotal += b.bytes;
+        int const digestWorkers = ctx.dispatcher
+            ? ctx.dispatcher->MaxConcurrency()
+            : tbb::this_task_arena::max_concurrency();
+        if (digestWorkers > 1 && bulkTotal > 1048576) {
+            ScatterParallelFor(ctx.dispatcher, 7, [&](size_t i) {
+                bulkHash[i] = hashBulk(i);
+            });
+        } else {
+            for (size_t i = 0; i < 7; ++i)
+                bulkHash[i] = hashBulk(i);
+        }
+        auto array = [&](char const *name, auto const &values, uint64_t hash) {
+            feed(name, hash); feed(name, uint64_t(values.size()));
+        };
+        array("restPoints", surface.restPoints, bulkHash[0]);
+        array("faceCounts", surface.faceVertexCounts, bulkHash[1]);
+        array("faceIndices", surface.faceVertexIndices, bulkHash[2]);
+        array("subset", surface.subsetFaces, bulkHash[3]);
+        feed("isSubset", surface.isSubset ? 1u : 0u);
+        array("uv", surface.uv, bulkHash[4]);
+        // Tags-only subdivision cover: faceCounts/faceIndices already feed
+        // this digest directly above, so re-hashing them here would stream
+        // ~20MB twice. Coverage is unchanged (tags digest + both arrays).
+        feed("subdivision", bulkHash[6]);
+        feed("densityMultSize", uint64_t(mult.size()));
+        feed("densityMult", bulkHash[5]);
     }
 
     return {h, h ^ 0x9E3779B97F4A7C15ull};
