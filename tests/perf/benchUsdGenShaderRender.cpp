@@ -43,6 +43,9 @@
 #include "pxr/base/gf/vec2i.h"
 #include "pxr/base/tf/stringUtils.h"
 #include "pxr/base/tf/token.h"
+#include "pxr/base/trace/collector.h"
+#include "pxr/base/trace/reporter.h"
+#include "pxr/base/trace/reporterDataSourceCollector.h"
 #include "pxr/base/vt/dictionary.h"
 #include "pxr/base/vt/value.h"
 #include "pxr/imaging/hd/driver.h"
@@ -409,6 +412,7 @@ void AppendRun(std::string* j, const char* name, const RunResult& rr,
 int main(int argc, char** argv)
 {
     std::string scenePath, jsonOut = "usdGenShaderRender.json";
+    std::string traceOut;  // --trace PATH: chrome trace of the deform run only
     const char* mode = nullptr;  // null = deform when animated, else static
     int w = 1280, h = 720, refineLevel = 2, frames = 6, warmup = 2, repeats = 3;
 
@@ -435,6 +439,7 @@ int main(int argc, char** argv)
         else if (a == "--warmup") warmup = std::atoi(next("--warmup"));
         else if (a == "--repeats") repeats = std::atoi(next("--repeats"));
         else if (a == "--json") jsonOut = next("--json");
+        else if (a == "--trace") traceOut = next("--trace");
         else {
             std::fprintf(stderr,
                 "usage: benchUsdGenShaderRender --scene PATH [--static|--deform]"
@@ -487,8 +492,26 @@ int main(int argc, char** argv)
             ", \"repeats\": " + Num(repeats) + ",\n";
 
     if (deform && sc.animated) {
+        TraceReporterRefPtr reporter;
+        if (!traceOut.empty()) {
+            reporter = TraceReporter::New(
+                "benchUsdGenShaderRender",
+                TraceReporterDataSourceCollector::New());
+            TraceCollector::GetInstance().SetEnabled(true);
+        }
         RunResult rrDeform = Measure(&engine, sc, frames, warmup, repeats,
                                      refineLevel, true, true, glFinish);
+        if (reporter) {
+            // Trace timings taint this run's medians; use --trace runs for
+            // structure only, never for numbers.
+            TraceCollector::GetInstance().SetEnabled(false);
+            TraceCollector::GetInstance().CreateCollection();
+            reporter->UpdateTraceTrees();
+            std::ofstream tos(traceOut);
+            if (tos) reporter->ReportChromeTracing(tos);
+            else std::fprintf(stderr, "WARN: cannot write %s\n",
+                              traceOut.c_str());
+        }
         // Static baseline in the same invocation (same-process comparison).
         RunResult rrStatic = Measure(&engine, sc, frames, warmup, repeats,
                                      refineLevel, false, true, glFinish);
