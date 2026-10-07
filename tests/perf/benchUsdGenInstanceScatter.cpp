@@ -13,6 +13,8 @@
 //   instancer_draw_ms    BuildInstancerDataSource + primvar readback
 //   draw_vary2_ms        draw assembly over displayColor + an arity-2 uniform plane
 //   attr_cook_ms         UsdGenAttributeCookInstances over the scattered roots
+//   session_cook_ms      UsdGenSessionCooker::Cook end to end (cache key +
+//                        run operators + tile publication + occlusion + diff)
 //   cuda_input_ms        PrepareCudaScatterInput (CPU capture + convert)
 //   cuda_validate_ms     CudaScatterGrow::ValidateRoots (CPU-only preflight)
 //   cuda_grow_begin_ms   CudaScatterGrow::BeginFresh (validate+alloc+H2D+launch)
@@ -34,6 +36,7 @@
 #include "usdGen/maps/attributeMap.h"
 #include "usdGen/opRegistry.h"
 #include "usdGen/ops/scatter.h"
+#include "usdGen/sessionCooker.h"
 #include "usdGen/types.h"
 #include "usdGenImaging/usdGenInstancer.h"
 
@@ -663,6 +666,79 @@ int RunAttrCook(Options const &opts, UsdGenCurveBuffer const &roots,
     char extra[64];
     std::snprintf(extra, sizeof(extra), "kept=%zu", kept);
     Report(opts, "attr_cook", ms, sum, extra);
+    return 0;
+}
+
+uint64_t HashTiles(UsdGenGenerationConstPtr const &gen)
+{
+    Fnv f;
+    for (UsdGenTilePublication const &t : gen->tiles) {
+        uint32_t const id = t.tile;
+        f.Add(&id, sizeof(id));
+        HashArray(&f, t.curveVertexCounts);
+        HashArray(&f, t.points);
+        HashArray(&f, t.widths);
+        HashArray(&f, t.hairT);
+        HashArray(&f, t.hairId);
+        HashArray(&f, t.st);
+        HashArray(&f, t.displayColor);
+        f.Add(&t.extentMin, sizeof(t.extentMin));
+        f.Add(&t.extentMax, sizeof(t.extentMax));
+    }
+    return f.h;
+}
+
+// Full session cook at bench scale: the per-update end-to-end number the
+// op-level stages compose into (cache key, run operators, tile
+// publication, occlusion, diff). One persistent cooker, production cache
+// budget; a fresh fixed seed per rep defeats cross-rep memoization (every
+// production cook carries a new desc) while keeping the Fold deterministic.
+int RunSessionCook(Options const &opts, UsdGenGraphDesc const &desc)
+{
+    UsdGenSessionCooker cooker(
+        0, UsdGenSessionCooker::kDefaultExecutionCacheBytes);
+    UsdGenGenerationConstPtr prev;
+    UsdGenStats stats;
+    uint64_t epoch = 0;
+    std::vector<double> ms;
+    ms.reserve(size_t(opts.reps));
+    uint64_t sum = 0;
+    size_t tiles = 0, curves = 0, cvs = 0;
+    for (int r = 0; r < opts.reps; ++r) {
+        UsdGenGraphDesc d = desc;
+        d.nodes[0].seed = 42 + r;
+        auto shared = std::make_shared<const UsdGenGraphDesc>(d);
+        auto const t0 = std::chrono::steady_clock::now();
+        UsdGenGenerationConstPtr gen = cooker.Cook(
+            shared, UsdGenContext::Interactive, false, {}, 0.0,
+            UsdGenCommitReason::NoticeBatchEnd, prev, stats, false, epoch,
+            epoch + 1, -1);
+        auto const t1 = std::chrono::steady_clock::now();
+        if (!gen) {
+            std::printf("session_cook error: cook failed\n");
+            return 1;
+        }
+        ms.push_back(
+            std::chrono::duration<double, std::milli>(t1 - t0).count());
+        Fold(&sum, HashTiles(gen));
+        tiles = gen->tiles.size();
+        curves = 0;
+        cvs = 0;
+        for (UsdGenTilePublication const &t : gen->tiles) {
+            curves += t.curveVertexCounts.size();
+            cvs += t.points.size();
+        }
+        auto candidate = cooker.TakeCacheCandidate();
+        if (candidate)
+            cooker.CommitCacheCandidate(*candidate);
+        prev = gen;
+        stats = cooker.Stats();
+        ++epoch;
+    }
+    char extra[96];
+    std::snprintf(extra, sizeof(extra), "tiles=%zu curves=%zu cvs=%zu",
+                  tiles, curves, cvs);
+    Report(opts, "session_cook", ms, sum, extra);
     return 0;
 }
 
@@ -1326,6 +1402,9 @@ int main(int argc, char **argv)
     }
     if (WantStage(opts, "attr_cook"))
         if (int rc = RunAttrCook(opts, roots, faceCount))
+            return rc;
+    if (WantStage(opts, "session_cook"))
+        if (int rc = RunSessionCook(opts, desc))
             return rc;
 
 #ifdef USDGEN_ENABLE_CUDA
