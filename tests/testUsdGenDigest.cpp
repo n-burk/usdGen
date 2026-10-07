@@ -1,7 +1,6 @@
 // Digest contract for capture-class hashing (usdGen/digest.h): values are
 // internal cache keys, so the contract is determinism + input sensitivity,
-// never golden values (scatter epochs already vary per process through
-// TfToken bits; see benchUsdGenInstanceScatter).
+// never golden values.
 //
 //   * UsdGenDigestBytes is deterministic, sensitive to every byte
 //     (all tail lengths), and order-sensitive across lanes.

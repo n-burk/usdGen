@@ -1,4 +1,5 @@
 #include "usdGen/limitSurface.h"
+#include "usdGen/digest.h"
 #include "pxr/imaging/pxOsd/meshTopology.h"
 #include "pxr/imaging/pxOsd/refinerFactory.h"
 #include <opensubdiv/far/patchTableFactory.h>
@@ -34,7 +35,40 @@ struct UsdGenLimitSurface::State {
 UsdGenLimitSurface::UsdGenLimitSurface() = default;
 UsdGenLimitSurface::~UsdGenLimitSurface() = default;
 uint64_t UsdGenSubdivisionDigest(UsdGenSurfaceDesc const& s) {
-    return Topology(s).ComputeHash() ^ uint64_t(s.orientation.Hash());
+    // Same logical coverage as Topology(s).ComputeHash() plus
+    // s.orientation, hashed with the 4-lane word-wise FNV instead of
+    // SpookyHash: ComputeHash() re-streams ~20MB of topology arrays both
+    // callers already digest, at ~half the per-byte throughput. Tokens
+    // feed as string bytes rather than TfToken rep bytes, so the digest
+    // is now deterministic across processes (values stay internal keys,
+    // never persisted). Sizes mix between fields so no two distinct
+    // field sequences concatenate ambiguously.
+    uint64_t h = UsdGenDigestOffset;
+    auto feedText = [&](TfToken const& tok) {
+        std::string const& str = tok.GetString();
+        h = UsdGenDigestBytes(str.data(), str.size(), h);
+        UsdGenDigestMixWord(h, uint64_t(str.size()));
+    };
+    auto feedArray = [&](auto const& values) {
+        h = UsdGenDigestBytes(values.cdata(),
+            values.size() * sizeof(*values.cdata()), h);
+        UsdGenDigestMixWord(h, uint64_t(values.size()));
+    };
+    feedText(s.subdivisionScheme);
+    feedText(s.orientation);
+    feedText(s.interpolateBoundary);
+    feedText(s.faceVaryingLinearInterpolation);
+    feedText(s.triangleSubdivisionRule);
+    feedText(s.creaseMethod);
+    feedArray(s.faceVertexCounts);
+    feedArray(s.faceVertexIndices);
+    feedArray(s.holeIndices);
+    feedArray(s.creaseIndices);
+    feedArray(s.creaseLengths);
+    feedArray(s.creaseSharpnesses);
+    feedArray(s.cornerIndices);
+    feedArray(s.cornerSharpnesses);
+    return h;
 }
 bool UsdGenLimitSurface::Build(UsdGenSurfaceDesc const& s, int level, std::string* error) {
     _state.reset();

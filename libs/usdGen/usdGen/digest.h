@@ -13,8 +13,7 @@
 // usdGen versions and must never be persisted or golden-tested — only
 // determinism (same bytes -> same digest in every process) and input
 // sensitivity are guaranteed. Groom outputs are unaffected by the lane
-// count. (Scatter epochs already vary per process through TfToken bits;
-// this changes nothing about that.)
+// count.
 #ifndef USDGEN_DIGEST_H
 #define USDGEN_DIGEST_H
 

@@ -50,6 +50,29 @@ int main() {
     auto holes=s;holes.holeIndices={4};CHECK(Run(Desc(holes,3),&b));CHECK(b.totalCurves==0);
     auto tags=s;tags.cornerIndices={5};tags.cornerSharpnesses={4};
     CHECK(UsdGenSubdivisionDigest(s)!=UsdGenSubdivisionDigest(tags));
+    // The subdivision digest covers every topology input: each token and
+    // each array below moves it (values are internal keys, never golden).
+    {
+        uint64_t const base = UsdGenSubdivisionDigest(s);
+        CHECK(UsdGenSubdivisionDigest(s) == base);
+        auto moved = [&](UsdGenSurfaceDesc m) {
+            return UsdGenSubdivisionDigest(m) != base;
+        };
+        auto t = s; t.subdivisionScheme = TfToken("loop"); CHECK(moved(t));
+        t = s; t.orientation = TfToken("leftHanded"); CHECK(moved(t));
+        t = s; t.interpolateBoundary = TfToken("none"); CHECK(moved(t));
+        t = s; t.faceVaryingLinearInterpolation = TfToken("none"); CHECK(moved(t));
+        t = s; t.triangleSubdivisionRule = TfToken("smooth"); CHECK(moved(t));
+        t = s; t.creaseMethod = TfToken("chaikin"); CHECK(moved(t));
+        t = s; t.faceVertexCounts[0] = 3; CHECK(moved(t));
+        t = s; t.faceVertexIndices[0] = 7; CHECK(moved(t));
+        t = s; t.holeIndices = {2}; CHECK(moved(t));
+        t = s; t.creaseIndices = {0, 1}; CHECK(moved(t));
+        t = s; t.creaseLengths = {2}; CHECK(moved(t));
+        t = s; t.creaseSharpnesses = {2.5f}; CHECK(moved(t));
+        t = s; t.cornerIndices = {3}; CHECK(moved(t));
+        t = s; t.cornerSharpnesses = {1.5f}; CHECK(moved(t));
+    }
     UsdGenScatterOp op;auto d0=Desc(s,3),d1=Desc(tags,3);UsdGenCaptureContext c0,c1;c0.desc=&d0;c1.desc=&d1;
     CHECK(op.CaptureDigest(c0)!=op.CaptureDigest(c1));
     // Pose and parent motion are downstream deformation inputs, not rest
