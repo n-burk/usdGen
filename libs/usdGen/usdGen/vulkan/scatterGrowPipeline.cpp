@@ -78,12 +78,6 @@ struct ScatterPush {
 };
 static_assert(sizeof(ScatterPush) == 48, "scatterGrow.comp push ABI (12 words)");
 
-bool FiniteF(std::vector<float> const& v) noexcept {
-    for (float x : v)
-        if (!std::isfinite(x)) return false;
-    return true;
-}
-
 } // namespace
 
 // CPU oracle — exact CUDA double target math (scatterGrow.cu GrowKernel).
@@ -122,11 +116,11 @@ bool ScatterGrowPipeline::BuildCpu(std::vector<float> const& positions,
         rootPrim.size() != n || rootUV.size() != n * 2 ||
         rootT.size() != n * 3 || rootB.size() != n * 3 || rootN.size() != n * 3)
         return bad();
-    if (!FiniteF(positions) || !FiniteF(rootT) || !FiniteF(rootB) ||
-        !FiniteF(rootN) || !FiniteF(targets) || !FiniteF(rootUV)) return bad();
-    for (float t : targets)
-        if (!std::isfinite(t)) return bad();
-
+    // No whole-plane finite pre-scans: the per-curve body below checks
+    // its own t/b/n/uv lanes explicitly, while positions and targets
+    // stay covered by the in-loop d/opx checks (k=0 has h=0, so a
+    // non-finite target yields d=NaN and a non-finite position yields a
+    // non-finite opx). Same verdict, fused with cache-hot curve data.
     Outputs o;
     o.points.resize(3 * n * cv);
     o.rest.resize(3 * n * cv);
@@ -156,6 +150,13 @@ bool ScatterGrowPipeline::BuildCpu(std::vector<float> const& positions,
             std::array<float, 3> t{rootT[3 * c], rootT[3 * c + 1], rootT[3 * c + 2]};
             std::array<float, 3> b{rootB[3 * c], rootB[3 * c + 1], rootB[3 * c + 2]};
             std::array<float, 3> nn{rootN[3 * c], rootN[3 * c + 1], rootN[3 * c + 2]};
+            // Fused finite verdict for the frame + uv lanes (Normalize3
+            // would substitute instead of rejecting; uv is only copied).
+            if (!std::isfinite(t[0]) || !std::isfinite(t[1]) || !std::isfinite(t[2]) ||
+                !std::isfinite(b[0]) || !std::isfinite(b[1]) || !std::isfinite(b[2]) ||
+                !std::isfinite(nn[0]) || !std::isfinite(nn[1]) || !std::isfinite(nn[2]) ||
+                !std::isfinite(rootUV[2 * c]) || !std::isfinite(rootUV[2 * c + 1]))
+                return false;
             std::array<float, 3> dir;
             switch (controls.direction) {
                 case Direction::RootTangent: dir = t; break;
