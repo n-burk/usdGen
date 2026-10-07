@@ -24,6 +24,7 @@
 //       MoonRay wire types: quath rotations, packed varyings, color role);
 //  (11) notice locators (Translations, never topology, for value edits).
 //  (12) inline rotation quat matches ExtractRotationQuat bit for bit.
+//  (13) threaded ranges: two big bakes agree bitwise on every output.
 #include "usdGenImaging/usdGenInstancer.h"
 
 #include "usdGen/curveBuffer.h"
@@ -141,6 +142,19 @@ static bool BakeOk(UsdGenInstanceParams const &params,
         SdfPath("/groom/__usdGenRender/inst_op"), result, &error);
     if (!ok) std::printf("  bake error: %s\n", error.c_str());
     return ok;
+}
+
+static bool SameBake(UsdGenInstanceResult const &a,
+                     UsdGenInstanceResult const &b)
+{
+    if (!(a.translations == b.translations && a.rotations == b.rotations &&
+          a.scales == b.scales && a.prototypeIndex == b.prototypeIndex &&
+          a.instanceIndices.size() == b.instanceIndices.size()))
+        return false;
+    for (size_t i = 0; i != a.instanceIndices.size(); ++i)
+        if (a.instanceIndices[i] != b.instanceIndices[i])
+            return false;
+    return true;
 }
 
 // --- (1) paths ----------------------------------------------------------
@@ -1160,6 +1174,40 @@ static void CheckInlineQuat()
           "quat differential covers both branches");
 }
 
+static void CheckThreadedRanges()
+{
+    // 40K strands sit far above the 32768-curve threading threshold, so
+    // two bakes (thread scheduling varies run to run) must agree bitwise
+    // on every threaded output: the four lanes plus the per-prototype
+    // index partition. Cards+twist exercises the frame/trig path;
+    // spheres exercises the early-continue path.
+    std::vector<GfVec3f> roots;
+    roots.reserve(40000);
+    for (int i = 0; i != 40000; ++i)
+        roots.push_back(GfVec3f(float(i % 200), float(i / 200),
+                                float((i * 7) % 13)));
+    UsdGenCurveBuffer curves = StraightStrands(roots, 4, 0.25f);
+    UsdGenInstanceCurves input;
+    input.curves = &curves;
+
+    UsdGenInstanceParams cards = CardsParams();
+    cards.twist = 15.0f;
+    cards.twistRandom = 30.0f;
+    UsdGenInstanceResult c1, c2;
+    Check(BakeOk(cards, input, &c1) && BakeOk(cards, input, &c2),
+          "threaded cards bakes repeatably");
+    Check(c1.translations.size() == 40000 && SameBake(c1, c2),
+          "threaded cards ranges are bitwise identical");
+
+    UsdGenInstanceParams spheres = CardsParams();
+    spheres.primitive = TfToken("spheres");
+    UsdGenInstanceResult s1, s2;
+    Check(BakeOk(spheres, input, &s1) && BakeOk(spheres, input, &s2),
+          "threaded spheres bakes repeatably");
+    Check(s1.translations.size() == 40000 && SameBake(s1, s2),
+          "threaded spheres ranges are bitwise identical");
+}
+
 int main()
 {
     CheckPaths();
@@ -1175,6 +1223,7 @@ int main()
     CheckDataSources();
     CheckNotices();
     CheckInlineQuat();
+    CheckThreadedRanges();
     std::printf("testUsdGenInstance: %s\n", failures ? "FAILED" : "PASS");
     return failures ? 1 : 0;
 }

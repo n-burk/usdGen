@@ -481,7 +481,8 @@ target_link_libraries(usdGenImaging
     PUBLIC hd hdsi hf usd usdGeom usdShade sdr usdImaging
            sdf tf gf vt trace pxOsd usdGen
     PRIVATE hio
-    PRIVATE usdGenSchema)
+    PRIVATE usdGenSchema
+    PRIVATE TBB::tbb)  # Bake ranges run on plain TBB (no scheduler ctx here)
 set_target_properties(usdGenImaging PROPERTIES
     CXX_VISIBILITY_PRESET default
     # Produce the import library that downstream Windows consumers need.

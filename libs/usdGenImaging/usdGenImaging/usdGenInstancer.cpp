@@ -27,6 +27,9 @@
 #include <cstring>
 #include <new>
 
+#include "tbb/parallel_for.h"
+#include "tbb/task_arena.h"
+
 #if defined(__aarch64__)
 #include <arm_neon.h>
 #endif
@@ -36,6 +39,22 @@ PXR_NAMESPACE_USING_DIRECTIVE
 namespace usdGenImaging {
 
 namespace {
+
+// First failure inside one Bake range (curve order decides across ranges,
+// exactly like the serial loop's first _Fail).
+struct BakeRangeError {
+    bool failed = false;
+    uint32_t c = 0;
+    std::string message;
+};
+
+// One slot per Bake range: per-prototype instance lists (concatenated in
+// range order after the join, so identical to the serial push_back order)
+// plus the range's first error.
+struct BakeRangeSlot {
+    std::vector<std::vector<int>> indices;
+    BakeRangeError error;
+};
 
 // -- vector quatf->quath (bit-identical to the scalar loop) ------------------
 // AArch64 FCVTN converts 4 floats to 4 halves per instruction against the
@@ -668,7 +687,22 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
     out.scales.resize(n, noInit);
     out.prototypeIndex.resize(n, noInit);
 
-    for (uint32_t c = 0; c != n; ++c) {
+    // Chunked over workers for big bakes: every curve's outputs are
+    // per-curve independent (translations/rotations/scales/prototypeIndex
+    // write disjoint lanes of the pre-sized arrays; all reads are shared
+    // and immutable), the per-prototype index lists concatenate in range
+    // order (identical to the serial push_back order), and the first
+    // failure in curve order wins (same _Fail contract). Any chunking is
+    // bit-identical. Small bakes stay serial (below ~32K curves the
+    // dispatch costs more than the loop). The loop body below is
+    // byte-for-byte the serial spelling, only wrapped in the range.
+    int const workers = tbb::this_task_arena::max_concurrency();
+    size_t const bakeChunks =
+        (workers > 1 && n > 32768) ? std::min({size_t(workers), size_t(8),
+                                               size_t(n)})
+                                   : 1;
+    auto bakeRange = [&](uint32_t c0, uint32_t c1, BakeRangeSlot &slot) {
+    for (uint32_t c = c0; c != c1; ++c) {
         uint64_t const curveId = curves.curveId[c];
         uint32_t const first = spans[c];
         GfVec3f const root(curves.px[first], curves.py[first], curves.pz[first]);
@@ -700,7 +734,7 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
             }
         }
         out.prototypeIndex[c] = int(proto);
-        out.instanceIndices[proto].push_back(int(c));
+        slot.indices[proto].push_back(int(c));
 
         float const sDraw =
             _Draw01Seeded(seedScale, curveId, kSaltInstanceScale);
@@ -722,14 +756,20 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
         } else if (orientSurface) {
             bool ok = false;
             yAxis = _Normalized(GfVec3d(curves.rootB[c]), &ok);
-            if (!ok)
-                return _Fail("instance: degenerate rootB frame", error);
+            if (!ok) {
+                slot.error.failed = true; slot.error.c = c;
+                slot.error.message = "instance: degenerate rootB frame";
+                break;
+            }
             // Reuse N (bit-identical CSE): this path implies wantFrames,
             // so N above already holds exactly GfVec3d(curves.rootN[c]).
             GfVec3d z = N - yAxis * GfDot(N, yAxis);
             zAxis = _Normalized(z, &ok);
-            if (!ok)
-                return _Fail("instance: rootN parallel to rootB", error);
+            if (!ok) {
+                slot.error.failed = true; slot.error.c = c;
+                slot.error.message = "instance: rootN parallel to rootB";
+                break;
+            }
             xAxis = GfCross(yAxis, zAxis);
         } else {
             // curveTangent: y follows the root segment; z is the surface
@@ -747,9 +787,12 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
                 // Single-CV span or a zero-length root segment: legal
                 // topology, so fall back to the growth axis, not failure.
                 yAxis = _Normalized(GfVec3d(curves.rootB[c]), &tok);
-                if (!tok)
-                    return _Fail("instance: degenerate tangent fallback",
-                                 error);
+                if (!tok) {
+                    slot.error.failed = true; slot.error.c = c;
+                    slot.error.message =
+                        "instance: degenerate tangent fallback";
+                    break;
+                }
             }
             // Reuse N (bit-identical CSE): this path implies wantFrames,
             // so N above already holds exactly GfVec3d(curves.rootN[c]).
@@ -772,8 +815,11 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
             double const rd2 = refFallback ? GfDot(ref, yAxis) : rd;
             GfVec3d z = ref - yAxis * rd2;
             zAxis = _Normalized(z, &tok);
-            if (!tok)
-                return _Fail("instance: tangent parallel to frame", error);
+            if (!tok) {
+                slot.error.failed = true; slot.error.c = c;
+                slot.error.message = "instance: tangent parallel to frame";
+                break;
+            }
             xAxis = GfCross(yAxis, zAxis);
         }
 
@@ -808,6 +854,49 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
         out.rotations[c] = _QuatFromFrameRows(xAxis, yAxis, zAxis);
         out.scales[c] = GfVec3f(
             params.width * cardProfile * s, params.length * s, s);
+    }
+    };
+    std::vector<BakeRangeSlot> slots(bakeChunks);
+    for (auto &s : slots)
+        s.indices.resize(nProtos);
+    if (bakeChunks == 1) {
+        bakeRange(0, n, slots[0]);
+    } else {
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, bakeChunks),
+            [&](tbb::blocked_range<size_t> const &range) {
+                for (size_t t = range.begin(); t != range.end(); ++t) {
+                    uint32_t const c0 =
+                        uint32_t((t * uint64_t(n)) / bakeChunks);
+                    uint32_t const c1 =
+                        uint32_t(((t + 1) * uint64_t(n)) / bakeChunks);
+                    bakeRange(c0, c1, slots[t]);
+                }
+            });
+    }
+    // Ranges are curve-ordered, so the first failed range holds the serial
+    // loop's first failure: same _Fail contract.
+    for (size_t t = 0; t < bakeChunks; ++t) {
+        if (!slots[t].error.failed)
+            continue;
+        return _Fail(slots[t].error.message, error);
+    }
+    // Concatenate the per-range index lists in range order: identical to
+    // the serial push_back order (same values; capacities may differ,
+    // which no reader observes).
+    for (size_t p = 0; p < nProtos; ++p) {
+        size_t total = 0;
+        for (auto const &s : slots)
+            total += s.indices[p].size();
+        VtIntArray &dst = out.instanceIndices[p];
+        dst.resize(total);
+        int *w = dst.empty() ? nullptr : dst.data();
+        for (auto const &s : slots) {
+            if (!s.indices[p].empty()) {
+                std::memcpy(w, s.indices[p].data(),
+                            s.indices[p].size() * sizeof(int));
+                w += s.indices[p].size();
+            }
+        }
     }
 
     // Variation primvars: default {"displayColor"} when nothing is authored.
