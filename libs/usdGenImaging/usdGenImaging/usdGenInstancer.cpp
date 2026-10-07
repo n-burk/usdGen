@@ -74,7 +74,7 @@ struct BakeRangeSlot {
 // lanes, preserving positions exactly.
 
 void
-_ConvertQuats(GfQuath *dst, GfQuatf const *src, size_t n)
+_ConvertQuatsRange(GfQuath *dst, GfQuatf const *src, size_t n)
 {
     static_assert(sizeof(GfQuatf) == 4 * sizeof(float),
                   "quatf is 4 contiguous floats");
@@ -158,6 +158,35 @@ _ConvertQuats(GfQuath *dst, GfQuatf const *src, size_t n)
         dst[k] = GfQuath(GfHalf(q.GetReal()), GfVec3h(q.GetImaginary()));
     }
 #endif
+}
+
+// Chunked quat conversion (bit-identical): every quat's four lanes
+// convert independently of the 16-lane grouping (the wide loop's test
+// only selects the vector-vs-scalar path per group, and both spell the
+// same per-lane conversion), and FPCR is per-thread (each range masks
+// and restores its own), so converting disjoint quat ranges on workers
+// writes identical halves. Small draws stay serial: below ~32K quats
+// the dispatch costs more than the conversion.
+void
+_ConvertQuats(GfQuath *dst, GfQuatf const *src, size_t n)
+{
+    int const workers = tbb::this_task_arena::max_concurrency();
+    size_t const chunks =
+        (workers > 1 && n > 32768) ? std::min({size_t(workers), size_t(8),
+                                               n})
+                                   : 1;
+    if (chunks == 1) {
+        _ConvertQuatsRange(dst, src, n);
+        return;
+    }
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, chunks),
+        [&](tbb::blocked_range<size_t> const &range) {
+            for (size_t c = range.begin(); c != range.end(); ++c) {
+                size_t const q0 = (c * n) / chunks;
+                size_t const q1 = ((c + 1) * n) / chunks;
+                _ConvertQuatsRange(dst + q0, src + q0, q1 - q0);
+            }
+        });
 }
 
 // -- pinned draws (canonical: usdGenMath/usdGenMath/hash.h) -------------------
