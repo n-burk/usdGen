@@ -156,10 +156,10 @@ static_assert(offsetof(ScatterSpill, w0) == 8, "spill layout");
 static_assert(offsetof(ScatterSpill, nrest) == 16, "spill layout");
 static_assert(offsetof(ScatterSpill, nf) == 28, "spill layout");
 
-// One slot per two-pass range: the pass-1 spill slice, the range's root
-// total (for the serial inter-range prefix), and the range's first error.
+// One slot per two-pass range: the range's root total (for the serial
+// inter-range prefix) and the range's first error. The pass-1 spill
+// slices live in the pooled emission scratch, flat across ranges.
 struct ScatterSpillSlot {
-    std::unique_ptr<ScatterSpill[]> spill;
     size_t total = 0;
     ScatterEmitError error;
 };
@@ -176,6 +176,23 @@ struct ScatterRawRoots {
     std::unique_ptr<GfVec2f[]> aUv;
     std::unique_ptr<GfVec3f[]> aT, aN, aB;
 };
+
+// Pooled two-pass emission scratch (bit-identical): pass 1's spill
+// (~32MB at 1M faces) and pass 2's raw root planes (~68MB at 1M roots)
+// churn through fresh alloc+fault+free every Capture; pooling across
+// calls on the thread turns every rep after the first into pure reuse.
+// Growth-only (never shrinks); pass 1 fully writes every visited spill
+// slot (explicit zeros on skips) and pass 2 writes every raw slot
+// [0, total) exactly once, so pooled contents never leak across calls.
+// Retains the largest capture seen per thread (~100MB at bench scale),
+// like the sort scratch and the convert/capture shells.
+struct ScatterEmissionScratch {
+    std::unique_ptr<ScatterSpill[]> spill;
+    size_t spillFaces = 0;
+    ScatterRawRoots raw;
+    size_t rawTotal = 0;
+};
+thread_local ScatterEmissionScratch t_scatterEmissionScratch;
 static_assert(std::is_trivially_default_constructible<GfVec2f>::value,
               "raw vec2 planes stay uninitialized");
 static_assert(std::is_trivially_default_constructible<GfVec3f>::value,
@@ -1011,22 +1028,28 @@ bool UsdGenScatterOp::Capture(
     // subdivision path keep the one-pass emission below.
     bool const twoPass = (level == 0 && faceCount > 4096);
     ScatterEmission all;
-    ScatterRawRoots raw;
+    // Pooled two-pass storage (see above): the spill slice and raw planes
+    // alias the thread's emission scratch, grown (never shrunk) to the
+    // largest capture seen. Unused by the one-pass path.
+    ScatterEmissionScratch &emis = t_scatterEmissionScratch;
+    ScatterRawRoots &raw = emis.raw;
     size_t total = 0;
     if (twoPass) {
+        if (emis.spillFaces < faceCount) {
+            emis.spill.reset(new ScatterSpill[faceCount]);
+            emis.spillFaces = faceCount;
+        }
+        ScatterSpill *spillBase = emis.spill.get();
         std::vector<ScatterSpillSlot> spillSlots(partitions);
-        for (size_t p = 0; p < partitions; ++p)
-            spillSlots[p].spill.reset(new ScatterSpill[rangeStart[p + 1] -
-                                                         rangeStart[p]]);
         if (partitions == 1) {
             pass1Range(rangeStart[0], rangeStart[1], 0,
-                       spillSlots[0].spill.get(), &spillSlots[0].total,
+                       spillBase + rangeStart[0], &spillSlots[0].total,
                        spillSlots[0].error);
         } else {
             ScatterParallelFor(ctx.dispatcher, partitions, [&](size_t p) {
                 pass1Range(rangeStart[p], rangeStart[p + 1],
                            restricted ? 0 : rangeBase[p],
-                           spillSlots[p].spill.get(), &spillSlots[p].total,
+                           spillBase + rangeStart[p], &spillSlots[p].total,
                            spillSlots[p].error);
             });
         }
@@ -1055,8 +1078,7 @@ bool UsdGenScatterOp::Capture(
                 bool found = false;
                 for (size_t fi = rangeStart[p]; fi < rangeStart[p + 1];
                      ++fi) {
-                    size_t const nf =
-                        spillSlots[p].spill[fi - rangeStart[p]].nf;
+                    size_t const nf = spillBase[fi].nf;
                     if (acc > maxTotal || nf > maxTotal - acc) {
                         face = restricted ? faces[fi] : int(fi);
                         found = true;
@@ -1070,30 +1092,33 @@ bool UsdGenScatterOp::Capture(
                                   "uint32 cardinality at face " + std::to_string(face));
             return false;
         }
-        // Uninitialized sizing: pass 2 writes every slot exactly once.
-        raw.ax.reset(new float[total]);
-        raw.ay.reset(new float[total]);
-        raw.az.reset(new float[total]);
-        raw.aids.reset(new uint64_t[total]);
-        raw.aPrim.reset(new int[total]);
-        raw.aUv.reset(new GfVec2f[total]);
-        raw.aT.reset(new GfVec3f[total]);
-        raw.aN.reset(new GfVec3f[total]);
-        raw.aB.reset(new GfVec3f[total]);
+        // Pooled uninitialized sizing: pass 2 writes every slot exactly
+        // once, so growth needs no initialization and reuse is exact.
+        if (emis.rawTotal < total) {
+            raw.ax.reset(new float[total]);
+            raw.ay.reset(new float[total]);
+            raw.az.reset(new float[total]);
+            raw.aids.reset(new uint64_t[total]);
+            raw.aPrim.reset(new int[total]);
+            raw.aUv.reset(new GfVec2f[total]);
+            raw.aT.reset(new GfVec3f[total]);
+            raw.aN.reset(new GfVec3f[total]);
+            raw.aB.reset(new GfVec3f[total]);
+            emis.rawTotal = total;
+        }
         if (partitions == 1) {
             pass2Range(rangeStart[0], rangeStart[1], 0, rangeRootBase[0],
-                       spillSlots[0].spill.get(), raw);
+                       spillBase + rangeStart[0], raw);
         } else {
             ScatterParallelFor(ctx.dispatcher, partitions, [&](size_t p) {
                 pass2Range(rangeStart[p], rangeStart[p + 1],
                            restricted ? 0 : rangeBase[p], rangeRootBase[p],
-                           spillSlots[p].spill.get(), raw);
+                           spillBase + rangeStart[p], raw);
             });
         }
-        // Release the spill before the sort/gather legs (same LLC
-        // rationale as the one-pass slots release below).
-        spillSlots.clear();
-        spillSlots.shrink_to_fit();
+        // The pooled spill and raw planes stay resident (no release):
+        // they are cold during the sort/gather legs and hot again on the
+        // next Capture, so releasing would only re-buy faults.
     } else {
         std::vector<ScatterEmitSlot> slots(partitions);
         // Reserve every slot up front, serially: 72 near-simultaneous mmaps
