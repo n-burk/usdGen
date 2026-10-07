@@ -985,8 +985,8 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
                 // copy instead of a strided per-component loop. Same bytes.
                 void const *src = input.displayColor.cdata();
                 plane.f.resize(count3, [src](float *b, float *e) {
-                    std::memcpy(b, src,
-                                size_t(e - b) * sizeof(float));
+                    _MemcpyChunked(b, src,
+                                   size_t(e - b) * sizeof(float));
                 });
             } else {
                 GfVec3f const *colors = input.displayColor.cdata();
