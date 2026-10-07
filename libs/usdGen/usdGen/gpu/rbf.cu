@@ -1131,6 +1131,36 @@ RbfStatus CudaRbfBinding::submitSolveSliceGraphed(cudaStream_t stream, DeviceVie
     return submitSolveSlice(stream, posed, n, m, invScale);
 }
 
+void CudaRbfBinding::armSolveL2Window(cudaStream_t stream) {
+    // Ahead of any capture: stream attributes cannot change mid-capture,
+    // and the window applies to the graphed kernels once set.
+    void const* ptr = matrix_.data();
+    size_t const bytes = matrix_.size() * sizeof(double);
+    if (ptr == nullptr || bytes == 0) return;
+    if (stream == pl2Stream_ && ptr == pl2Ptr_ && bytes == pl2Bytes_) return;
+    pl2Stream_ = stream;
+    pl2Ptr_ = ptr;
+    pl2Bytes_ = bytes;
+    int dev = 0;
+    if (!ok(cudaGetDevice(&dev))) return;
+    int maxPersist = 0;
+    if (!ok(cudaDeviceGetAttribute(&maxPersist, cudaDevAttrMaxPersistingL2CacheSize, dev)))
+        return;
+    if (maxPersist <= 0 || size_t(maxPersist) < bytes) return;
+    // Monotonic: the reservation is device-global and shared across
+    // bindings, so only raise it, never lower it for a smaller factor.
+    size_t cur = 0;
+    if (ok(cudaDeviceGetLimit(&cur, cudaLimitPersistingL2CacheSize)) && cur < bytes)
+        (void)cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, bytes);
+    cudaStreamAttrValue attr{};
+    attr.accessPolicyWindow.base_ptr = const_cast<void*>(ptr);
+    attr.accessPolicyWindow.num_bytes = bytes;
+    attr.accessPolicyWindow.hitRatio = 1.0f;
+    attr.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
+    attr.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
+    (void)cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &attr);
+}
+
 RbfStatus CudaRbfBinding::Solve(DeviceView<const float3> posed, cudaStream_t stream) {
     if (HasUnprovenWork()) return fail(RbfStatus::InvalidArgument,"fresh RBF proof is pending");
     solved_=false;
@@ -1154,6 +1184,7 @@ RbfStatus CudaRbfBinding::Solve(DeviceView<const float3> posed, cudaStream_t str
     // re-captures and any capture/launch failure runs the same submits
     // directly.
     int const n = (int)sampleCount_, m = (int)order_;
+    armSolveL2Window(stream);
     RbfStatus slice = submitSolveSliceGraphed(stream, posed, n, m, 1.0/scale_);
     if (slice != RbfStatus::Ok) return slice;
     if(!ok(cudaStreamSynchronize(stream))) {

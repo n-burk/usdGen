@@ -183,6 +183,17 @@ private:
                                int n, int m, double invScale);
     RbfStatus submitSolveSliceGraphed(cudaStream_t stream, DeviceView<const float3> posed,
                                       int n, int m, double invScale);
+    // Persisting-L2 window for the LU factors: cuSOLVER's triangular
+    // solve reads the factors row-dependently, so L2-cold factors (the
+    // prior evaluation's streaming evicts them) stall the dependent
+    // chain. Pinning them persisting keeps them resident across
+    // evaluations. Best-effort residency only: every failure runs
+    // through unmodified with identical bytes, and re-arms only when
+    // the stream or the factors move, so the steady state pays nothing.
+    void armSolveL2Window(cudaStream_t stream);
+    cudaStream_t pl2Stream_ = nullptr;
+    void const* pl2Ptr_ = nullptr;
+    size_t pl2Bytes_ = 0;
     size_t sampleCount_ = 0, order_ = 0;
     bool solved_ = false, evalPending_ = false;
     double smoothing_ = 0.0, center_[3] = {}, scale_ = 1.0;
