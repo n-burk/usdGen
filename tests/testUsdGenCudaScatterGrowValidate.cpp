@@ -773,5 +773,57 @@ static bool CheckThreadedResolve()
         if (!CheckResolveCase(r, c, ScatterGrowStatus::NonFiniteInput, 0))
             return false;
     }
+    // Skewed shards with a cross-shard minimum: 40% of the ids share
+    // shard 0 (fold 0), so the sharded path runs lopsided but below the
+    // n/2 fallback line. The dup at 15000 (shard 0) hides the overflow
+    // at 20000 (DuplicateStableId); a shard-0 miss would expose it
+    // (dBad 35000 scans the overflow -> NonFiniteInput), so the verdict
+    // pins the cross-shard minimum and its mLim coupling.
+    {
+        auto cOf = Controls();
+        cOf.length = double(FLT_MAX);
+        cOf.randomLo = 1.0;
+        cOf.randomHi = 1.0;
+        auto r = Roots(n);
+        for (size_t i = 0; i < 16000; ++i)
+            r->stableIds[i] = (uint64_t(i) << 32) | uint64_t(i);
+        r->stableIds[15000] = r->stableIds[5];
+        r->stableIds[35000] = r->stableIds[20000];
+        r->positions[20000] = make_float3(FLT_MAX, 0.0f, 0.0f);
+        r->rootN[20000] = make_float3(1.0f, 0.0f, 0.0f);
+        if (!CheckResolveCase(r, cOf, ScatterGrowStatus::DuplicateStableId,
+                              0))
+            return false;
+    }
+    // Small multi-occurrence groups (g=5): the <=64 resolve path with
+    // repeated matches, in serial and every sharded chunking.
+    {
+        auto r = Roots(n);
+        for (size_t g = 1; g <= 10; ++g)
+            for (size_t j = 1; j < 5; ++j)
+                r->stableIds[g * 3000 + j] = r->stableIds[g * 3000];
+        if (!CheckResolveCase(r, c, ScatterGrowStatus::DuplicateStableId, 0))
+            return false;
+    }
+    // Empty shards: ids confined to 4 of 8 shards, so half the shards
+    // take the m<=1 skip while the rest sort; verdict stays Ok.
+    {
+        auto r = Roots(n);
+        for (size_t i = 0; i < n; ++i)
+            r->stableIds[i] = uint64_t((i / 4) * 8 + (i % 4) + 1);
+        if (!CheckResolveCase(r, c, ScatterGrowStatus::Ok, n * 8))
+            return false;
+    }
+    // Fallback line: 60% of the ids in shard 0 trips the n/2 guard, so
+    // the legacy global path must still find the dup pair parked in a
+    // thin shard.
+    {
+        auto r = Roots(n);
+        for (size_t i = 0; i < 24000; ++i)
+            r->stableIds[i] = (uint64_t(i) << 32) | uint64_t(i);
+        r->stableIds[39000] = r->stableIds[25000];
+        if (!CheckResolveCase(r, c, ScatterGrowStatus::DuplicateStableId, 0))
+            return false;
+    }
     return true;
 }

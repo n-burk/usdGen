@@ -100,6 +100,208 @@ float3 NormalizeHost(float3 v) {
 // are 32-bit); the caller routes larger inputs to SetFirstDup.
 size_t RadixFirstDup(uint64_t const* ids, size_t n) {
     if (n <= 1) return n;
+    {
+        // Sharded dup sort (verdict-identical): hash-fold digits scatter
+        // uniformly at random, so the global passes below dirty one 64B
+        // line per 8B item (~8x write amplification over the 8MB output,
+        // ~3.4ms of cuda_validate). A stable 8-way partition by fold
+        // low-3-bits runs first (8 cursors per chunk: sequential runs),
+        // then each shard sorts serially on its worker with the same
+        // (fold,index) packing, the same stable radix passes, and the
+        // same per-group resolve below; the working set per shard
+        // (~2MB) stays cache-contained instead of spilling. Equal folds
+        // share their low 3 bits, so no fold group ever splits across
+        // shards; chunk ranges ascend, so each shard's partition order
+        // is global input order and every shard resolves the same
+        // second-occurrences the global sort would. The global minimum
+        // over shards is the identical index. A pathological skew (one
+        // shard past n/2) falls through to the legacy global path.
+        int const shardWorkers = tbb::this_task_arena::max_concurrency();
+        size_t const shardChunks =
+            (shardWorkers > 1 && n > 32768)
+                ? std::min({size_t(shardWorkers), size_t(8), n})
+                : 1;
+        if (shardChunks > 1) {
+            constexpr size_t kShards = 8;
+            static_assert((kShards & (kShards - 1)) == 0,
+                          "shard mask needs a power of two");
+            constexpr size_t kMaxChunks = 8;
+            size_t chunkShard[kMaxChunks][kShards];
+            for (size_t c = 0; c < kMaxChunks; ++c)
+                for (size_t s = 0; s < kShards; ++s)
+                    chunkShard[c][s] = 0;
+            uint64_t const* idsIn = ids;
+            size_t const nn = n;
+            size_t const nch = shardChunks;
+            tbb::parallel_for(tbb::blocked_range<size_t>(0, nch),
+                [&](tbb::blocked_range<size_t> const& range) {
+                    for (size_t c = range.begin(); c != range.end(); ++c) {
+                        size_t const i0 = (c * nn) / nch;
+                        size_t const i1 = ((c + 1) * nn) / nch;
+                        size_t local[kShards] = {};
+                        for (size_t i = i0; i < i1; ++i) {
+                            uint64_t const id = idsIn[i];
+                            uint32_t const fold =
+                                uint32_t(id) ^ uint32_t(id >> 32);
+                            ++local[fold & (kShards - 1)];
+                        }
+                        for (size_t s = 0; s < kShards; ++s)
+                            chunkShard[c][s] = local[s];
+                    }
+                });
+            size_t shardBase[kShards + 1];
+            size_t chunkCur[kMaxChunks][kShards];
+            shardBase[0] = 0;
+            for (size_t s = 0; s < kShards; ++s) {
+                size_t base = shardBase[s];
+                for (size_t c = 0; c < nch; ++c) {
+                    chunkCur[c][s] = base;
+                    base += chunkShard[c][s];
+                }
+                shardBase[s + 1] = base;
+            }
+            size_t maxShard = 0;
+            for (size_t s = 0; s < kShards; ++s) {
+                size_t const m = shardBase[s + 1] - shardBase[s];
+                if (m > maxShard) maxShard = m;
+            }
+            if (maxShard <= n / 2) {
+                std::unique_ptr<uint64_t[]> shardItems(new uint64_t[n]);
+                std::unique_ptr<uint64_t[]> shardTmp(new uint64_t[n]);
+                std::unique_ptr<uint32_t[]> shardHist(
+                    new uint32_t[kShards * 65536]);
+                uint64_t* partOut = shardItems.get();
+                tbb::parallel_for(tbb::blocked_range<size_t>(0, nch),
+                    [&](tbb::blocked_range<size_t> const& range) {
+                        for (size_t c = range.begin(); c != range.end();
+                             ++c) {
+                            size_t const i0 = (c * nn) / nch;
+                            size_t const i1 = ((c + 1) * nn) / nch;
+                            size_t cur[kShards];
+                            for (size_t s = 0; s < kShards; ++s)
+                                cur[s] = chunkCur[c][s];
+                            for (size_t i = i0; i < i1; ++i) {
+                                uint64_t const id = idsIn[i];
+                                uint32_t const fold =
+                                    uint32_t(id) ^ uint32_t(id >> 32);
+                                size_t const s = fold & (kShards - 1);
+                                partOut[cur[s]++] =
+                                    (uint64_t(fold) << 32) | uint32_t(i);
+                            }
+                        }
+                    });
+                // Per-group second-occurrence resolution, shared logic
+                // with the legacy path below: members run..i-1 share a
+                // fold in ascending-index order. Returns the minimum of
+                // dBad and the group's second occurrences.
+                auto shardResolveGroup = [&](uint64_t const* sorted,
+                                             size_t run, size_t i,
+                                             std::vector<uint32_t>& big,
+                                             size_t dBad) -> size_t {
+                    size_t const g = i - run;
+                    if (g > 64) {
+                        big.resize(g);
+                        for (size_t t = 0; t < g; ++t)
+                            big[t] = uint32_t(sorted[run + t]);
+                        std::sort(big.begin(), big.end(),
+                            [&](uint32_t a, uint32_t b) {
+                                return ids[a] != ids[b] ? ids[a] < ids[b]
+                                                       : a < b;
+                            });
+                        for (size_t j = 1; j < g; ++j) {
+                            if (ids[big[j]] != ids[big[j - 1]]) continue;
+                            if (j > 1 &&
+                                ids[big[j - 1]] == ids[big[j - 2]])
+                                continue;
+                            if (size_t(big[j]) < dBad) {
+                                dBad = size_t(big[j]);
+                                if (dBad == 1) return 1;
+                            }
+                        }
+                    } else {
+                        for (size_t j = run + 1; j < i; ++j) {
+                            uint32_t const jj = uint32_t(sorted[j]);
+                            int matches = 0;
+                            for (size_t q = run; q < j; ++q) {
+                                if (ids[jj] ==
+                                        ids[uint32_t(sorted[q])] &&
+                                    ++matches > 1)
+                                    break;
+                            }
+                            if (matches == 1 && size_t(jj) < dBad) {
+                                dBad = size_t(jj);
+                                if (dBad == 1) return 1;
+                            }
+                        }
+                    }
+                    return dBad;
+                };
+                std::vector<size_t> shardMin(kShards, n);
+                tbb::parallel_for(tbb::blocked_range<size_t>(0, kShards),
+                    [&](tbb::blocked_range<size_t> const& range) {
+                        for (size_t s = range.begin(); s != range.end();
+                             ++s) {
+                            size_t const b0 = shardBase[s];
+                            size_t const m = shardBase[s + 1] - b0;
+                            if (m <= 1) continue;
+                            uint64_t* w = shardItems.get() + b0;
+                            uint64_t* wOut = shardTmp.get() + b0;
+                            uint32_t* cnt =
+                                shardHist.get() + s * 65536;
+                            uint32_t orK = 0, andK = ~uint32_t(0);
+                            for (size_t k = 0; k < m; ++k) {
+                                uint32_t const f = uint32_t(w[k] >> 32);
+                                orK |= f;
+                                andK &= f;
+                            }
+                            uint32_t const vary = orK ^ andK;
+                            for (int pass = 0; pass < 2; ++pass) {
+                                if (((vary >> (pass * 16)) & 0xffffu) == 0)
+                                    continue;
+                                int const shift = 32 + pass * 16;
+                                std::fill(cnt, cnt + 65536, uint32_t(0));
+                                for (size_t k = 0; k < m; ++k)
+                                    ++cnt[uint32_t(w[k] >> shift) &
+                                           0xffffu];
+                                uint32_t sum = 0;
+                                for (size_t c = 0; c < 65536; ++c) {
+                                    uint32_t const t = cnt[c];
+                                    cnt[c] = sum;
+                                    sum += t;
+                                }
+                                for (size_t k = 0; k < m; ++k) {
+                                    uint64_t const wk = w[k];
+                                    size_t const d =
+                                        (uint32_t(wk >> shift)) & 0xffffu;
+                                    wOut[cnt[d]++] = wk;
+                                }
+                                std::swap(w, wOut);
+                            }
+                            size_t local = n;
+                            std::vector<uint32_t> big;
+                            size_t run = 0;
+                            for (size_t j = 1; j <= m; ++j) {
+                                if (j < m &&
+                                    uint32_t(w[j] >> 32) ==
+                                        uint32_t(w[run] >> 32))
+                                    continue;
+                                if (j - run > 1) {
+                                    local = shardResolveGroup(w, run, j,
+                                                              big, local);
+                                    if (local == 1) break;
+                                }
+                                run = j;
+                            }
+                            shardMin[s] = local;
+                        }
+                    });
+                size_t dBad = n;
+                for (size_t s = 0; s < kShards; ++s)
+                    dBad = shardMin[s] < dBad ? shardMin[s] : dBad;
+                return dBad;
+            }
+        }
+    }
     // Uninitialized scratch (bit-identical): every slot of both item
     // arrays is overwritten before its read (pack fill, radix passes),
     // and counts is filled before each pass, so std::vector's value-init
