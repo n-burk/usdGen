@@ -4,6 +4,7 @@
 #include "tbb/task_arena.h"
 
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <string>
@@ -180,6 +181,68 @@ static bool CheckThreadedValidation() {
                         CudaScatterInputStatus::InvalidSurface,
                         "Scatter surface has non-finite UV"))
         return false;
+    // Infinities in every lane position of both float groups: the
+    // exponent-OR scan flags any 0xFF exponent, not just NaN patterns.
+    float const inf = std::numeric_limits<float>::infinity();
+    auto infRest = big;
+    infRest.surfaces[0].restPoints[12345] = GfVec3f(0, -inf, 0);
+    if (!VerdictMatches(infRest, serialArena,
+                        CudaScatterInputStatus::InvalidSurface,
+                        "Scatter surface has non-finite rest position"))
+        return false;
+    auto infUv = big;
+    infUv.surfaces[0].uv[23456] = GfVec2f(inf, 0);
+    if (!VerdictMatches(infUv, serialArena,
+                        CudaScatterInputStatus::InvalidSurface,
+                        "Scatter surface has non-finite UV"))
+        return false;
+    // Signaling NaN (bit-built: a float literal would quiet it). The
+    // integer OR flags it without touching the FP units, so it can
+    // never signal during the scan; isfinite agrees it is non-finite.
+    uint32_t const snanBits = 0x7F800001u;
+    float snan = 0;
+    std::memcpy(&snan, &snanBits, sizeof(snan));
+    auto snanRest = big;
+    snanRest.surfaces[0].restPoints[34567] = GfVec3f(0, 0, snan);
+    if (!VerdictMatches(snanRest, serialArena,
+                        CudaScatterInputStatus::InvalidSurface,
+                        "Scatter surface has non-finite rest position"))
+        return false;
+    // Subnormals and signed zeros are clean: only the 0xFF exponent
+    // fails. (Extreme finite magnitudes live on the empty-faces desc
+    // below: on a real mesh they would trip capture's own area/root
+    // guards, which is a different verdict.)
+    auto tinyLanes = big;
+    tinyLanes.surfaces[0].restPoints[111] = GfVec3f(
+        std::numeric_limits<float>::denorm_min(), -0.0f, 0.0f);
+    tinyLanes.surfaces[0].uv[222] = GfVec2f(
+        -std::numeric_limits<float>::denorm_min(), 0.0f);
+    if (!VerdictMatches(tinyLanes, serialArena, CudaScatterInputStatus::Ok,
+                        ""))
+        return false;
+    // Index extremes: INT_MIN/INT_MAX fail, points-1 is the top valid
+    // slot. The min/max reduction must not mistake its own init
+    // values (INT_MAX/INT_MIN) for data.
+    auto minIndex = big;
+    minIndex.surfaces[0].faceVertexIndices[60000] =
+        std::numeric_limits<int>::min();
+    if (!VerdictMatches(minIndex, serialArena,
+                        CudaScatterInputStatus::InvalidSurface,
+                        "Scatter surface has out-of-range face index"))
+        return false;
+    auto maxIndex = big;
+    maxIndex.surfaces[0].faceVertexIndices[70000] =
+        std::numeric_limits<int>::max();
+    if (!VerdictMatches(maxIndex, serialArena,
+                        CudaScatterInputStatus::InvalidSurface,
+                        "Scatter surface has out-of-range face index"))
+        return false;
+    auto edgeIndex = big;
+    edgeIndex.surfaces[0].faceVertexIndices[80000] =
+        int(edgeIndex.surfaces[0].restPoints.size() - 1);
+    if (!VerdictMatches(edgeIndex, serialArena, CudaScatterInputStatus::Ok,
+                        ""))
+        return false;
     auto badCount = big;
     badCount.surfaces[0].faceVertexCounts[35000] = 2;
     if (!VerdictMatches(badCount, serialArena,
@@ -238,6 +301,18 @@ static bool CheckThreadedValidation() {
     if (!VerdictMatches(noFacesBad, serialArena,
                         CudaScatterInputStatus::InvalidSurface,
                         "Scatter surface has non-finite rest position"))
+        return false;
+    // Extreme-but-finite lanes (exponent 0xFE) are clean. Empty faces
+    // so capture's area guards never see them; the validation scans
+    // still stream every lane.
+    auto noFacesHuge = noFaces;
+    noFacesHuge.surfaces[0].restPoints[333] = GfVec3f(
+        std::numeric_limits<float>::max(),
+        -std::numeric_limits<float>::max(), 1.0f);
+    noFacesHuge.surfaces[0].uv[444] =
+        GfVec2f(std::numeric_limits<float>::max(), -1.0f);
+    if (!VerdictMatches(noFacesHuge, serialArena,
+                        CudaScatterInputStatus::Ok, ""))
         return false;
     return true;
 }
