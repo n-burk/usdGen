@@ -158,6 +158,19 @@ size_t RadixFirstDup(uint64_t const* ids, size_t n) {
             for (size_t c = 0; c < kMaxChunks; ++c)
                 for (size_t s = 0; s < kShards; ++s)
                     chunkShard[c][s] = 0;
+            // Hoisted fold or/and (bit-identical): the count loop below
+            // already folds every id, so it also accumulates the global
+            // fold |/& reduction (order-free) into per-chunk partials.
+            // The per-shard digit-skip then reads the global vary instead
+            // of re-streaming each shard's items: a globally-constant
+            // digit is constant in every shard, so the same passes skip.
+            // A globally-varying digit runs in every shard (even a
+            // constant one: correct, just work, only on dup-heavy
+            // inputs); the sorted arrays are identical either way.
+            uint32_t chunkOr[kMaxChunks] = {};
+            uint32_t chunkAnd[kMaxChunks];
+            for (size_t c = 0; c < kMaxChunks; ++c)
+                chunkAnd[c] = ~uint32_t(0);
             uint64_t const* idsIn = ids;
             size_t const nn = n;
             size_t const nch = shardChunks;
@@ -167,16 +180,27 @@ size_t RadixFirstDup(uint64_t const* ids, size_t n) {
                         size_t const i0 = (c * nn) / nch;
                         size_t const i1 = ((c + 1) * nn) / nch;
                         size_t local[kShards] = {};
+                        uint32_t orLocal = 0, andLocal = ~uint32_t(0);
                         for (size_t i = i0; i < i1; ++i) {
                             uint64_t const id = idsIn[i];
                             uint32_t const fold =
                                 uint32_t(id) ^ uint32_t(id >> 32);
                             ++local[fold & (kShards - 1)];
+                            orLocal |= fold;
+                            andLocal &= fold;
                         }
                         for (size_t s = 0; s < kShards; ++s)
                             chunkShard[c][s] = local[s];
+                        chunkOr[c] = orLocal;
+                        chunkAnd[c] = andLocal;
                     }
                 });
+            uint32_t shardOr = 0, shardAnd = ~uint32_t(0);
+            for (size_t c = 0; c < nch; ++c) {
+                shardOr |= chunkOr[c];
+                shardAnd &= chunkAnd[c];
+            }
+            uint32_t const shardVary = shardOr ^ shardAnd;
             size_t shardBase[kShards + 1];
             size_t chunkCur[kMaxChunks][kShards];
             shardBase[0] = 0;
@@ -276,13 +300,11 @@ size_t RadixFirstDup(uint64_t const* ids, size_t n) {
                             uint64_t* wOut = shardTmp + b0;
                             uint32_t* cnt =
                                 shardHist + s * 65536;
-                            uint32_t orK = 0, andK = ~uint32_t(0);
-                            for (size_t k = 0; k < m; ++k) {
-                                uint32_t const f = uint32_t(w[k] >> 32);
-                                orK |= f;
-                                andK &= f;
-                            }
-                            uint32_t const vary = orK ^ andK;
+                            // Hoisted global vary (see the count loop):
+                            // a globally-constant digit skips in every
+                            // shard, the same passes today's prescan
+                            // skipped; the sorted shards are identical.
+                            uint32_t const vary = shardVary;
                             for (int pass = 0; pass < 2; ++pass) {
                                 if (((vary >> (pass * 16)) & 0xffffu) == 0)
                                     continue;
