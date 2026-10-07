@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -106,6 +107,29 @@ _Container(std::vector<TfToken> &&names,
 {
     return HdRetainedContainerDataSource::New(
         names.size(), names.data(), values.data());
+}
+
+// Pack a float-triple plane (furTauP/furTauN) into a vec3 primvar buffer.
+// GfVec3f is three contiguous floats, so a memcpy is bit-identical to the
+// scalar loop and vectorizes; the array is left uninitialized before the
+// copy (every element is written), which also skips VtArray's zero-fill.
+VtVec3fArray
+_PackVec3(VtFloatArray const &f, size_t n)
+{
+    static_assert(sizeof(GfVec3f) == 3 * sizeof(float),
+                  "GfVec3f must be three contiguous floats for the pack memcpy");
+    VtVec3fArray packed;
+    packed.resize(n, [](GfVec3f *b, GfVec3f *e) {
+        std::uninitialized_default_construct(b, e);
+    });
+    if (n > 0) {
+        // Through void*: the class-typed form trips -Wclass-memaccess, and
+        // the static_assert above is the real layout guard.
+        std::memcpy(static_cast<void*>(packed.data()),
+                    static_cast<void const*>(f.data()),
+                    n * sizeof(GfVec3f));
+    }
+    return packed;
 }
 
 HdContainerDataSourceHandle
@@ -256,9 +280,7 @@ _Assemble(usdGen::UsdGenTilePublication const &tile, bool isGuide,
             plane.arity == 3 && plane.f.size() == totalCvs * 3) {
             // Pack optical depth into two vec3 buffers. Separate scalars
             // exhaust GL's per-stage SSBO slots on instanced curve draws.
-            VtVec3fArray packed(totalCvs);
-            for (size_t i = 0; i < totalCvs; ++i)
-                packed[i] = GfVec3f(plane.f[3*i], plane.f[3*i+1], plane.f[3*i+2]);
+            VtVec3fArray packed = _PackVec3(plane.f, totalCvs);
             _Add(&pvNames, &pvValues, plane.name,
                  _Primvar(_Samp(packed), plane.interpolation));
             continue;
@@ -855,10 +877,7 @@ UsdGenTilePublisher::BuildScalpShadowDataSource(
         if (plane.arity != 3 || plane.f.size() != points * 3) continue;
         // The same vec3 packing a tile's depths get: separate scalar buffers
         // exhaust GL's per-stage SSBO slots.
-        VtVec3fArray packed(points);
-        for (size_t i = 0; i < points; ++i) {
-            packed[i] = GfVec3f(plane.f[3*i], plane.f[3*i+1], plane.f[3*i+2]);
-        }
+        VtVec3fArray packed = _PackVec3(plane.f, points);
         _Add(&pvNames, &pvValues, plane.name,
              _Primvar(_Samp(packed), plane.interpolation));
     }
