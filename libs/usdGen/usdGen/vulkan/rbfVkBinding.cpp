@@ -302,6 +302,17 @@ struct RbfVkBinding::Native {
     // solve reads every element); the forward pass overwrites every
     // coefficient before any read, so hostCoef needs no initialization.
     std::vector<double> hostRhs, hostCoef;
+    // EvaluateHost staging pair, pooled across calls: two 12MB
+    // host-visible buffers cost ~3ms to create and destroy on the
+    // qualified driver, so a count match reuses the proven-idle pair
+    // instead of allocating. The upload overwrites every cvs byte and a
+    // successful evaluation overwrites every out byte, so a reused pair
+    // carries bitwise the same bytes as fresh buffers; a failed call
+    // drops the pair (its submit may still be pending) while a
+    // count-mismatched call leaves the pool untouched. Bind-independent:
+    // rebinds keep the pool, like the fence pool above.
+    std::shared_ptr<ChargedBuffer> hostStageCvs, hostStageOut;
+    uint32_t hostStageCount = 0;
     // A staged host extent: BeginBind stashes nothing beyond the rest
     // samples and runs the admission hook, and PollSolve runs the extent
     // on the host with no fence. solvePending stays the pending flag, so
@@ -1916,20 +1927,56 @@ RbfVkStatus RbfVkBinding::EvaluateHost(float const* cvs, float* out, uint32_t co
     VkResult r = VK_SUCCESS;
     VkMemoryPropertyFlags const host =
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    auto cvsBuf = ChargedBuffer::Create(native.context, bi, host,
-        UsdGenExecutionResourceKind::Scratch, &r);
-    if (!cvsBuf) return fail(RbfVkStatus::DeviceError, "RBF evaluation state setup failed");
-    auto outBuf = ChargedBuffer::Create(native.context, bi, host,
-        UsdGenExecutionResourceKind::Scratch, &r);
-    if (!outBuf) return fail(RbfVkStatus::DeviceError, "RBF evaluation state setup failed");
-    if (WriteBytes(d, *cvsBuf, bi.size, cvs) != VK_SUCCESS)
+    // Pooled staging: a count match reuses the proven-idle pair (see the
+    // field comment); a mismatch builds a fresh pair and leaves the pool
+    // untouched, so a failed reshape keeps the old pair valid.
+    bool const reused = native.hostStageCount == count && native.hostStageCvs &&
+        native.hostStageOut;
+    std::shared_ptr<ChargedBuffer> cvsBuf, outBuf;
+    if (reused) {
+        cvsBuf = native.hostStageCvs;
+        outBuf = native.hostStageOut;
+    } else {
+        cvsBuf = ChargedBuffer::Create(native.context, bi, host,
+            UsdGenExecutionResourceKind::Scratch, &r);
+        if (!cvsBuf) return fail(RbfVkStatus::DeviceError, "RBF evaluation state setup failed");
+        outBuf = ChargedBuffer::Create(native.context, bi, host,
+            UsdGenExecutionResourceKind::Scratch, &r);
+        if (!outBuf) return fail(RbfVkStatus::DeviceError, "RBF evaluation state setup failed");
+    }
+    auto dropPool = [&]() {
+        if (reused) {
+            native.hostStageCvs.reset();
+            native.hostStageOut.reset();
+            native.hostStageCount = 0;
+        }
+    };
+    if (WriteBytes(d, *cvsBuf, bi.size, cvs) != VK_SUCCESS) {
+        dropPool();
         return fail(RbfVkStatus::DeviceError, "RBF evaluation state setup failed");
+    }
     RbfVkStatus status = Evaluate(cvsBuf, outBuf, count);
-    if (status != RbfVkStatus::Ok) return status;
+    if (status != RbfVkStatus::Ok) {
+        dropPool();
+        return status;
+    }
     status = Finish();
-    if (status != RbfVkStatus::Ok) return status;
-    if (ReadBytes(d, *outBuf, bi.size, out) != VK_SUCCESS)
+    // Finish proves the fences idle before reporting Ok, so the pair is
+    // idle and safe to pool; any other outcome drops the pair
+    // (conservative: NonFinite proved idle too, but it is a cold path).
+    if (status != RbfVkStatus::Ok) {
+        dropPool();
+        return status;
+    }
+    if (ReadBytes(d, *outBuf, bi.size, out) != VK_SUCCESS) {
+        dropPool();
         return fail(RbfVkStatus::DeviceError, "RBF evaluation completion query failed");
+    }
+    if (!reused) {
+        native.hostStageCvs = std::move(cvsBuf);
+        native.hostStageOut = std::move(outBuf);
+        native.hostStageCount = count;
+    }
     return RbfVkStatus::Ok;
 }
 
