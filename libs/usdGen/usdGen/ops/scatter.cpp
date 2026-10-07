@@ -396,19 +396,23 @@ bool UsdGenScatterOp::Capture(
     for (size_t p = 0; p <= partitions; ++p)
         rangeStart[p] = (p * faceCount) / partitions;
     // Unrestricted corner bases: the serial loop's runBase at fi is the
-    // face-vertex prefix sum below fi, so one serial pass over fvc fixes
-    // every range's starting base (P+1 stores, no 8MB table). Restricted
-    // capture keeps reading cornerOff directly, as before.
+    // face-vertex prefix sum below fi. Each range sums its own fvc slice
+    // on its worker and one serial prefix over the <= 8 range sums fixes
+    // every range's starting base (P+1 stores, no 8MB table). Integer
+    // addition is exact in any order, so the bases match the serial
+    // spelling bit-for-bit, empty ranges included. Restricted capture
+    // keeps reading cornerOff directly, as before.
     std::vector<size_t> rangeBase(partitions + 1, 0);
     if (partitions > 1 && !restricted) {
-        size_t base = 0, p = 0;
-        for (size_t fi = 0; fi < faceCount; ++fi) {
-            while (p <= partitions && rangeStart[p] == fi)
-                rangeBase[p++] = base;
-            base += size_t(fvc[fi]);
-        }
-        while (p <= partitions)
-            rangeBase[p++] = base;
+        std::vector<size_t> rangeSum(partitions, 0);
+        ScatterParallelFor(ctx.dispatcher, partitions, [&](size_t p) {
+            size_t s = 0;
+            for (size_t fi = rangeStart[p]; fi < rangeStart[p + 1]; ++fi)
+                s += size_t(fvc[fi]);
+            rangeSum[p] = s;
+        });
+        for (size_t p = 0; p < partitions; ++p)
+            rangeBase[p + 1] = rangeBase[p] + rangeSum[p];
     }
     auto emitRange = [&](size_t fi0, size_t fi1, size_t cbase0,
                          ScatterEmission &e, ScatterEmitError &err) {
