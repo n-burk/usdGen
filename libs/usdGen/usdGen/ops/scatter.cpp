@@ -838,13 +838,30 @@ bool UsdGenScatterOp::Capture(
     // uninitialized storage. clear() first keeps a reused capture exact:
     // resize alone is a no-op at equal size and would leave stale data.
     // Every plane is trivially copyable, so placement-new is a plain store.
-    auto gather = [perm, N](auto &arr, auto const *src) {
+    // Chunked over workers for big captures (same N>32768 rule as the
+    // morton keys): every output slot is independent (disjoint writes,
+    // shared-readonly perm), so any chunking writes identical bytes.
+    size_t const gatherChunks =
+        (workers > 1 && N > 32768) ? std::min({size_t(workers), size_t(8), N})
+                                   : 1;
+    UsdGenWorkDispatcher *gatherDispatcher = ctx.dispatcher;
+    auto gather = [perm, N, gatherChunks, gatherDispatcher](auto &arr, auto const *src) {
         using T = typename std::decay_t<decltype(arr)>::value_type;
         arr.clear();
-        arr.resize(N, [perm, src](T *b, T *e) {
-            size_t i = 0;
-            for (T *d = b; d != e; ++d, ++i)
-                new (d) T(src[perm[i]]);
+        arr.resize(N, [perm, src, gatherChunks, gatherDispatcher](T *b, T *e) {
+            if (gatherChunks == 1) {
+                size_t i = 0;
+                for (T *d = b; d != e; ++d, ++i)
+                    new (d) T(src[perm[i]]);
+                return;
+            }
+            size_t const M = size_t(e - b);
+            ScatterParallelFor(gatherDispatcher, gatherChunks, [&](size_t c) {
+                size_t const i0 = (c * M) / gatherChunks;
+                size_t const i1 = ((c + 1) * M) / gatherChunks;
+                for (size_t i = i0; i < i1; ++i)
+                    new (b + i) T(src[perm[i]]);
+            });
         });
     };
     gather(buf.px, ax.data());
@@ -856,7 +873,23 @@ bool UsdGenScatterOp::Capture(
     gather(buf.rootT, aT.data());
     gather(buf.rootN, aN.data());
     gather(buf.rootB, aB.data());
-    buf.hairT = VtFloatArray(N, 0.0f);
+    // Same chunking for the zero plane: clear + uninitialized resize with
+    // a zero filler (identical bytes to VtFloatArray(N, 0.0f)).
+    buf.hairT.clear();
+    buf.hairT.resize(N, [gatherChunks, gatherDispatcher](float *b, float *e) {
+        if (gatherChunks == 1) {
+            for (float *d = b; d != e; ++d)
+                new (d) float(0.0f);
+            return;
+        }
+        size_t const M = size_t(e - b);
+        ScatterParallelFor(gatherDispatcher, gatherChunks, [&](size_t c) {
+            size_t const i0 = (c * M) / gatherChunks;
+            size_t const i1 = ((c + 1) * M) / gatherChunks;
+            for (size_t i = i0; i < i1; ++i)
+                new (b + i) float(0.0f);
+        });
+    });
     return true;
 }
 
