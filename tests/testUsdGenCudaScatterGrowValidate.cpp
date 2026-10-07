@@ -825,5 +825,28 @@ static bool CheckThreadedResolve()
         if (!CheckResolveCase(r, c, ScatterGrowStatus::DuplicateStableId, 0))
             return false;
     }
+    // Constant low digit in every shard (r31): folds share their low 16
+    // bits within each shard (fold s + 65536*j lands in shard s) while
+    // the high digits vary, so every shard's pass 0 is the identity and
+    // pass 1 still sorts. Balanced 5K/shard, so the sharded path runs.
+    {
+        auto r = Roots(n);
+        for (size_t i = 0; i < n; ++i)
+            r->stableIds[i] = uint64_t((i % 8) + 65536 * (i / 8));
+        if (!CheckResolveCase(r, c, ScatterGrowStatus::Ok, n * 8))
+            return false;
+    }
+    // ... with a dup pair parked non-adjacently in shard 0 (indices 0
+    // and 16: positions 0 and 2 in shard-input order), so only the
+    // pass-1 sort groups them. Skipping pass 1 (or a broken folded
+    // vary) reports Ok instead of DuplicateStableId.
+    {
+        auto r = Roots(n);
+        for (size_t i = 0; i < n; ++i)
+            r->stableIds[i] = uint64_t((i % 8) + 65536 * (i / 8));
+        r->stableIds[16] = r->stableIds[0];
+        if (!CheckResolveCase(r, c, ScatterGrowStatus::DuplicateStableId, 0))
+            return false;
+    }
     return true;
 }
