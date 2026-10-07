@@ -13,6 +13,14 @@
 // static-vs-deform delta is the per-frame publish+re-upload+redraw cost.
 // --static measures the static pose only. --deform-only skips the trailing
 // static baseline (for memory-capped boxes; run --static separately).
+// --dump-ppm PATH writes the last frame's color AOV as a binary PPM
+// (debug only). USDGEN_BENCH_STATS=1 prints every numeric GetRenderStats
+// counter to stderr after each run.
+//
+// The bench renders the stage pseudo-root with an explicit full-buffer
+// framing: the Key/Fill lights are siblings of the groom (a Groom-rooted
+// render shades exact-black), and without SetFraming the engine draws an
+// empty data window (all-clear image) even with a valid camera.
 //
 // Novel vs cached deform: run with warmup+frames == scene span (RBF scenes
 // span 12: --warmup 2 --frames 10; surface scenes span 4: --warmup 1
@@ -41,6 +49,7 @@
 // TF_DEBUG=USDGEN_COMMIT instrumented run.
 #include "eglctx.h"
 
+#include "pxr/base/gf/half.h"
 #include "pxr/base/gf/vec2i.h"
 #include "pxr/base/tf/stringUtils.h"
 #include "pxr/base/tf/token.h"
@@ -49,6 +58,7 @@
 #include "pxr/base/trace/reporterDataSourceCollector.h"
 #include "pxr/base/vt/dictionary.h"
 #include "pxr/base/vt/value.h"
+#include "pxr/imaging/cameraUtil/framing.h"
 #include "pxr/imaging/hd/driver.h"
 #include "pxr/imaging/hd/renderBuffer.h"
 #include "pxr/imaging/hd/rendererPluginRegistry.h"
@@ -235,8 +245,13 @@ bool OpenScene(const std::string& path, Scene* out)
 {
     out->stage = UsdStage::Open(path);
     if (!out->stage) return false;
-    UsdPrim def = out->stage->GetDefaultPrim();
-    out->root = def ? def : out->stage->GetPseudoRoot();
+    // Render the whole stage, not the Groom default prim: the Key/Fill
+    // DistantLights are siblings of the groom, and a Groom-rooted render
+    // excludes them, so the hair shades exact-black (NUM_LIGHTS == 0) and
+    // the checksum verifies a single artifact pixel. The Guides sibling is
+    // purpose=guide so it stays out of the render; the Drivers live inside
+    // the groom and were always rendered (black, now lit).
+    out->root = out->stage->GetPseudoRoot();
     for (const UsdPrim& p : UsdPrimRange(out->stage->GetPseudoRoot())) {
         if (p.IsA<UsdGeomCamera>() && out->camPath.IsEmpty())
             out->camPath = p.GetPath();
@@ -340,6 +355,11 @@ RunResult Measure(UsdImagingGLEngine* engine, const Scene& scene, int frames,
         }
     }
     Flatten(engine->GetRenderStats(), "", &rr.stats);
+    if (std::getenv("USDGEN_BENCH_STATS")) {
+        for (const auto& kv : rr.stats.numeric)
+            std::fprintf(stderr, "stat: %s = %.6g\n", kv.first.c_str(),
+                         kv.second);
+    }
     if (wantChecksum) {
         if (glFinish) glFinish();
         HdRenderBuffer* rb = engine->GetAovRenderBuffer(HdAovTokens->color);
@@ -359,6 +379,49 @@ RunResult Measure(UsdImagingGLEngine* engine, const Scene& scene, int frames,
         }
     }
     return rr;
+}
+
+// Dumps the current color AOV to a binary PPM (structure/debug only).
+bool DumpPpm(UsdImagingGLEngine* engine, const std::string& path,
+             PFNGLFINISH glFinish)
+{
+    if (glFinish) glFinish();
+    HdRenderBuffer* rb = engine->GetAovRenderBuffer(HdAovTokens->color);
+    if (!rb) return false;
+    void* mapped = rb->Map();
+    if (!mapped) return false;
+    const int W = rb->GetWidth(), H = rb->GetHeight();
+    const HdFormat fmt = rb->GetFormat();
+    std::vector<uint8_t> rgb((size_t)W * H * 3, 0);
+    if (fmt == HdFormatUNorm8Vec4) {
+        const uint8_t* s = (const uint8_t*)mapped;
+        for (int i = 0; i < W * H; ++i) {
+            rgb[3 * i] = s[4 * i]; rgb[3 * i + 1] = s[4 * i + 1];
+            rgb[3 * i + 2] = s[4 * i + 2];
+        }
+    } else if (fmt == HdFormatFloat16Vec4 || fmt == HdFormatFloat32Vec4) {
+        const bool half = fmt == HdFormatFloat16Vec4;
+        for (int i = 0; i < W * H; ++i) {
+            for (int c = 0; c < 3; ++c) {
+                float v;
+                if (half)
+                    v = ((const GfHalf*)mapped)[4 * i + c];
+                else
+                    v = ((const float*)mapped)[4 * i + c];
+                v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+                rgb[3 * i + c] = (uint8_t)(v * 255.0f + 0.5f);
+            }
+        }
+    } else {
+        rb->Unmap();
+        return false;
+    }
+    rb->Unmap();
+    std::ofstream ofs(path, std::ios::binary);
+    if (!ofs) return false;
+    ofs << "P6\n" << W << " " << H << "\n255\n";
+    ofs.write((const char*)rgb.data(), rgb.size());
+    return !!ofs;
 }
 
 void AppendMs(std::string* j, const char* name,
@@ -414,6 +477,7 @@ int main(int argc, char** argv)
 {
     std::string scenePath, jsonOut = "usdGenShaderRender.json";
     std::string traceOut;  // --trace PATH: chrome trace of the deform run only
+    std::string dumpPpm;   // --dump-ppm PATH: last-frame color AOV as PPM
     const char* mode = nullptr;  // null = deform when animated, else static
     // --deform-only: skip the trailing same-invocation static baseline, so a
     // memory-capped box can afford the deform cooks alone (each cook retains
@@ -446,11 +510,13 @@ int main(int argc, char** argv)
         else if (a == "--json") jsonOut = next("--json");
         else if (a == "--trace") traceOut = next("--trace");
         else if (a == "--deform-only") deformOnly = true;
+        else if (a == "--dump-ppm") dumpPpm = next("--dump-ppm");
         else {
             std::fprintf(stderr,
                 "usage: benchUsdGenShaderRender --scene PATH [--static|--deform]"
                 " [--res WxH] [--refine N] [--frames N] [--warmup N]"
-                " [--repeats N] [--json OUT] [--trace PATH] [--deform-only]\n");
+                " [--repeats N] [--json OUT] [--trace PATH] [--deform-only]"
+                " [--dump-ppm PATH]\n");
             return 2;
         }
     }
@@ -483,6 +549,9 @@ int main(int argc, char** argv)
 
     UsdImagingGLEngine engine(HdDriver(), TfToken("HdStormRendererPlugin"), true);
     engine.SetEnablePresentation(false);
+    // Framing is mandatory: without it the engine renders an empty data
+    // window (all-clear image) even with a valid camera and populated stage.
+    engine.SetFraming(CameraUtilFraming(GfRect2i(GfVec2i(0), w, h)));
     engine.SetRenderBufferSize(GfVec2i(w, h));
     engine.SetRendererSetting(TfToken("collectStats"), VtValue(true));
     engine.SetRendererAov(HdAovTokens->color);
@@ -567,6 +636,13 @@ int main(int argc, char** argv)
                     Num(sMed).c_str(), Num(sSub).c_str(),
                     Num(sMed - sSub).c_str(),
                     rrStatic.checksum.empty() ? "-" : rrStatic.checksum.c_str());
+    }
+
+    if (!dumpPpm.empty()) {
+        if (DumpPpm(&engine, dumpPpm, glFinish))
+            std::printf("dumped %s\n", dumpPpm.c_str());
+        else
+            std::fprintf(stderr, "WARN: cannot dump %s\n", dumpPpm.c_str());
     }
 
     while (!json.empty() && (json.back() == '\n' || json.back() == ',' ||

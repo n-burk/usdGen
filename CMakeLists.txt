@@ -4288,6 +4288,21 @@ set_tests_properties(benchUsdGenShaderRender PROPERTIES
     LABELS "T2;perf"
     ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 
+# The bench must draw a non-empty frame: it once skipped SetFraming (empty
+# data window) and rooted the render at the Groom prim (excluding the
+# Key/Fill lights), so every checksum verified a single artifact pixel.
+# Renders sr010k once via --dump-ppm and fails on a (near-)clear frame.
+# Skips (77) without the bench binary or a headless EGL context.
+usdgen_add_unix_only_test(testUsdGenShaderBenchFrame "${_usdgen_test_python}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/checks/check_shader_bench_frame.py"
+    "$<TARGET_FILE:benchUsdGenShaderRender>"
+    "${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/sr010k.usda")
+set_tests_properties(testUsdGenShaderBenchFrame PROPERTIES
+    LABELS "T2;perf" TIMEOUT 300
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+    SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+
 # Groom fixtures G1-G5 (S-1/S-5/S-6/S-12/E-5 scenes): pure-text output of
 # usd/fixtures/make_fixtures.py (stdlib only, no pxr), so T2 stays
 # self-contained wherever python3 exists. Regeneration is byte-identical
