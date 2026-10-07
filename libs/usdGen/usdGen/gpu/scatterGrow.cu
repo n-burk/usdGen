@@ -689,19 +689,66 @@ ScatterGrowStatus CudaScatterGrow::ValidateRoots(
         *maxBits = mx;
         return lim;
     };
+    // Threaded finite-input scans for big inputs (same n>32768 rule
+    // as the dup leg; small inputs keep the serial spelling): each
+    // plane's scan is an independent function of its own plane, and
+    // the serial lim-threading only bounds work -- firstBad(u, lim)
+    // is min(firstBad(u, n), lim) -- so scanning every plane at lim=n
+    // and min-combining is verdict-identical. The positions scan is
+    // byte-for-byte the serial call (same lim=n it always ran with),
+    // so posMaxBits is identical too. Plain TBB.
     size_t fBad = n;
     uint32_t posMaxBits = 0;
-    fBad = firstBadRootMax(
-        reinterpret_cast<uint32_t const *>(r->positions.data()), n, 3, fBad,
-        &posMaxBits);
-    fBad = firstBadRoot(
-        reinterpret_cast<uint32_t const *>(r->rootUV.data()), n, 2, fBad);
-    fBad = firstBadRoot(
-        reinterpret_cast<uint32_t const *>(r->rootT.data()), n, 3, fBad);
-    fBad = firstBadRoot(
-        reinterpret_cast<uint32_t const *>(r->rootB.data()), n, 3, fBad);
-    fBad = firstBadRoot(
-        reinterpret_cast<uint32_t const *>(r->rootN.data()), n, 3, fBad);
+    uint32_t const *posW =
+        reinterpret_cast<uint32_t const *>(r->positions.data());
+    uint32_t const *uvW =
+        reinterpret_cast<uint32_t const *>(r->rootUV.data());
+    uint32_t const *tW =
+        reinterpret_cast<uint32_t const *>(r->rootT.data());
+    uint32_t const *bW =
+        reinterpret_cast<uint32_t const *>(r->rootB.data());
+    uint32_t const *nW =
+        reinterpret_cast<uint32_t const *>(r->rootN.data());
+    int const scanWorkers = tbb::this_task_arena::max_concurrency();
+    if (scanWorkers > 1 && n > 32768) {
+        size_t planeBad[5] = {n, n, n, n, n};
+        uint32_t planeMax = 0;
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, 5),
+            [&](tbb::blocked_range<size_t> const &range) {
+                for (size_t i = range.begin(); i != range.end(); ++i) {
+                    switch (i) {
+                    case 0: {
+                        uint32_t mx = 0;
+                        planeBad[0] =
+                            firstBadRootMax(posW, n, 3, n, &mx);
+                        planeMax = mx;
+                        break;
+                    }
+                    case 1:
+                        planeBad[1] = firstBadRoot(uvW, n, 2, n);
+                        break;
+                    case 2:
+                        planeBad[2] = firstBadRoot(tW, n, 3, n);
+                        break;
+                    case 3:
+                        planeBad[3] = firstBadRoot(bW, n, 3, n);
+                        break;
+                    default:
+                        planeBad[4] = firstBadRoot(nW, n, 3, n);
+                        break;
+                    }
+                }
+            });
+        posMaxBits = planeMax;
+        for (int i = 0; i < 5; ++i)
+            fBad = planeBad[i] < fBad ? planeBad[i] : fBad;
+    } else {
+        fBad = firstBadRootMax(posW, n, 3, fBad, &posMaxBits);
+        fBad = firstBadRoot(uvW, n, 2, fBad);
+        fBad = firstBadRoot(tW, n, 3, fBad);
+        fBad = firstBadRoot(bW, n, 3, fBad);
+        fBad = firstBadRoot(nW, n, 3, fBad);
+    }
     // Duplicate leg: minimum second-occurrence index (radix; the set
     // form only past 32-bit index range).
     size_t const dBad = n > uint64_t(std::numeric_limits<uint32_t>::max())
