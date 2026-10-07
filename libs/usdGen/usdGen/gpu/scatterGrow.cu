@@ -1,6 +1,9 @@
 #include "scatterGrow.h"
 #include "cudaCompat.h"
 
+#include "tbb/parallel_for.h"
+#include "tbb/task_arena.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -105,34 +108,130 @@ size_t RadixFirstDup(uint64_t const* ids, size_t n) {
     std::unique_ptr<uint64_t[]> items(new uint64_t[n]);
     std::unique_ptr<uint64_t[]> tmpItems(new uint64_t[n]);
     std::unique_ptr<uint32_t[]> counts(new uint32_t[65536]);
+    // Threaded pack + radix passes for big inputs (same n>32768 rule
+    // the Capture sort uses; small inputs keep the serial spelling):
+    // the pack writes disjoint slots with an order-free |/& reduction,
+    // and each counting pass histograms per-chunk, prefixes once over
+    // the chunk-major tables in chunk order, and scatters each chunk's
+    // range in input order -- within a digit the landing order is chunk
+    // order then input order, exactly the serial scatter's order, so
+    // any chunking sorts bit-identically and the resolve below reads
+    // the same array. Plain TBB (validate runs outside any arena).
+    int const dupWorkers = tbb::this_task_arena::max_concurrency();
+    size_t const dupChunks =
+        (dupWorkers > 1 && n > 32768)
+            ? std::min({size_t(dupWorkers), size_t(8), n})
+            : 1;
     uint32_t orKeys = 0, andKeys = ~uint32_t(0);
-    for (size_t i = 0; i < n; ++i) {
-        uint64_t const id = ids[i];
-        uint32_t const key = uint32_t(id) ^ uint32_t(id >> 32);
-        items[i] = (uint64_t(key) << 32) | uint32_t(i);
-        orKeys |= key;
-        andKeys &= key;
+    uint64_t* itemOut = items.get();
+    if (dupChunks == 1) {
+        for (size_t i = 0; i < n; ++i) {
+            uint64_t const id = ids[i];
+            uint32_t const key = uint32_t(id) ^ uint32_t(id >> 32);
+            itemOut[i] = (uint64_t(key) << 32) | uint32_t(i);
+            orKeys |= key;
+            andKeys &= key;
+        }
+    } else {
+        struct DupPackPartial { uint32_t orKeys = 0, andKeys = ~uint32_t(0); };
+        std::vector<DupPackPartial> partial(dupChunks);
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, dupChunks),
+            [&](tbb::blocked_range<size_t> const& range) {
+                for (size_t c = range.begin(); c != range.end(); ++c) {
+                    size_t const i0 = (c * n) / dupChunks;
+                    size_t const i1 = ((c + 1) * n) / dupChunks;
+                    uint32_t orLocal = 0, andLocal = ~uint32_t(0);
+                    for (size_t i = i0; i < i1; ++i) {
+                        uint64_t const id = ids[i];
+                        uint32_t const key =
+                            uint32_t(id) ^ uint32_t(id >> 32);
+                        itemOut[i] = (uint64_t(key) << 32) | uint32_t(i);
+                        orLocal |= key;
+                        andLocal &= key;
+                    }
+                    partial[c].orKeys = orLocal;
+                    partial[c].andKeys = andLocal;
+                }
+            });
+        for (auto const& p : partial) {
+            orKeys |= p.orKeys;
+            andKeys &= p.andKeys;
+        }
     }
     uint64_t* w = items.get();
     uint64_t* wOut = tmpItems.get();
     uint32_t* cnt = counts.get();
     uint32_t const vary = orKeys ^ andKeys;
+    // Per-chunk histograms + scatter offsets for the threaded passes
+    // (chunk-major [c * 65536 + d], each chunk's worker touching only
+    // its own region). Fresh per call, uninitialized like the item
+    // arrays: pooling them across calls measures slower (4/4 A/B pairs
+    // favor fresh; the allocator recycles the same hot pages anyway).
+    // Every counts slot is filled each pass and every offset slot is
+    // prefixed, so no contents leak anywhere.
+    std::unique_ptr<uint32_t[]> parCnt, parOff;
+    if (dupChunks > 1) {
+        size_t const need = dupChunks * 65536;
+        parCnt.reset(new uint32_t[need]);
+        parOff.reset(new uint32_t[need]);
+    }
     for (int pass = 0; pass < 2; ++pass) {
         int const shift = 32 + pass * 16;
         if (((vary >> (pass * 16)) & 0xffffu) == 0) continue;
-        std::fill(cnt, cnt + 65536, uint32_t(0));
-        for (size_t i = 0; i < n; ++i)
-            ++cnt[uint32_t(w[i] >> shift) & 0xffffu];
-        uint32_t sum = 0;
-        for (size_t c = 0; c < 65536; ++c) {
-            uint32_t const t = cnt[c];
-            cnt[c] = sum;
-            sum += t;
-        }
-        for (size_t i = 0; i < n; ++i) {
-            uint64_t const wi = w[i];
-            size_t const d = (uint32_t(wi >> shift)) & 0xffffu;
-            wOut[cnt[d]++] = wi;
+        if (dupChunks == 1) {
+            std::fill(cnt, cnt + 65536, uint32_t(0));
+            for (size_t i = 0; i < n; ++i)
+                ++cnt[uint32_t(w[i] >> shift) & 0xffffu];
+            uint32_t sum = 0;
+            for (size_t c = 0; c < 65536; ++c) {
+                uint32_t const t = cnt[c];
+                cnt[c] = sum;
+                sum += t;
+            }
+            for (size_t i = 0; i < n; ++i) {
+                uint64_t const wi = w[i];
+                size_t const d = (uint32_t(wi >> shift)) & 0xffffu;
+                wOut[cnt[d]++] = wi;
+            }
+        } else {
+            uint32_t* cntBase = parCnt.get();
+            uint32_t* offBase = parOff.get();
+            std::fill(cntBase, cntBase + dupChunks * 65536, uint32_t(0));
+            uint64_t const* wIn = w;
+            tbb::parallel_for(tbb::blocked_range<size_t>(0, dupChunks),
+                [&](tbb::blocked_range<size_t> const& range) {
+                    for (size_t c = range.begin(); c != range.end(); ++c) {
+                        size_t const i0 = (c * n) / dupChunks;
+                        size_t const i1 = ((c + 1) * n) / dupChunks;
+                        uint32_t* hc = cntBase + c * 65536;
+                        for (size_t i = i0; i < i1; ++i)
+                            ++hc[uint32_t(wIn[i] >> shift) & 0xffffu];
+                    }
+                });
+            uint32_t sum = 0;
+            for (size_t d = 0; d < 65536; ++d) {
+                for (size_t c = 0; c < dupChunks; ++c) {
+                    size_t const s = c * 65536 + d;
+                    uint32_t const t = cntBase[s];
+                    offBase[s] = sum;
+                    sum += t;
+                }
+            }
+            uint64_t* oOut = wOut;
+            tbb::parallel_for(tbb::blocked_range<size_t>(0, dupChunks),
+                [&](tbb::blocked_range<size_t> const& range) {
+                    for (size_t c = range.begin(); c != range.end(); ++c) {
+                        size_t const i0 = (c * n) / dupChunks;
+                        size_t const i1 = ((c + 1) * n) / dupChunks;
+                        uint32_t* off = offBase + c * 65536;
+                        for (size_t i = i0; i < i1; ++i) {
+                            uint64_t const wi = wIn[i];
+                            size_t const dd =
+                                (uint32_t(wi >> shift)) & 0xffffu;
+                            oOut[off[dd]++] = wi;
+                        }
+                    }
+                });
         }
         std::swap(w, wOut);
     }
