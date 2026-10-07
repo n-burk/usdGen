@@ -212,34 +212,34 @@ __global__ void verifyKernel(const int* a, const int* b, size_t words, int* flag
     for (size_t i = size_t(blockIdx.x) * size_t(blockDim.x) + threadIdx.x; i < words; i += stride)
         if (a[i] != b[i]) *flag = 1;
 }
-// Bind-memo digest: FNV-1a/64 over the rest samples as float words.
-// Single-block launch (every caller uses <<<1,256>>>): each lane folds
-// its grid-stride words, lane 0 chains the 256 lane digests byte-wise in
-// lane order, and one store lands the digest. The combination order is
-// fixed, so identical words always digest identically whatever the
-// occupancy; the memo key pairs this with the shape and smoothing.
-__global__ void bindDigestKernel(const float3* p, int n, unsigned long long* out) {
-    __shared__ unsigned long long part[256];
-    unsigned long long h = 1469598103934665603ULL;
-    size_t const words = size_t(n) * 3;
-    auto const* w = reinterpret_cast<unsigned int const*>(p);
-    for (size_t i = size_t(threadIdx.x); i < words; i += 256) {
-        h ^= w[i];
-        h *= 1099511628211ULL;
-    }
-    part[threadIdx.x] = h;
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        unsigned long long d = 1469598103934665603ULL;
-        for (int t = 0; t < 256; ++t) {
-            unsigned long long v = part[t];
-            for (int b = 0; b < 8; ++b) {
-                d ^= (v >> (b * 8)) & 0xFFu;
-                d *= 1099511628211ULL;
-            }
+// Bind-memo digest: FNV-1a/64 over the rest samples as float words. The
+// probe copies the caller's rest words to pinned staging and hashes them
+// on the host instead of launching a digest kernel, trading a ~20us
+// kernel (launch latency dominates the 1.2KB hash) for a ~3us copy. Each
+// of 256 lanes folds its grid-stride words, then lane 0's serial pass
+// chains the lane digests byte-wise in lane order; the combination order
+// is fixed, so identical words always digest identically. Integers only,
+// so the value is exact on any evaluator; the memo key pairs this with
+// the shape and smoothing.
+uint64_t BindDigestHost(uint32_t const* w, size_t words) {
+    uint64_t part[256];
+    for (int t = 0; t < 256; ++t) {
+        uint64_t h = 1469598103934665603ULL;
+        for (size_t i = size_t(t); i < words; i += 256) {
+            h ^= uint64_t(w[i]);
+            h *= 1099511628211ULL;
         }
-        *out = d;
+        part[t] = h;
     }
+    uint64_t d = 1469598103934665603ULL;
+    for (int t = 0; t < 256; ++t) {
+        uint64_t v = part[t];
+        for (int b = 0; b < 8; ++b) {
+            d ^= (v >> (b * 8)) & 0xFFu;
+            d *= 1099511628211ULL;
+        }
+    }
+    return d;
 }
 // Miss-predicated R fill for the fresh path: the whole verify/fill/eval
 // sequence submits as one stream slice with no host round-trip. On a
@@ -373,7 +373,6 @@ struct CudaRbfBinding::DirectProofs {
     int flag;
     double gram[16];
     int info;
-    unsigned long long bindDigest;
 };
 
 struct CudaRbfBinding::FreshState {
@@ -753,6 +752,7 @@ CudaRbfBinding::~CudaRbfBinding() {
     if (bindGraph_.exec) { cudaGraphExecDestroy(bindGraph_.exec); bindGraph_.exec = nullptr; }
     if (solveGraph_.exec) { cudaGraphExecDestroy(solveGraph_.exec); solveGraph_.exec = nullptr; }
     if (proofHost_) { cudaFreeHost(proofHost_); proofHost_ = nullptr; }
+    if (bindDigestStaging_) { cudaFreeHost(bindDigestStaging_); bindDigestStaging_ = nullptr; bindDigestStagingBytes_ = 0; }
     if (HasUnprovenWork()) { AbandonFresh(); return; }
     if (stateReady_) { cudaEventSynchronize(stateReady_); cudaEventDestroy(stateReady_); }
     if (evalReady_) cudaEventDestroy(evalReady_); if (solver_) cusolverDnDestroy(solver_);
@@ -893,9 +893,26 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
     // and only the identity state is re-established below. The digest reads
     // the caller's samples directly (not rest_, which the skipped copy
     // would have refreshed): a hit proves samples == last samples, and
-    // the last bind copied those into rest_, so rest_ is current.
+    // the last bind copied those into rest_, so rest_ is current. The
+    // probe copies the words to pinned staging and hashes them on the
+    // host: a copy beats a kernel launch for kilobytes.
     bool const memoArmed = bindMemoValid_ && !disableBindMemo.load(std::memory_order_relaxed) &&
         n == bindMemoN_ && smoothing == bindMemoSmoothing_;
+    // Pinned staging for the probe copy, grown on demand. An allocation
+    // failure degrades to the full slice (the memo is an optimization:
+    // losing it must not fail the bind), like a probe that never
+    // submitted.
+    size_t const sampleBytes = size_t(n) * sizeof(float3);
+    auto ensureDigestStaging = [&]() {
+        if (sampleBytes <= bindDigestStagingBytes_) return true;
+        void* grown = nullptr;
+        if (!ok(cudaHostAlloc(&grown, sampleBytes, cudaHostAllocDefault)))
+            return false;
+        if (bindDigestStaging_) cudaFreeHost(bindDigestStaging_);
+        bindDigestStaging_ = grown;
+        bindDigestStagingBytes_ = sampleBytes;
+        return true;
+    };
     // Sticky launch-error preservation: the probe submits and the staging
     // submit below each query the launch status, which drains errors the
     // pre-existing check (below) would otherwise observe. Both values
@@ -903,18 +920,30 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
     // unchanged.
     cudaError_t probeErr = cudaSuccess;
     bool probeStaged = false;
+    uint64_t stagedDigest = 0;
     if (memoArmed) {
-        // Speculative hit work, all ahead of the probe sync: the digest,
-        // the identity memset, and the state marker. The slice never
+        // Speculative hit work, all ahead of the probe sync: the digest
+        // copy, the identity memset, and the state marker. The slice never
         // reads the coefficients the memset zeroes, and the tail below
         // re-zeroes and re-records the marker after a miss, so the
         // speculation is unobservable beyond the saved gaps. A hit then
         // needs no further CUDA calls: the sync proves the memset and the
         // marker already sits past it, exactly as if recorded after the
         // compare.
-        bindDigestKernel<<<1, 256, 0, stream>>>(samples.data, n, &proofDev_->bindDigest);
-        probeErr = cudaGetLastError();
-        bool const probeSetupOk = (probeErr == cudaSuccess) &&
+        // A staging allocation failure skips the probe but leaves
+        // probeErr clear, so the slice below still binds (the memo is an
+        // optimization: losing it degrades, it never fails the bind). A
+        // copy submit failure keeps the old discipline: the slice runs
+        // and the tail check below fails it, exactly as a failed digest
+        // kernel did.
+        bool const staged = ensureDigestStaging();
+        cudaError_t copyRc = cudaSuccess;
+        if (staged)
+            copyRc = cudaMemcpyAsync(bindDigestStaging_, samples.data, sampleBytes,
+                                     cudaMemcpyDeviceToHost, stream);
+        probeErr = !staged ? cudaSuccess
+            : (copyRc == cudaSuccess) ? cudaGetLastError() : copyRc;
+        bool const probeSetupOk = staged && (probeErr == cudaSuccess) &&
             ok(cudaMemsetAsync(coefficients_.data(), 0,
                                coefficients_.size() * sizeof(double), stream)) &&
             ok(cudaEventRecord(stateReady_, stream));
@@ -923,7 +952,10 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
             // nothing; run the full slice, which surfaces any persistent
             // problem the same way as before (a sticky launch error joins
             // the check below; a direct memset/marker error recurs
-            // identically at the tail, with the same verdict).
+            // identically at the tail, with the same verdict). A staging
+            // allocation failure lands here too, and the slice below runs
+            // without it (the tail re-tries the staging, and a second
+            // failure just leaves the memo disarmed).
         } else if (!ok(cudaStreamSynchronize(stream))) {
             // Catastrophe, like the slice sync below: the stream is
             // broken, so the slice could not run either. The graph was
@@ -934,7 +966,9 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
             return fail(RbfStatus::CudaError,"RBF LU status query failed");
         } else {
             probeStaged = true;
-            if (proofHost_->bindDigest == bindDigest_) {
+            stagedDigest = BindDigestHost(
+                static_cast<uint32_t const*>(bindDigestStaging_), size_t(n) * 3);
+            if (stagedDigest == bindDigest_) {
                 bindMemoHits.fetch_add(1, std::memory_order_relaxed);
                 // The extent/gram/LU proofs and center_/scale_ already
                 // hold this bind's proven values (a hit implies the
@@ -948,9 +982,8 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
     }
     // Any slice submit below overwrites the factor buffers before success
     // is known, so the memo disarms here; only the fully proven tail
-    // re-arms it. The probe's digest word (when it ran) is already staged
-    // for the store: the kernel precedes the slice on this stream, so the
-    // slice sync proves it with no added synchronization.
+    // re-arms it. The probe's digest (when it ran) is already staged for
+    // the store: the value hashed above.
     bindMemoValid_ = false;
     // The extent, rank, and LU proofs share one synchronization: the
     // center/scale derive inside the extent kernel (bitwise the host
@@ -969,9 +1002,22 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
     // it then reports purely its own status.
     cudaError_t const sliceLaunchErr = cudaGetLastError();
     bool digestStaged = probeStaged;
+    cudaError_t stageErr = cudaSuccess;
     if (!digestStaged && !disableBindMemo.load(std::memory_order_relaxed)) {
-        bindDigestKernel<<<1, 256, 0, stream>>>(samples.data, n, &proofDev_->bindDigest);
-        digestStaged = (cudaGetLastError() == cudaSuccess);
+        // The copy lands ahead of the slice sync below, which proves it
+        // with no added synchronization; the hash runs after that sync.
+        // A staging allocation failure just leaves the memo disarmed (the
+        // optimization degrades); a copy failure fails the bind at the
+        // check below, exactly as a failed digest kernel did.
+        if (!ensureDigestStaging()) {
+            digestStaged = false;
+        } else {
+            cudaError_t const copyRc = cudaMemcpyAsync(
+                bindDigestStaging_, samples.data, sampleBytes,
+                cudaMemcpyDeviceToHost, stream);
+            stageErr = (copyRc == cudaSuccess) ? cudaGetLastError() : copyRc;
+            digestStaged = (stageErr == cudaSuccess);
+        }
     }
     if(!ok(cudaStreamSynchronize(stream))) {
         // Catastrophe (not a normal error path): the slice may be
@@ -984,14 +1030,18 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
     if(proofHost_->flag) return fail(RbfStatus::NonFiniteInput,"RBF rest samples contain non-finite values");
     center_[0]=(double)proofHost_->extent[0] + ((double)proofHost_->extent[3]-(double)proofHost_->extent[0])*.5; center_[1]=(double)proofHost_->extent[1] + ((double)proofHost_->extent[4]-(double)proofHost_->extent[1])*.5; center_[2]=(double)proofHost_->extent[2] + ((double)proofHost_->extent[5]-(double)proofHost_->extent[2])*.5; scale_=std::max((double)proofHost_->extent[3]-proofHost_->extent[0],std::max((double)proofHost_->extent[4]-proofHost_->extent[1],(double)proofHost_->extent[5]-proofHost_->extent[2]));
     if(!std::isfinite(scale_) || scale_ <= 0.0) return fail(RbfStatus::RankDeficient,"RBF rest samples have zero extent");
-    if(probeErr!=cudaSuccess || sliceLaunchErr!=cudaSuccess || cudaGetLastError()!=cudaSuccess) return fail(RbfStatus::CudaError,"RBF bind launch failed");
+    if(probeErr!=cudaSuccess || stageErr!=cudaSuccess || sliceLaunchErr!=cudaSuccess || cudaGetLastError()!=cudaSuccess) return fail(RbfStatus::CudaError,"RBF bind launch failed");
     double gram[16]; for(int i=0;i<16;++i) gram[i]=proofHost_->gram[i]; // fullAffineRank eliminates in place
     if(!fullAffineRank(gram)) return fail(RbfStatus::RankDeficient,"RBF samples lack numerically full affine 3D support");
     if(proofHost_->info>0) return fail(RbfStatus::RankDeficient,"RBF augmented LU is singular (including coplanar affine support)"); if(proofHost_->info<0)return fail(RbfStatus::SolverError,"RBF LU invalid argument");
     // A newly bound field has the mathematically defined rest (identity) state.
     if(!ok(cudaMemsetAsync(coefficients_.data(),0,coefficients_.size()*sizeof(double),stream)) || !ok(cudaEventRecord(stateReady_,stream))) return fail(RbfStatus::CudaError,"RBF identity-state initialization failed");
     if (digestStaged) {
-        bindDigest_ = proofHost_->bindDigest;
+        // The probe's hash (a miss above) is already in hand; otherwise
+        // the staging copy ahead of the slice sync is proven now, so hash
+        // it. Either value keys the memo identically.
+        bindDigest_ = probeStaged ? stagedDigest : BindDigestHost(
+            static_cast<uint32_t const*>(bindDigestStaging_), size_t(n) * 3);
         bindMemoN_ = n;
         bindMemoSmoothing_ = smoothing;
         bindMemoValid_ = true;

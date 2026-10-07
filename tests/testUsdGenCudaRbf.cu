@@ -471,5 +471,50 @@ int main(){
     assert(msameBits(mreadback(),mout0));
     cudaFree(mr); cudaFree(mp); cudaFree(mc); cudaFree(mo);
   }
+  // Bind-memo staging across shapes: a larger rebind grows the pinned
+  // probe staging (no probe on a shape change), and the rebind after it
+  // probes and hits; shrinking back re-arms the same way. All three
+  // shapes solve and evaluate.
+  {
+    int const g0=64, g1=200;
+    std::vector<float3> grest0(g0), grest1(g1);
+    for(int i=0;i<g0;i++) grest0[size_t(i)]=f(float(i%8),float((i/8)%8),float(i/64)+.01f*float(i%5));
+    for(int i=0;i<g1;i++) grest1[size_t(i)]=f(float(i%8),float((i/8)%8),float(i/64)+.01f*float(i%5));
+    float3 *gr0,*gr1,*gp,*gc,*go;
+    check(cudaMalloc(&gr0,size_t(g0)*sizeof(float3))); check(cudaMalloc(&gr1,size_t(g1)*sizeof(float3)));
+    check(cudaMalloc(&gp,size_t(g1)*sizeof(float3))); check(cudaMalloc(&gc,4*sizeof(float3))); check(cudaMalloc(&go,4*sizeof(float3)));
+    std::vector<float3> gcvs={f(.1f,.2f,.3f),f(.4f,.5f,.6f),f(.7f,.8f,.9f),f(1.1f,1.2f,1.3f)};
+    check(cudaMemcpyAsync(gr0,grest0.data(),size_t(g0)*sizeof(float3),cudaMemcpyHostToDevice,s));
+    check(cudaMemcpyAsync(gr1,grest1.data(),size_t(g1)*sizeof(float3),cudaMemcpyHostToDevice,s));
+    check(cudaMemcpyAsync(gp,grest1.data(),size_t(g1)*sizeof(float3),cudaMemcpyHostToDevice,s));
+    check(cudaMemcpyAsync(gc,gcvs.data(),4*sizeof(float3),cudaMemcpyHostToDevice,s));
+    auto greadback = [&](int count){ std::vector<float3> v(count); check(cudaMemcpyAsync(v.data(),go,size_t(count)*sizeof(float3),cudaMemcpyDeviceToHost,s)); check(cudaStreamSynchronize(s)); return v; };
+    CudaRbfBinding gb;
+    uint64_t gh0=CudaRbfBindMemoHitsForTesting(), gm0=CudaRbfBindMemoMissesForTesting();
+    assert(gb.Bind({gr0,size_t(g0)},0,s)==RbfStatus::Ok);
+    assert(gb.Solve({gr0,size_t(g0)},s)==RbfStatus::Ok);
+    assert(gb.Evaluate({gc,4},{go,4},s)==RbfStatus::Ok); assert(gb.Finish(s)==RbfStatus::Ok);
+    std::vector<float3> gout0=greadback(4);
+    assert(CudaRbfBindMemoHitsForTesting()==gh0 && CudaRbfBindMemoMissesForTesting()==gm0);
+    // Grow past the staging: no probe (shape key mismatch), full slice.
+    assert(gb.Bind({gr1,size_t(g1)},0,s)==RbfStatus::Ok);
+    assert(CudaRbfBindMemoHitsForTesting()==gh0 && CudaRbfBindMemoMissesForTesting()==gm0);
+    assert(gb.Solve({gp,size_t(g1)},s)==RbfStatus::Ok);
+    assert(gb.Evaluate({gc,4},{go,4},s)==RbfStatus::Ok); assert(gb.Finish(s)==RbfStatus::Ok);
+    // Identical rebind at the grown shape probes the grown staging: hit.
+    assert(gb.Bind({gr1,size_t(g1)},0,s)==RbfStatus::Ok);
+    assert(CudaRbfBindMemoHitsForTesting()==gh0+1 && CudaRbfBindMemoMissesForTesting()==gm0);
+    assert(gb.Solve({gp,size_t(g1)},s)==RbfStatus::Ok);
+    assert(gb.Evaluate({gc,4},{go,4},s)==RbfStatus::Ok); assert(gb.Finish(s)==RbfStatus::Ok);
+    // Shrink back: no probe, then a hit again at the small shape.
+    assert(gb.Bind({gr0,size_t(g0)},0,s)==RbfStatus::Ok);
+    assert(CudaRbfBindMemoHitsForTesting()==gh0+1 && CudaRbfBindMemoMissesForTesting()==gm0);
+    assert(gb.Bind({gr0,size_t(g0)},0,s)==RbfStatus::Ok);
+    assert(CudaRbfBindMemoHitsForTesting()==gh0+2 && CudaRbfBindMemoMissesForTesting()==gm0);
+    assert(gb.Solve({gr0,size_t(g0)},s)==RbfStatus::Ok);
+    assert(gb.Evaluate({gc,4},{go,4},s)==RbfStatus::Ok); assert(gb.Finish(s)==RbfStatus::Ok);
+    assert(greadback(4).size()==gout0.size() && std::memcmp(greadback(4).data(),gout0.data(),gout0.size()*sizeof(float3))==0);
+    cudaFree(gr0); cudaFree(gr1); cudaFree(gp); cudaFree(gc); cudaFree(go);
+  }
   cudaFree(dr);cudaFree(dp);cudaFree(do_);cudaStreamDestroy(s);cudaStreamDestroy(s2);
 }

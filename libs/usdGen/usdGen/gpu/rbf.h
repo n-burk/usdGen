@@ -218,16 +218,22 @@ private:
     // Steady-state bind memo: rest is Default-time, so a sync-API caller
     // re-binds bitwise-identical samples every pose. A digest hit skips
     // the factor slice (rest copy, extent, gram, matrix build, LU) and
-    // only re-establishes the identity state. The key is the device-side
-    // FNV-1a digest of the rest words plus the shape and smoothing; a hit
-    // proves the factor buffers still hold this bind's bytes, so every
-    // success-path byte is unchanged. Any slice submit clears the memo
-    // (its writes land before success is known); only a fully proven
-    // bind re-arms it.
+    // only re-establishes the identity state. The key is the FNV-1a
+    // digest of the rest words (hashed on the host from a pinned staging
+    // copy: a copy beats a kernel launch for kilobytes) plus the shape
+    // and smoothing; a hit proves the factor buffers still hold this
+    // bind's bytes, so every success-path byte is unchanged. Any slice
+    // submit clears the memo (its writes land before success is known);
+    // only a fully proven bind re-arms it.
     uint64_t bindDigest_ = 0;
     int bindMemoN_ = 0;
     double bindMemoSmoothing_ = 0.0;
     bool bindMemoValid_ = false;
+    // Pinned staging for the bind-memo probe copy. Grown on demand,
+    // freed with the binding; the digest copy is the only user, so no
+    // reservation accounting applies.
+    void* bindDigestStaging_ = nullptr;
+    size_t bindDigestStagingBytes_ = 0;
     // Zero-copy direct-path proofs: one mapped allocation, read on the host
     // after the stream syncs, so no D2H node (and its ~7us drain bubble)
     // separates the phases. proofDev_ is re-queried if the binding moves.
