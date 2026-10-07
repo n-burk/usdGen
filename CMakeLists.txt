@@ -2927,7 +2927,7 @@ foreach(_t testUsdGenTileContract testUsdGenStockStormContract testUsdGenInvalid
            testUsdGenExpressionPrimConnection testUsdGenViewportOverlay testUsdGenFurOcclusion
            testUsdGenSourceColor testUsdGenLookPrimvars
            testUsdGenInstance testUsdGenReferenceSource testUsdGenPaintLengthRecook
-           testUsdGenDormantGroom)
+           testUsdGenDormantGroom testUsdGenTauPrimvars)
     add_executable(${_t} tests/${_t}.cpp)
     target_link_libraries(${_t} PRIVATE usdGenTestUtilsHd)
     add_test(NAME ${_t} COMMAND ${_t})
@@ -2948,6 +2948,7 @@ set_tests_properties(testUsdGenScenePublication PROPERTIES
 set_tests_properties(testUsdGenDormantGroom PROPERTIES
     LABELS "T1;scheduling;imaging;scene-owner" TIMEOUT 60)
 set_tests_properties(testUsdGenInvalidation PROPERTIES LABELS "T1;gate:SI-2")
+set_tests_properties(testUsdGenTauPrimvars PROPERTIES LABELS "T1;imaging;primvars")
 
 add_test(NAME testUsdGenUnpatchedOpenUsd
     COMMAND ${CMAKE_COMMAND}

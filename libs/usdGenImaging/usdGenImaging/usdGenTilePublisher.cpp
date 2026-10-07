@@ -34,9 +34,6 @@
 #include <string>
 #include <vector>
 
-#include "tbb/parallel_for.h"
-#include "tbb/task_arena.h"
-
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace usdGenImaging {
@@ -112,64 +109,37 @@ _Container(std::vector<TfToken> &&names,
         names.size(), names.data(), values.data());
 }
 
-// Pack a float-triple plane (furTauP/furTauN) into a vec3 primvar buffer.
-// GfVec3f is three contiguous floats, so a memcpy is bit-identical to the
-// scalar loop and vectorizes; the array is left uninitialized before the
-// copy (every element is written), which also skips VtArray's zero-fill.
-VtVec3fArray
-_PackVec3(VtFloatArray const &f, size_t n)
-{
-    static_assert(sizeof(GfVec3f) == 3 * sizeof(float),
-                  "GfVec3f must be three contiguous floats for the pack memcpy");
-    VtVec3fArray packed;
-    packed.resize(n, [](GfVec3f *b, GfVec3f *e) {
-        std::uninitialized_default_construct(b, e);
-    });
-    if (n > 0) {
-        // Through void*: the class-typed form trips -Wclass-memaccess, and
-        // the static_assert above is the real layout guard.
-        std::memcpy(static_cast<void*>(packed.data()),
-                    static_cast<void const*>(f.data()),
-                    n * sizeof(GfVec3f));
+// A zero-copy vec3 view over a float-triple plane (furTauP/furTauN). GfVec3f
+// is three contiguous floats, so the view reads exactly the bytes the pack
+// memcpy used to copy, with no allocation and no copy. The holder keeps the
+// source VtFloatArray (and through it the engine generation) alive until the
+// last view dies; foreign arrays detach on write, so the engine buffer is
+// never mutated through the view.
+class _PlaneVec3Wrap : public Vt_ArrayForeignDataSource {
+public:
+    explicit _PlaneVec3Wrap(VtFloatArray const &src)
+        : Vt_ArrayForeignDataSource(&_Detach), _src(src) {}
+private:
+    static void _Detach(Vt_ArrayForeignDataSource *self) {
+        delete static_cast<_PlaneVec3Wrap *>(self);
     }
-    return packed;
-}
+    VtFloatArray _src;
+};
 
-// The scalp cap's packs (tens of MB) chunked over workers: same uninitialized
-// array + same bytes in the same slots, copied over disjoint byte ranges
-// (mirrors the instancer's _MemcpyChunked). Serial callers only — the tile
-// loop already runs one pack per worker, and nesting would only add task
-// overhead while the arena is saturated.
 VtVec3fArray
-_PackVec3Chunked(VtFloatArray const &f, size_t n)
+_WrapVec3(VtFloatArray const &f, size_t n)
 {
     static_assert(sizeof(GfVec3f) == 3 * sizeof(float),
-                  "GfVec3f must be three contiguous floats for the pack memcpy");
-    VtVec3fArray packed;
-    packed.resize(n, [](GfVec3f *b, GfVec3f *e) {
-        std::uninitialized_default_construct(b, e);
-    });
-    size_t const bytes = n * sizeof(GfVec3f);
-    if (bytes == 0) return packed;
-    int const workers = tbb::this_task_arena::max_concurrency();
-    size_t const chunks =
-        (workers > 1 && bytes > 262144) ? size_t((std::min)(workers, 8)) : 1;
-    auto *d = static_cast<unsigned char *>(static_cast<void *>(packed.data()));
-    auto const *s = static_cast<unsigned char const *>(
-        static_cast<void const *>(f.data()));
-    if (chunks == 1) {
-        std::memcpy(d, s, bytes);
-        return packed;
-    }
-    tbb::parallel_for(tbb::blocked_range<size_t>(0, chunks),
-        [&](tbb::blocked_range<size_t> const &range) {
-            for (size_t c = range.begin(); c != range.end(); ++c) {
-                size_t const b0 = (c * bytes) / chunks;
-                size_t const b1 = ((c + 1) * bytes) / chunks;
-                std::memcpy(d + b0, s + b0, b1 - b0);
-            }
-        });
-    return packed;
+                  "GfVec3f must be three contiguous floats for the vec3 view");
+    static_assert(alignof(GfVec3f) == alignof(float),
+                  "GfVec3f must share float alignment for the vec3 view");
+    if (n == 0 || f.empty()) return VtVec3fArray();
+    // Non-const pointer: the VtArray foreign-source constructor takes
+    // ElementType*. Nothing writes through it (all readers are const, and a
+    // foreign array detaches on write instead of writing through).
+    auto *held = new _PlaneVec3Wrap(f);
+    return VtVec3fArray(held,
+        reinterpret_cast<GfVec3f *>(const_cast<float *>(f.data())), n);
 }
 
 HdContainerDataSourceHandle
@@ -318,11 +288,11 @@ _Assemble(usdGen::UsdGenTilePublication const &tile, bool isGuide,
         }
         if ((plane.name == "furTauP" || plane.name == "furTauN") &&
             plane.arity == 3 && plane.f.size() == totalCvs * 3) {
-            // Pack optical depth into two vec3 buffers. Separate scalars
+            // View optical depth as vec3 (zero-copy). Separate scalars
             // exhaust GL's per-stage SSBO slots on instanced curve draws.
-            VtVec3fArray packed = _PackVec3(plane.f, totalCvs);
+            VtVec3fArray wrapped = _WrapVec3(plane.f, totalCvs);
             _Add(&pvNames, &pvValues, plane.name,
-                 _Primvar(_Samp(packed), plane.interpolation));
+                 _Primvar(_Samp(wrapped), plane.interpolation));
             continue;
         }
         if (plane.type == "int") {
@@ -915,12 +885,11 @@ UsdGenTilePublisher::BuildScalpShadowDataSource(
     }
     for (usdGen::UsdGenPlane const &plane : cap.extraUniform) {
         if (plane.arity != 3 || plane.f.size() != points * 3) continue;
-        // The same vec3 packing a tile's depths get: separate scalar buffers
-        // exhaust GL's per-stage SSBO slots. Chunked: the cap's planes are
-        // tens of MB and this loop is serial.
-        VtVec3fArray packed = _PackVec3Chunked(plane.f, points);
+        // The same vec3 view a tile's depths get: separate scalar buffers
+        // exhaust GL's per-stage SSBO slots.
+        VtVec3fArray wrapped = _WrapVec3(plane.f, points);
         _Add(&pvNames, &pvValues, plane.name,
-             _Primvar(_Samp(packed), plane.interpolation));
+             _Primvar(_Samp(wrapped), plane.interpolation));
     }
     _Add(&names, &values, TfToken("primvars"),
          _Container(std::move(pvNames), std::move(pvValues)));
