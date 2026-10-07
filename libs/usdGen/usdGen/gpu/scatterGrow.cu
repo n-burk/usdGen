@@ -10,6 +10,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -751,6 +752,31 @@ void PushPinnedRelay(int* relay) {
     }
     cudaFreeHost(relay);
 }
+// Cheap prefix of ValidateRoots (verdict-identical): argument checks,
+// plane-size consistency, and the requirements arithmetic. The scan legs
+// below it are the ~1.8ms; BeginFresh spec-allocates from this prefix and
+// overlaps the H2D copies with the scans on a worker thread.
+ScatterGrowStatus PrecheckRoots(
+    std::shared_ptr<const ScatterGrowRoots> const& r, ScatterGrowControls const& c,
+    size_t* n, size_t* total) {
+    if(!r || c.cvCount<2 || c.cvCount>64 || !Finite(c.length)||!Finite(c.randomLo)||
+       !Finite(c.randomHi)||!Finite(c.lift)||!Finite(c.fallbackWidth)||c.length<0||
+       c.randomLo<0||c.randomHi<0||c.fallbackWidth<0 || c.lift < -90.0f ||
+       c.lift > 90.0f || c.direction>ScatterGrowDirection::Literal ||
+       !Finite(c.azimuth) || c.azimuth < -360.0f || c.azimuth > 360.0f ||
+       !Finite(c.azimuthRandom) || c.azimuthRandom < 0.0f || c.azimuthRandom > 1.0f ||
+       (c.direction==ScatterGrowDirection::Literal&&!Finite(c.literalDirection)))
+        return ScatterGrowStatus::InvalidArgument;
+    *n=r->positions.size();
+    if(r->stableIds.size()!=*n||r->rootPrim.size()!=*n||r->rootUV.size()!=*n||
+       r->rootT.size()!=*n||r->rootB.size()!=*n||r->rootN.size()!=*n)
+        return ScatterGrowStatus::InvalidTopology;
+    ScatterGrowRequirements requirements;
+    auto requirementStatus = GetScatterGrowRequirements(*n, c.cvCount, &requirements);
+    if (requirementStatus != ScatterGrowStatus::Ok) return requirementStatus;
+    *total = requirements.pointCount;
+    return ScatterGrowStatus::Ok;
+}
 } // namespace
 
 ScatterGrowStatus GetScatterGrowRequirements(size_t curves, uint32_t cvs,
@@ -857,22 +883,11 @@ ScatterGrowStatus CudaScatterGrow::validate(
 ScatterGrowStatus CudaScatterGrow::ValidateRoots(
     std::shared_ptr<const ScatterGrowRoots> const& r, ScatterGrowControls const& c,
     size_t* total) {
-    if(!r || c.cvCount<2 || c.cvCount>64 || !Finite(c.length)||!Finite(c.randomLo)||
-       !Finite(c.randomHi)||!Finite(c.lift)||!Finite(c.fallbackWidth)||c.length<0||
-       c.randomLo<0||c.randomHi<0||c.fallbackWidth<0 || c.lift < -90.0f ||
-       c.lift > 90.0f || c.direction>ScatterGrowDirection::Literal ||
-       !Finite(c.azimuth) || c.azimuth < -360.0f || c.azimuth > 360.0f ||
-       !Finite(c.azimuthRandom) || c.azimuthRandom < 0.0f || c.azimuthRandom > 1.0f ||
-       (c.direction==ScatterGrowDirection::Literal&&!Finite(c.literalDirection)))
-        return ScatterGrowStatus::InvalidArgument;
-    size_t n=r->positions.size();
-    if(r->stableIds.size()!=n||r->rootPrim.size()!=n||r->rootUV.size()!=n||
-       r->rootT.size()!=n||r->rootB.size()!=n||r->rootN.size()!=n)
-        return ScatterGrowStatus::InvalidTopology;
-    ScatterGrowRequirements requirements;
-    auto requirementStatus = GetScatterGrowRequirements(n, c.cvCount, &requirements);
-    if (requirementStatus != ScatterGrowStatus::Ok) return requirementStatus;
-    *total = requirements.pointCount;
+    size_t n = 0, checkedTotal = 0;
+    ScatterGrowStatus const pre = PrecheckRoots(r, c, &n, &checkedTotal);
+    if (pre != ScatterGrowStatus::Ok)
+        return pre;
+    *total = checkedTotal;
     // Minima-combine validator: the fused loop returned the first fault
     // in index order (finite-inputs, then duplicate, then overflow math
     // within an index), which is the minimum of three first-fault
@@ -1193,7 +1208,31 @@ void CudaScatterGrow::discardPending() noexcept {
 ScatterGrowStatus CudaScatterGrow::BeginFresh(
     std::shared_ptr<const ScatterGrowRoots> roots, ScatterGrowControls controls,
     cudaStream_t stream, UsdGenExecutionMemoryReservation* reserve) {
-    if(pendingWork_||generation_)return ScatterGrowStatus::InvalidArgument; auto s=validateStream(stream); if(s!=ScatterGrowStatus::Ok)return s; if(controls.randomLo>controls.randomHi)std::swap(controls.randomLo,controls.randomHi); size_t total=0; s=validate(roots,controls,&total); if(s!=ScatterGrowStatus::Ok)return s;
+    if(pendingWork_||generation_)return ScatterGrowStatus::InvalidArgument; auto s=validateStream(stream); if(s!=ScatterGrowStatus::Ok)return s; if(controls.randomLo>controls.randomHi)std::swap(controls.randomLo,controls.randomHi);
+    // Big grows overlap the H2D copies (pageable sources: ~1.2ms of
+    // synchronous CPU-side staging per 1M roots) with the validation
+    // scans (~1.8ms) on a worker thread: spec-allocate from the cheap
+    // validation prefix, then copies and scans run side by side. Same
+    // bytes, same stream order, same statuses. Small grows (and null
+    // roots) keep today's exact serial order: validate first, so failure
+    // has no side effects and no spawn/join dwarfs small copies.
+    size_t const peekN = roots ? roots->positions.size() : 0;
+    size_t total = 0;
+    // The small path validates up front (today's order); the big path
+    // defers the scans to the overlap below. The serial branch below
+    // re-checks, so it stays correct if the overlap is ever disabled.
+    bool const validated = peekN <= 65536;
+    if (validated) {
+        s = ValidateRoots(roots, controls, &total);
+        if (s != ScatterGrowStatus::Ok)
+            return s;
+    } else {
+        size_t n = 0;
+        s = PrecheckRoots(roots, controls, &n, &total);
+        if (s != ScatterGrowStatus::Ok)
+            return ValidateRoots(roots, controls, &total);
+    }
+    bool const overlapCopies = peekN > 65536;
     int d=-1; if(cudaGetDevice(&d)!=cudaSuccess)return ScatterGrowStatus::CudaError; if(deviceIndex_<0)deviceIndex_=d;
     Storage in; // temporary input storage, kept alive through terminal proof.
     // Positions alone stage here: ids/prim/uv/frames upload directly into
@@ -1227,10 +1266,77 @@ ScatterGrowStatus CudaScatterGrow::BeginFresh(
     // failure has no completion proof and must quarantine rather than free.
     pendingInput_=std::move(in); unprovenWork_=true;
     *hostError_ = kPendingStatus;
-    e = cudaMemsetAsync(error_.data(), 0, sizeof(int), stream);
-    if (e != cudaSuccess) return Status(e);
-    e=Copy(pendingInput_.points,rootsOwner_->positions.data(),rootsOwner_->positions.size(),stream); if(e==cudaSuccess)e=Copy(pending_.stableIds,rootsOwner_->stableIds.data(),rootsOwner_->stableIds.size(),stream); if(e==cudaSuccess)e=Copy(pending_.rootPrim,rootsOwner_->rootPrim.data(),rootsOwner_->rootPrim.size(),stream); if(e==cudaSuccess)e=Copy(pending_.rootUV,rootsOwner_->rootUV.data(),rootsOwner_->rootUV.size(),stream); if(e==cudaSuccess)e=Copy(pending_.rootT,rootsOwner_->rootT.data(),rootsOwner_->rootT.size(),stream); if(e==cudaSuccess)e=Copy(pending_.rootB,rootsOwner_->rootB.data(),rootsOwner_->rootB.size(),stream); if(e==cudaSuccess)e=Copy(pending_.rootN,rootsOwner_->rootN.data(),rootsOwner_->rootN.size(),stream);
-    if(e!=cudaSuccess) return Status(e);
+    // One spelling for the memset + seven H2D copies, issued serially on
+    // the small path or on the overlap worker below. Stream order is
+    // unchanged either way (memset, copies, kernel).
+    auto issueCopies = [&]() -> cudaError_t {
+        cudaError_t ce = cudaMemsetAsync(error_.data(), 0, sizeof(int), stream);
+        if (ce == cudaSuccess) ce=Copy(pendingInput_.points,rootsOwner_->positions.data(),rootsOwner_->positions.size(),stream); if(ce==cudaSuccess)ce=Copy(pending_.stableIds,rootsOwner_->stableIds.data(),rootsOwner_->stableIds.size(),stream); if(ce==cudaSuccess)ce=Copy(pending_.rootPrim,rootsOwner_->rootPrim.data(),rootsOwner_->rootPrim.size(),stream); if(ce==cudaSuccess)ce=Copy(pending_.rootUV,rootsOwner_->rootUV.data(),rootsOwner_->rootUV.size(),stream); if(ce==cudaSuccess)ce=Copy(pending_.rootT,rootsOwner_->rootT.data(),rootsOwner_->rootT.size(),stream); if(ce==cudaSuccess)ce=Copy(pending_.rootB,rootsOwner_->rootB.data(),rootsOwner_->rootB.size(),stream); if(ce==cudaSuccess)ce=Copy(pending_.rootN,rootsOwner_->rootN.data(),rootsOwner_->rootN.size(),stream);
+        return ce;
+    };
+    if (overlapCopies) {
+        // The worker issues the synchronous staging copies while this
+        // thread runs the validation scans; the join proves both done.
+        // Both threads read rootsOwner_ without mutating it, and the
+        // buffers are untouched on this thread until the join, so no
+        // lock is needed. Copy errors keep today's unproven discipline
+        // (a double fault reports the copy error, not the scan verdict).
+        cudaError_t copyError = cudaSuccess;
+        std::thread copyThread;
+        try {
+            copyThread = std::thread([this, &issueCopies, &copyError]() {
+                cudaError_t ce = cudaSetDevice(deviceIndex_);
+                if (ce == cudaSuccess)
+                    ce = issueCopies();
+                copyError = ce;
+            });
+        } catch (...) {
+            // Nothing issued yet: discard like the pre-issue failures.
+            discardPending();
+            return ScatterGrowStatus::CudaError;
+        }
+        try {
+            s = validate(rootsOwner_, controls, &total);
+        } catch (...) {
+            // Join first (a joinable thread must never unwind past),
+            // then leave the object as clean as today's pre-alloc
+            // validation throw: the join proves the synchronous copies
+            // complete and the sync proves the memset, so discarding is
+            // safe. The throw itself propagates unchanged.
+            copyThread.join();
+            if (cudaStreamSynchronize(stream) == cudaSuccess) {
+                unprovenWork_ = false;
+                discardPending();
+            }
+            throw;
+        }
+        copyThread.join();
+        if (copyError != cudaSuccess) return Status(copyError);
+        if (s != ScatterGrowStatus::Ok) {
+            // The join proves the synchronous copies complete, but the
+            // memset may still be in flight: prove the stream idle before
+            // discarding, so the object stays clean and reusable exactly
+            // like today's pre-alloc validation failure. Failure path only.
+            cudaError_t const syncE = cudaStreamSynchronize(stream);
+            if (syncE != cudaSuccess) return Status(syncE);
+            unprovenWork_ = false;
+            discardPending();
+            return s;
+        }
+    } else {
+        if (!validated) {
+            // Big grow with the overlap disabled: run the scans first,
+            // so the serial branch always validates before copying.
+            // Nothing is issued yet, so a failure discards cleanly.
+            s = validate(rootsOwner_, controls, &total);
+            if (s != ScatterGrowStatus::Ok) {
+                discardPending();
+                return s;
+            }
+        }
+        e = issueCopies();
+        if (e != cudaSuccess) return Status(e);
+    }
     if (!pendingCurves_) {
         e = cudaMemsetAsync(pending_.offsets.data(), 0, sizeof(uint32_t), stream);
         if (e != cudaSuccess) return Status(e);
