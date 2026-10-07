@@ -896,15 +896,47 @@ bool UsdGenScatterOp::Capture(
                     for (size_t i = i0; i < i1; ++i)
                         ++cnt[(keysIn[i] >> shift) & 0xffffu];
                 });
-                uint32_t sum = 0;
-                for (size_t d = 0; d < 65536; ++d) {
-                    for (size_t c = 0; c < sortChunks; ++c) {
-                        size_t const s = c * 65536 + d;
-                        uint32_t const t = cntBase[s];
-                        offBase[s] = sum;
-                        sum += t;
-                    }
-                }
+                // Parallel prefix over digit ranges (bit-identical): the
+                // serial form is a running sum over the (digit, chunk)
+                // table in digit-major order, and every prefix value sits
+                // below 2^32 (root totals cap at uint32 cardinality), so
+                // plain integer associativity lets each worker prefix its
+                // own digit range from that range's base. Phase 1 sums
+                // each range's total on workers, one <=8-element serial
+                // prefix fixes the bases, and phase 2 writes every
+                // range's offsets from its base. Same values in the same
+                // slots at any worker count.
+                size_t const prefixRanges = sortChunks;
+                uint32_t rangeTotal[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+                uint32_t *rangeTotalOut = rangeTotal;
+                uint32_t const *cntIn = cntBase;
+                ScatterParallelFor(ctx.dispatcher, prefixRanges, [&](size_t w) {
+                    size_t const d0 = (w * 65536) / prefixRanges;
+                    size_t const d1 = ((w + 1) * 65536) / prefixRanges;
+                    uint32_t acc = 0;
+                    for (size_t d = d0; d < d1; ++d)
+                        for (size_t c = 0; c < sortChunks; ++c)
+                            acc += cntIn[c * 65536 + d];
+                    rangeTotalOut[w] = acc;
+                });
+                uint32_t rangeOff[8];
+                rangeOff[0] = 0;
+                for (size_t w = 1; w < prefixRanges; ++w)
+                    rangeOff[w] = rangeOff[w - 1] + rangeTotal[w - 1];
+                uint32_t *offOut = offBase;
+                uint32_t const *rbOff = rangeOff;
+                ScatterParallelFor(ctx.dispatcher, prefixRanges, [&](size_t w) {
+                    size_t const d0 = (w * 65536) / prefixRanges;
+                    size_t const d1 = ((w + 1) * 65536) / prefixRanges;
+                    uint32_t sum = rbOff[w];
+                    for (size_t d = d0; d < d1; ++d)
+                        for (size_t c = 0; c < sortChunks; ++c) {
+                            size_t const s = c * 65536 + d;
+                            uint32_t const t = cntIn[s];
+                            offOut[s] = sum;
+                            sum += t;
+                        }
+                });
                 uint32_t const *idxIn = idx;
                 uint64_t *kOut = keysOut;
                 uint32_t *iOut = idxOut;
