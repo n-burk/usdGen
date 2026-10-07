@@ -14,6 +14,8 @@
 #include "usdGen/maps/attributeInstance.h"
 #include "usdGen/maps/attributeMap.h"
 
+#include "tbb/task_arena.h"
+
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -251,6 +253,55 @@ void CheckDeterminismAndDigest()
     CHECK(tuned.kept == 0 && first.kept == 2, "the threshold culls through the digest");
 }
 
+void CheckThreadedEquivalence()
+{
+    // 40K roots sit above the threading threshold: a 1-worker arena
+    // cooks serially while the default arena spreads over workers, and
+    // both must agree bitwise on every field -- planes, slot lists in
+    // strand order, kept total, and digest. (On a single-core machine
+    // both take the serial path; the equivalence still holds.)
+    UsdGenAttributeMapSpec spec;
+    spec.numFaces = 64;
+    spec.resolution = 4;
+    spec.channels = 1;
+    std::string error;
+    auto map = UsdGenAttributeMap::Create(spec, &error);
+    CHECK(static_cast<bool>(map), "threaded-equivalence map builds");
+    for (int f = 0; f < 64; ++f)
+        for (int t = 0; t < 4; ++t)
+            for (int s = 0; s < 4; ++s)
+                map->SetTexel(f, s, t, 0, float((f + s + t) % 100) / 99.0f);
+    UsdGenAttributeInstanceInput input;
+    input.map = map;
+    input.numPrototypes = 4;
+    input.threshold = 0.5f;
+    input.defaultValue = 0.25f;
+    for (int i = 0; i < 40000; ++i) {
+        UsdGenAttributeInstanceRoot root;
+        root.face = i % 64;
+        root.u = float(i % 101) / 100.0f;
+        root.v = float((i * 7) % 101) / 100.0f;
+        if (i % 997 == 0) root.face = -1;         // unreadable: drops
+        if (i % 991 == 0) root.u = std::nanf("");  // unreadable: drops
+        input.roots.push_back(root);
+    }
+    UsdGenAttributeInstanceResult serial, threaded;
+    tbb::task_arena serialArena(1);
+    serialArena.execute([&] {
+        CHECK(UsdGenAttributeCookInstances(input, &serial, &error),
+              "serial cook accepts");
+    });
+    CHECK(UsdGenAttributeCookInstances(input, &threaded, &error),
+          "threaded cook accepts");
+    CHECK(serial.kept > 10000 && serial.kept < 40000,
+          "the equivalence input keeps a strict subset");
+    CHECK(serial.values == threaded.values && serial.keep == threaded.keep &&
+              serial.prototype == threaded.prototype &&
+              serial.instanceIndices == threaded.instanceIndices &&
+              serial.kept == threaded.kept && serial.digest == threaded.digest,
+          "serial and threaded cooks agree bitwise");
+}
+
 }  // namespace
 
 int main()
@@ -261,6 +312,7 @@ int main()
     CheckPrototypes();
     CheckUnreadableRoots();
     CheckDeterminismAndDigest();
+    CheckThreadedEquivalence();
 
     if (g_failures) {
         std::printf("%d failure(s)\n", g_failures);

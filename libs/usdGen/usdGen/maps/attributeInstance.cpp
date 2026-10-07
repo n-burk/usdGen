@@ -4,6 +4,9 @@
 
 #include "usdGen/digest.h"
 
+#include "tbb/parallel_for.h"
+#include "tbb/task_arena.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -76,7 +79,12 @@ bool UsdGenAttributeCookInstances(UsdGenAttributeInstanceInput const &input,
                         size_t(channels) +
                     size_t(channel)];
     };
-    for (size_t i = 0; i < count; ++i) {
+    // Per-root sampler (bit-identical): fills values/keep/prototype for
+    // root i and returns its slot (-1 when dropped). Every root reads
+    // only its own input plus shared-immutable map/params and writes
+    // only its own three output lanes, so any root order -- serial or
+    // chunked over workers -- fills identical planes.
+    auto sampleRoot = [&](size_t i) -> int {
         UsdGenAttributeInstanceRoot const &root = input.roots[i];
         float value = input.defaultValue;
         bool sampled = false;
@@ -132,7 +140,7 @@ bool UsdGenAttributeCookInstances(UsdGenAttributeInstanceInput const &input,
         cooked.keep[i] = kept ? uint8_t(1) : uint8_t(0);
         if (!kept) {
             cooked.prototype[i] = -1;
-            continue;
+            return -1;
         }
         // fminf/fmaxf (bit-identical): kept roots carry non-NaN values
         // (NaN fails the >= threshold above), and for non-NaN inputs
@@ -141,8 +149,63 @@ bool UsdGenAttributeCookInstances(UsdGenAttributeInstanceInput const &input,
         int slot = static_cast<int>(clamped * input.numPrototypes);
         if (slot >= input.numPrototypes) slot = input.numPrototypes - 1;
         cooked.prototype[i] = slot;
-        cooked.instanceIndices[size_t(slot)].push_back(int(i));
-        ++cooked.kept;
+        return slot;
+    };
+    // Threaded sampling over root ranges for big cooks (plain TBB: the
+    // cook API carries no scheduler context): each chunk samples its own
+    // range into the shared planes (disjoint lanes) plus chunk-local
+    // slot lists, which concatenate in chunk order -- chunk ranges are
+    // ascending, so every slot's list matches the serial push order
+    // exactly. kept is an order-free sum. Small cooks, single-worker
+    // arenas, and huge prototype counts (chunk-local lists would fan
+    // out) stay serial. The digest below runs serially either way over
+    // the identical planes, so it is identical too.
+    int const cookWorkers = tbb::this_task_arena::max_concurrency();
+    size_t const cookChunks =
+        (cookWorkers > 1 && count > 32768 && input.numPrototypes <= 4096)
+            ? std::min({size_t(cookWorkers), size_t(8), count})
+            : 1;
+    if (cookChunks == 1) {
+        for (size_t i = 0; i < count; ++i) {
+            int const slot = sampleRoot(i);
+            if (slot < 0) continue;
+            cooked.instanceIndices[size_t(slot)].push_back(int(i));
+            ++cooked.kept;
+        }
+    } else {
+        struct CookChunk {
+            std::vector<std::vector<int>> slots;
+            size_t kept = 0;
+        };
+        std::vector<CookChunk> chunks(cookChunks);
+        size_t const nProto = size_t(input.numPrototypes);
+        size_t const perChunkShare = (perSlot + cookChunks - 1) / cookChunks;
+        for (CookChunk &ch : chunks) {
+            ch.slots.resize(nProto);
+            for (std::vector<int> &slot : ch.slots)
+                slot.reserve(perChunkShare);
+        }
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, cookChunks),
+            [&](tbb::blocked_range<size_t> const &range) {
+                for (size_t c = range.begin(); c != range.end(); ++c) {
+                    size_t const i0 = (c * count) / cookChunks;
+                    size_t const i1 = ((c + 1) * count) / cookChunks;
+                    CookChunk &ch = chunks[c];
+                    for (size_t i = i0; i < i1; ++i) {
+                        int const slot = sampleRoot(i);
+                        if (slot < 0) continue;
+                        ch.slots[size_t(slot)].push_back(int(i));
+                        ++ch.kept;
+                    }
+                }
+            });
+        for (size_t s = 0; s < nProto; ++s) {
+            std::vector<int> &dst = cooked.instanceIndices[s];
+            for (CookChunk const &ch : chunks)
+                dst.insert(dst.end(), ch.slots[s].begin(), ch.slots[s].end());
+        }
+        for (CookChunk const &ch : chunks)
+            cooked.kept += ch.kept;
     }
 
     // FNV-1a over the map digest, the parameters and every assignment.
@@ -174,16 +237,35 @@ bool UsdGenAttributeCookInstances(UsdGenAttributeInstanceInput const &input,
                                 uint64_t(uint32_t(cooked.prototype[i]));
         UsdGenDigestMixWord(h, packed);
     };
-    size_t i = 0;
+    // Threaded over lanes for big cooks (same rule as the sampling):
+    // the four lanes are independent chains over disjoint strided word
+    // sets, so each lane runs on its own worker with the identical word
+    // sequence -- lane states and the combine are bit-identical. The
+    // <=3 tail roots join lane 0 serially after the join, as before.
     size_t const n4 = count & ~size_t(3);
-    for (; i < n4; i += 4) {
-        feed(lane[0], i + 0);
-        feed(lane[1], i + 1);
-        feed(lane[2], i + 2);
-        feed(lane[3], i + 3);
+    if (cookChunks == 1) {
+        size_t i = 0;
+        for (; i < n4; i += 4) {
+            feed(lane[0], i + 0);
+            feed(lane[1], i + 1);
+            feed(lane[2], i + 2);
+            feed(lane[3], i + 3);
+        }
+        for (; i < count; ++i)
+            feed(lane[0], i);
+    } else {
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, 4),
+            [&](tbb::blocked_range<size_t> const &range) {
+                for (size_t l = range.begin(); l != range.end(); ++l) {
+                    uint64_t h = lane[l];
+                    for (size_t i = l; i < n4; i += 4)
+                        feed(h, i);
+                    lane[l] = h;
+                }
+            });
+        for (size_t i = n4; i < count; ++i)
+            feed(lane[0], i);
     }
-    for (; i < count; ++i)
-        feed(lane[0], i);
     cooked.digest = UsdGenDigestCombine4(lane[0], lane[1], lane[2], lane[3]);
 
     *result = std::move(cooked);
