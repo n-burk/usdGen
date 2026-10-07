@@ -1540,6 +1540,13 @@ int main(int argc, char** argv) {
                 off.size() * sizeof(uint32_t));
             auto tgtBuf = Upload(hetContext, tgt.data(), tgt.size() * sizeof(float));
             CHECK(ptsBuf && offBuf && tgtBuf);
+            // Host-visible points: this case covers the direct-map hetero
+            // path (case 20b covers the staged copy).
+            CHECK((ptsBuf->memoryPropertyFlags() &
+                (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+                (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
             auto mkHet = [&]() {
                 DeformPipeline::BeginInfo info;
                 info.points = ptsBuf;
@@ -1569,6 +1576,106 @@ int main(int argc, char** argv) {
             CHECK(bitEq(hetFill, gpuHit));
             CHECK(bitEq(hetHit, gpuHit));
             std::puts("Case 20 (forced hetero bitwise forced GPU): PASS");
+        }
+
+        // Case 20b: staged-copy hetero. Case 20's points are host-visible,
+        // so they map directly; device-local points take the staging copy
+        // instead. Same forced-hetero-vs-forced-GPU bitwise bar on the
+        // 600k/48MiB suffix shape, plus a flags check pinning that the
+        // points really are device-only (else this would re-cover the
+        // direct path).
+        {
+            DeviceContext::CreateInfo dlCi;
+            dlCi.instance = native->instance;
+            dlCi.physicalDevice = native->physical;
+            dlCi.device = native->device;
+            dlCi.computeQueue = native->queue;
+            dlCi.computeQueueFamily = native->family;
+            dlCi.physicalIndex = native->physicalIndex;
+            dlCi.resourceDeviceId = 8041;
+            dlCi.nativeLifetime = native;
+            dlCi.resources = {size_t{48} << 20, 0};
+            dlCi.shaderFloat64Enabled = true;
+            auto dlContext = DeviceContext::Create(dlCi);
+            CHECK(dlContext);
+            VkResult dlstatus = VK_SUCCESS;
+            auto dlPipe = DeformPipeline::Create(dlContext, evalSpv, applySpv,
+                &dlstatus, cacheSpv);
+            CHECK(dlPipe && dlstatus == VK_SUCCESS);
+            auto runForcedDl = [&](int force, DeformPipeline::BeginInfo info,
+                                    std::vector<float>* out) {
+                TestForceDeformHeteroSuffix(force);
+                DeformSemantic sem = DeformSemantic::Ok;
+                auto c = dlPipe->Begin(std::move(info), &dlstatus, &sem);
+                bool ok = c && dlstatus == VK_SUCCESS && Prove(native) &&
+                    c->Poll(&sem) == VK_SUCCESS && sem == DeformSemantic::Ok &&
+                    c->succeeded() && ReadOutput(native, dlContext, c, out);
+                TestForceDeformHeteroSuffix(0);
+                return ok;
+            };
+            auto bitEqDl = [](std::vector<float> const& a, std::vector<float> const& b) {
+                return a.size() == b.size() &&
+                    std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
+            };
+            uint32_t const curves = 60000, perCurve = 10, points = curves * perCurve;
+            int const n = 8;
+            std::vector<float> pts(size_t(points) * 3);
+            uint64_t state = 0x12345678u;
+            auto next = [&]() {
+                state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+                return float((state >> 11) & 0xffffff) / float(0xffffff) * 2.0f - 1.0f;
+            };
+            for (auto& v : pts) v = next();
+            std::vector<uint32_t> off(curves + 1);
+            for (uint32_t i = 0; i <= curves; ++i) off[i] = i * perCurve;
+            std::vector<float> tgt(size_t(curves) * 3);
+            for (uint32_t i = 0; i < curves; ++i)
+                for (int a = 0; a < 3; ++a)
+                    tgt[size_t(i) * 3 + size_t(a)] = pts[size_t(i) * perCurve * 3 + size_t(a)];
+            std::vector<float> rest8{
+                0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f,
+                0.5f, 0.5f, 0.5f, 2.0f, 0.0f, 0.0f,
+                0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 2.0f,
+            };
+            std::vector<float> posed8 = rest8;
+            for (size_t i = 0; i < posed8.size(); i += 3) posed8[i] += 0.25f;
+            auto ptsBuf = UploadVulkanDeviceBytes(native, dlContext, pts.data(),
+                pts.size() * sizeof(float));
+            auto offBuf = UploadVulkanDeviceBytes(native, dlContext, off.data(),
+                off.size() * sizeof(uint32_t));
+            auto tgtBuf = Upload(dlContext, tgt.data(), tgt.size() * sizeof(float));
+            CHECK(ptsBuf && offBuf && tgtBuf);
+            CHECK((ptsBuf->memoryPropertyFlags() & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == 0);
+            auto mkHetDl = [&]() {
+                DeformPipeline::BeginInfo info;
+                info.points = ptsBuf;
+                info.curveOffsets = offBuf;
+                info.rootTargets = tgtBuf;
+                info.curveCount = curves;
+                info.pointCount = points;
+                info.restSamples = rest8;
+                info.posedSamples = posed8;
+                info.sampleCount = n;
+                info.smoothing = 0.0;
+                info.mask = {1.0f, 1, nullptr, 0};
+                info.enabled = {1, 1, nullptr, 0};
+                info.lockRoots = {0, 1, nullptr, 0};
+                info.groomEnvelope = 1.0f;
+                return info;
+            };
+            uint64_t r0 = DeformHeteroSuffixRunsForTesting();
+            std::vector<float> hetFill, hetHit, gpuHit;
+            CHECK(runForcedDl(1, mkHetDl(), &hetFill));
+            CHECK(runForcedDl(1, mkHetDl(), &hetHit));
+            CHECK(DeformHeteroSuffixRunsForTesting() - r0 == 2);
+            uint32_t const funded = DeformEvalCacheFundedPrefixForTesting();
+            CHECK(funded >= 4096 && funded < points);
+            CHECK(runForcedDl(-1, mkHetDl(), &gpuHit));
+            CHECK(DeformHeteroSuffixRunsForTesting() - r0 == 2);
+            CHECK(bitEqDl(hetFill, gpuHit));
+            CHECK(bitEqDl(hetHit, gpuHit));
+            std::puts("Case 20b (staged-copy hetero bitwise forced GPU): PASS");
         }
 
         // Case 21: adversarial hetero. 100007 points (odd: block + TBB tails),

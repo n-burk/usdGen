@@ -312,7 +312,9 @@ struct DeformPipeline::Native {
     // fast CPU, no per-region wakeup) plus the adaptive policy. The device
     // copies the suffix CVs into the idle warped suffix (byte staging, no
     // extra buffer) while the host evaluates the suffix (bitwise the
-    // direct shader) during the prefix proof. Guarded: Begin may run on
+    // direct shader) during the prefix proof; host-visible coherent
+    // inputs map directly instead (no staging copy). Guarded: Begin may
+    // run on
     // several threads, and one pool serves one dispatch at a time, so a
     // contended pose falls back to the pinned TBB arena (same partition
     // contract, same bits). Lock order is cacheMutex -> heteroMutex (the
@@ -1627,6 +1629,22 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
         }
         if (useHetero)
             heteroRuns.fetch_add(1, std::memory_order_relaxed);
+        // Suffix input staging: the host suffix needs the suffix CV bytes.
+        // A device-local points buffer stages them through cmds[2] into the
+        // idle warped suffix (the copy submit + fence below); a
+        // host-visible coherent points buffer maps directly instead,
+        // skipping the submit, the fence, the copy's queue slot ahead of
+        // the proof, and the copy wait. info.points is never
+        // device-written (an input; check() rejects unproven buffers), so
+        // mapped reads see exactly the bytes the copy would stage, and
+        // they race nothing (the proof only reads points too).
+        bool const pointsDirect = useHetero && info.points &&
+            (info.points->memoryPropertyFlags() &
+                (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+                (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        bool const stageCopy = useHetero && !pointsDirect;
 
         // evalUbo fill (see the funding above): on the cached path this
         // UBO feeds only the past-prefix suffix dispatch (base=active);
@@ -1844,7 +1862,7 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
         VkCommandBufferAllocateInfo ca{};
         ca.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         ca.commandPool = s->commands; ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        ca.commandBufferCount = useHetero ? 3u : 2u;
+        ca.commandBufferCount = stageCopy ? 3u : 2u;
         VkCommandBuffer cmds[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
         r = vkAllocateCommandBuffers(d, &ca, cmds);
         if (r != VK_SUCCESS) { finish(r); return {}; }
@@ -1962,11 +1980,13 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
             r = vkEndCommandBuffer(cmds[1]);
         }
         if (r != VK_SUCCESS) { finish(r); return {}; }
-        // cmds[2] (hetero only): stage the suffix CV bytes into the idle
-        // warped suffix for the host. Submitted before the proof so its
-        // fence delivers the CVs while the prefix still runs; the proof's
-        // barrier orders it against the cached writes (disjoint ranges).
-        if (useHetero) {
+        // cmds[2] (staged-copy hetero only): stage the suffix CV bytes
+        // into the idle warped suffix for the host. Submitted before the
+        // proof so its fence delivers the CVs while the prefix still
+        // runs; the proof's barrier orders it against the cached writes
+        // (disjoint ranges). Direct-points hetero maps the inputs
+        // instead and records no copy.
+        if (stageCopy) {
             r = vkBeginCommandBuffer(cmds[2], &begin);
             if (r == VK_SUCCESS) {
                 VkMemoryBarrier copyBefore{};
@@ -2007,7 +2027,7 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
         s->proofFence = native_->fencePool.Acquire(d, &r);
         if (!s->proofFence) { finish(r); return {}; }
         VkFence copyFence = VK_NULL_HANDLE;
-        if (useHetero) {
+        if (stageCopy) {
             copyFence = native_->fencePool.Acquire(d, &r);
             if (!copyFence) { finish(r); return {}; }
         }
@@ -2016,7 +2036,7 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
         submit.commandBufferCount = 1;
         s->pending = true; // proof owns the same allocations as the final submit
         bool copySubmitted = false;
-        if (useHetero) {
+        if (stageCopy) {
             submit.pCommandBuffers = &cmds[2];
             r = vkQueueSubmit(context->computeQueue(), 1, &submit, copyFence);
             copySubmitted = (r == VK_SUCCESS);
@@ -2047,13 +2067,25 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
         double heteroCpuNs = 0.0;
         uint32_t heteroFlag = 0;
         if (useHetero) {
-            // Wait the staged CVs, run the suffix on the arena while the
-            // prefix proof runs, then wait the proof. A failed map runs the
+            // Wait the staged CVs (or map the host-visible inputs
+            // directly), run the suffix on the pool while the prefix
+            // proof runs, then wait the proof. A failed map runs the
             // quarantine path like any proof failure: no output escapes.
-            r = SpinWaitForFence(d, copyFence);
+            void* pointsMap = nullptr;
+            if (stageCopy) {
+                r = SpinWaitForFence(d, copyFence);
+                if (r == VK_SUCCESS) {
+                    native_->fencePool.Release(d, copyFence);
+                    copyFence = VK_NULL_HANDLE;
+                } else if (copyFence) {
+                    vkDestroyFence(d, copyFence, nullptr);
+                    copyFence = VK_NULL_HANDLE;
+                }
+            } else {
+                r = vkMapMemory(d, info.points->memory(), 0, pointsBytes, 0,
+                    &pointsMap);
+            }
             if (r == VK_SUCCESS) {
-                native_->fencePool.Release(d, copyFence);
-                copyFence = VK_NULL_HANDLE;
                 void* warpMap = nullptr;
                 r = vkMapMemory(d, s->warped->memory(), 0, outBytes, 0, &warpMap);
                 if (r == VK_SUCCESS) {
@@ -2066,6 +2098,12 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                     xp.cz = rstate.center[2];
                     xp.invScale = invScale;
                     xp.scale = rstate.scale;
+                    // Staged copies read back out of the warped suffix;
+                    // direct points read the inputs in place (same bytes,
+                    // same absolute suffix range).
+                    float const* suffixCvs = stageCopy
+                        ? static_cast<float const*>(warpMap)
+                        : static_cast<float const*>(pointsMap);
                     // One pool serves one dispatch: the winning pose takes
                     // it, a concurrent pose falls back to the arena (same
                     // bits either way). The pool is born here, at its first
@@ -2084,11 +2122,11 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                     auto tCpu0 = std::chrono::steady_clock::now();
                     bool suffixOk = poolLock.owns_lock()
                         ? RunHeteroSuffixPool(*native_->heteroPool, xp,
-                                              static_cast<float const*>(warpMap),
+                                              suffixCvs,
                                               static_cast<float*>(warpMap),
                                               cacheActive, points, &heteroFlag)
                         : RunHeteroSuffixTbb(native_->heteroArena, xp,
-                                             static_cast<float const*>(warpMap),
+                                             suffixCvs,
                                              static_cast<float*>(warpMap),
                                              cacheActive, points, &heteroFlag);
                     heteroCpuNs = std::chrono::duration<double, std::nano>(
@@ -2096,9 +2134,7 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                     vkUnmapMemory(d, s->warped->memory());
                     if (!suffixOk) r = VK_ERROR_UNKNOWN;
                 }
-            } else if (copyFence) {
-                vkDestroyFence(d, copyFence, nullptr);
-                copyFence = VK_NULL_HANDLE;
+                if (pointsMap) vkUnmapMemory(d, info.points->memory());
             }
         }
         if (r == VK_SUCCESS)
