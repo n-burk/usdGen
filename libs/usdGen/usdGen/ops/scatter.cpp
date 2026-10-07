@@ -73,6 +73,11 @@ struct ScatterSortScratch {
     std::vector<uint64_t> morton, tmpKeys;
     std::vector<uint32_t> order, tmpIdx;
     std::vector<uint32_t> counts;
+    // Parallel-radix per-chunk histograms and scatter offsets, chunk-major
+    // ([c * 65536 + d]): each chunk's worker touches only its own 256KB
+    // region, so neither the histogram nor the scatter shares a line.
+    // Pooled like the rest (every slot is rewritten each pass).
+    std::vector<uint32_t> sortCounts, sortOff;
 };
 thread_local ScatterSortScratch t_scatterSortScratch;
 
@@ -799,24 +804,80 @@ bool UsdGenScatterOp::Capture(
         // final order is exactly the 4-pass order. The permutation lands in
         // whichever index array the last surviving pass wrote.
         uint64_t const vary = orKeys ^ andKeys;
+        // Parallel stable counting passes for big captures (same N>32768
+        // rule as the morton keys): each chunk histograms its own input
+        // range, one serial prefix over the chunk-major histograms assigns
+        // every (digit, chunk) pair a disjoint output range in chunk order,
+        // and each chunk scatters its range in input order. Within a digit
+        // the landing order is chunk order then input order — exactly the
+        // serial scatter's global input order — so any chunking is
+        // bit-identical. Small captures keep the serial spelling below.
+        size_t const sortChunks =
+            (workers > 1 && N > 32768)
+                ? std::min({size_t(workers), size_t(8), N})
+                : 1;
+        std::vector<uint32_t> *parCounts = nullptr, *parOff = nullptr;
+        if (sortChunks > 1) {
+            parCounts = &ss.sortCounts;
+            parOff = &ss.sortOff;
+            parCounts->resize(sortChunks * 65536);
+            parOff->resize(sortChunks * 65536);
+        }
         for (int pass = 0; pass < 4; ++pass) {
             int const shift = pass * 16;
             if (((vary >> shift) & 0xffffu) == 0)
                 continue;
-            std::fill(counts.begin(), counts.end(), uint32_t(0));
-            for (size_t i = 0; i < N; ++i)
-                ++counts[(keys[i] >> shift) & 0xffffu];
-            uint32_t sum = 0;
-            for (size_t c = 0; c < 65536; ++c) {
-                uint32_t const t = counts[c];
-                counts[c] = sum;
-                sum += t;
-            }
-            for (size_t i = 0; i < N; ++i) {
-                size_t const d = (keys[i] >> shift) & 0xffffu;
-                uint32_t const p = counts[d]++;
-                keysOut[p] = keys[i];
-                idxOut[p] = idx[i];
+            if (sortChunks == 1) {
+                std::fill(counts.begin(), counts.end(), uint32_t(0));
+                for (size_t i = 0; i < N; ++i)
+                    ++counts[(keys[i] >> shift) & 0xffffu];
+                uint32_t sum = 0;
+                for (size_t c = 0; c < 65536; ++c) {
+                    uint32_t const t = counts[c];
+                    counts[c] = sum;
+                    sum += t;
+                }
+                for (size_t i = 0; i < N; ++i) {
+                    size_t const d = (keys[i] >> shift) & 0xffffu;
+                    uint32_t const p = counts[d]++;
+                    keysOut[p] = keys[i];
+                    idxOut[p] = idx[i];
+                }
+            } else {
+                uint32_t *cntBase = parCounts->data();
+                uint32_t *offBase = parOff->data();
+                std::fill(cntBase, cntBase + sortChunks * 65536, uint32_t(0));
+                uint64_t const *keysIn = keys;
+                ScatterParallelFor(ctx.dispatcher, sortChunks, [&](size_t c) {
+                    size_t const i0 = (c * N) / sortChunks;
+                    size_t const i1 = ((c + 1) * N) / sortChunks;
+                    uint32_t *cnt = cntBase + c * 65536;
+                    for (size_t i = i0; i < i1; ++i)
+                        ++cnt[(keysIn[i] >> shift) & 0xffffu];
+                });
+                uint32_t sum = 0;
+                for (size_t d = 0; d < 65536; ++d) {
+                    for (size_t c = 0; c < sortChunks; ++c) {
+                        size_t const s = c * 65536 + d;
+                        uint32_t const t = cntBase[s];
+                        offBase[s] = sum;
+                        sum += t;
+                    }
+                }
+                uint32_t const *idxIn = idx;
+                uint64_t *kOut = keysOut;
+                uint32_t *iOut = idxOut;
+                ScatterParallelFor(ctx.dispatcher, sortChunks, [&](size_t c) {
+                    size_t const i0 = (c * N) / sortChunks;
+                    size_t const i1 = ((c + 1) * N) / sortChunks;
+                    uint32_t *off = offBase + c * 65536;
+                    for (size_t i = i0; i < i1; ++i) {
+                        size_t const d = (keysIn[i] >> shift) & 0xffffu;
+                        uint32_t const p = off[d]++;
+                        kOut[p] = keysIn[i];
+                        iOut[p] = idxIn[i];
+                    }
+                });
             }
             std::swap(keys, keysOut);
             std::swap(idx, idxOut);
