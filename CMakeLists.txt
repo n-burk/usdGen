@@ -1515,6 +1515,11 @@ if(USDGEN_BUILD_VULKAN_TESTS)
     set_tests_properties(testUsdGenVulkanScatterGrowPipeline PROPERTIES
         LABELS "T1;vulkan;operators;scatterGrow" RESOURCE_LOCK usdgen_gpu
         TIMEOUT 60 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
+    add_executable(testUsdGenVulkanScatterGrowCpuReject tests/testUsdGenVulkanScatterGrowCpuReject.cpp)
+    target_link_libraries(testUsdGenVulkanScatterGrowCpuReject PRIVATE usdGenVulkanNative)
+    add_test(NAME testUsdGenVulkanScatterGrowCpuReject COMMAND testUsdGenVulkanScatterGrowCpuReject)
+    set_tests_properties(testUsdGenVulkanScatterGrowCpuReject PROPERTIES
+        LABELS "T0;vulkan;operators;scatterGrowCpuReject" TIMEOUT 60)
     add_executable(testUsdGenVulkanRootFrames tests/testUsdGenVulkanRootFrames.cpp
         "${_usdgen_vulkan_rfval_spv}" "${_usdgen_vulkan_rfbuild_spv}")
     target_link_libraries(testUsdGenVulkanRootFrames PRIVATE usdGenVulkanNative)
