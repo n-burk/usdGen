@@ -344,17 +344,20 @@ void DisplaceBlockedNeon4T(GfVec3d const &centre, double invScale, double scale,
         oz0 = vfmaq_f64(vfmaq_f64(vfmaq_f64(a0, a1, px0), a2, py0), a3, pz0);
         oz1 = vfmaq_f64(vfmaq_f64(vfmaq_f64(a0, a1, px1), a2, py1), a3, pz1);
     }
-    // Unroll ×8: iterations are independent (each query's accumulation
+    // Unroll ×32: iterations are independent (each query's accumulation
     // keeps sample order, so the bits match), and unrolling amortizes the
-    // loop overhead plus the indexed-address setup across more samples:
-    // 34.4 instructions per sample at ×8 versus 36.0 rolled (×2: 35.0,
-    // ×4: 36.3 — the addressing overhead does not amortize monotonically).
-    // No spills at ×8; the remainder epilogue is one predictable dispatch
-    // per block. Other compilers see no pragma and keep the rolled loop.
+    // loop overhead plus the indexed-address setup across more samples.
+    // The addressing overhead does not amortize monotonically (×2: 35.0,
+    // ×4: 36.3, ×8: 34.4 instructions per sample versus 36.0 rolled), and
+    // the measured curve tops out at ×32 (×8/×12 tie below, ×16/×24 tie
+    // above those, ×32/×48 tie at the top at ~33 per sample; kernel
+    // 9.96ms summed at ×8 versus 9.86ms at ×32 on this ARM64). No spills
+    // at ×32; the remainder epilogue is one predictable dispatch per
+    // block. Other compilers see no pragma and keep the rolled loop.
 #if defined(__clang__)
-#pragma clang loop unroll_count(8)
+#pragma clang loop unroll_count(32)
 #elif defined(__GNUC__)
-#pragma GCC unroll 8
+#pragma GCC unroll 32
 #endif
     for (size_t i = 0; i < n; ++i) {
         // Broadcast loads keep one live register per sample value (the
