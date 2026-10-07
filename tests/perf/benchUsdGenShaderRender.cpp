@@ -11,7 +11,8 @@
 // --deform (default for animated scenes) cycles time like benchUsdGenStorm
 // --deform, then measures the static pose in the same invocation; the
 // static-vs-deform delta is the per-frame publish+re-upload+redraw cost.
-// --static measures the static pose only.
+// --static measures the static pose only. --deform-only skips the trailing
+// static baseline (for memory-capped boxes; run --static separately).
 //
 // Novel vs cached deform: run with warmup+frames == scene span (RBF scenes
 // span 12: --warmup 2 --frames 10; surface scenes span 4: --warmup 1
@@ -414,6 +415,10 @@ int main(int argc, char** argv)
     std::string scenePath, jsonOut = "usdGenShaderRender.json";
     std::string traceOut;  // --trace PATH: chrome trace of the deform run only
     const char* mode = nullptr;  // null = deform when animated, else static
+    // --deform-only: skip the trailing same-invocation static baseline, so a
+    // memory-capped box can afford the deform cooks alone (each cook retains
+    // ~0.7GB at 10M; base is ~18GB). Run --static separately for statics.
+    bool deformOnly = false;
     int w = 1280, h = 720, refineLevel = 2, frames = 6, warmup = 2, repeats = 3;
 
     for (int i = 1; i < argc; ++i) {
@@ -440,11 +445,12 @@ int main(int argc, char** argv)
         else if (a == "--repeats") repeats = std::atoi(next("--repeats"));
         else if (a == "--json") jsonOut = next("--json");
         else if (a == "--trace") traceOut = next("--trace");
+        else if (a == "--deform-only") deformOnly = true;
         else {
             std::fprintf(stderr,
                 "usage: benchUsdGenShaderRender --scene PATH [--static|--deform]"
                 " [--res WxH] [--refine N] [--frames N] [--warmup N]"
-                " [--repeats N] [--json OUT]\n");
+                " [--repeats N] [--json OUT] [--trace PATH] [--deform-only]\n");
             return 2;
         }
     }
@@ -512,23 +518,32 @@ int main(int argc, char** argv)
             else std::fprintf(stderr, "WARN: cannot write %s\n",
                               traceOut.c_str());
         }
+        AppendRun(&json, "deform", rrDeform, "  ");
+        double dMed = rrDeform.frameMedians.empty() ? 0.0
+            : MedianOf(rrDeform.frameMedians);
+        double dSub = rrDeform.submitMedians.empty() ? 0.0
+            : MedianOf(rrDeform.submitMedians);
+        double nMed = rrDeform.coldFrame.empty() ? 0.0
+            : MedianOf(rrDeform.coldFrame);
+        if (deformOnly) {
+            std::printf("deform novel %s ms cached %s ms (submit %s gpu %s) "
+                        "checksum %s\n",
+                        Num(nMed).c_str(), Num(dMed).c_str(),
+                        Num(dSub).c_str(), Num(dMed - dSub).c_str(),
+                        rrDeform.checksum.empty() ? "-"
+                                                 : rrDeform.checksum.c_str());
+            json += "  \"deformOnly\": true,\n";
+        } else {
         // Static baseline in the same invocation (same-process comparison).
         RunResult rrStatic = Measure(&engine, sc, frames, warmup, repeats,
                                      refineLevel, false, true, glFinish);
-        AppendRun(&json, "deform", rrDeform, "  ");
         AppendRun(&json, "static", rrStatic, "  ");
-        double dMed = rrDeform.frameMedians.empty() ? 0.0
-            : MedianOf(rrDeform.frameMedians);
         double sMed = rrStatic.frameMedians.empty() ? 0.0
             : MedianOf(rrStatic.frameMedians);
-        double dSub = rrDeform.submitMedians.empty() ? 0.0
-            : MedianOf(rrDeform.submitMedians);
         double sSub = rrStatic.submitMedians.empty() ? 0.0
             : MedianOf(rrStatic.submitMedians);
         json += "  \"deformDeltaFrameMs\": " + Num(dMed - sMed) + ",\n";
         json += "  \"deformDeltaSubmitMs\": " + Num(dSub - sSub) + ",\n";
-        double nMed = rrDeform.coldFrame.empty() ? 0.0
-            : MedianOf(rrDeform.coldFrame);
         std::printf("deform novel %s ms cached %s ms (submit %s gpu %s) "
                     "static %s ms delta %s ms checksum %s/%s\n",
                     Num(nMed).c_str(), Num(dMed).c_str(), Num(dSub).c_str(),
@@ -536,6 +551,7 @@ int main(int argc, char** argv)
                     Num(dMed - sMed).c_str(),
                     rrDeform.checksum.empty() ? "-" : rrDeform.checksum.c_str(),
                     rrStatic.checksum.empty() ? "-" : rrStatic.checksum.c_str());
+        }
     } else {
         if (deform && !sc.animated)
             std::fprintf(stderr, "NOTE: --deform on a static scene; "
