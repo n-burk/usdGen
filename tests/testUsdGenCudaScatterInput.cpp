@@ -68,6 +68,18 @@ int main() {
     CHECK(PrepareCudaScatterInput(duplicateSubset,SdfPath("/scatter"),&roots,&reason)==CudaScatterInputStatus::InvalidSurface && roots==preserved);
     auto zero=Desc(0.0); roots.reset();
     CHECK(PrepareCudaScatterInput(zero,SdfPath("/scatter"),&roots,&reason)==CudaScatterInputStatus::Ok && roots && roots->positions.empty());
+    // Pool recycle pin: a full convert, released, then an empty convert
+    // must read empty on EVERY plane. The n==0 path skips the guarded
+    // assigns, so the recycled shell must be cleared on release; without
+    // the clear this returns 1M stale positions alongside 0 stableIds.
+    {
+        std::shared_ptr<const gpu::ScatterGrowRoots> full; std::string why2;
+        CHECK(PrepareCudaScatterInput(d,SdfPath("/scatter"),&full,&why2)==CudaScatterInputStatus::Ok && full && !full->positions.empty());
+        full.reset();
+        std::shared_ptr<const gpu::ScatterGrowRoots> empty2; std::string why3;
+        CHECK(PrepareCudaScatterInput(zero,SdfPath("/scatter"),&empty2,&why3)==CudaScatterInputStatus::Ok && empty2);
+        CHECK(empty2->positions.empty() && empty2->stableIds.empty() && empty2->rootPrim.empty() && empty2->rootUV.empty() && empty2->rootT.empty() && empty2->rootB.empty() && empty2->rootN.empty());
+    }
     // Scatter is a generator: it declares only density and flip, so any other
     // authored parameter (usdGen:mask included) is refused, not ignored.
     auto undeclared = d;

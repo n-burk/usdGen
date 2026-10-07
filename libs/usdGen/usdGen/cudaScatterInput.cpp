@@ -10,6 +10,7 @@
 #include <cstring>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <set>
 #include <vector>
 
@@ -380,6 +381,42 @@ CudaScatterInputStatus ValidateSurface(UsdGenSurfaceDesc const& surface,
 
 } // namespace
 
+namespace {
+// Pooled convert shells (bit-identical): the seven output planes churn
+// ~68MB of alloc+fault per 1M-root convert, and every assign() fully
+// overwrites its plane, so a released shell's capacity is purely a
+// warm backing store with no observable contents. Checkout is one shell
+// per thread (depth 1: sequential converts, the bench and the session
+// task path, always hit; deeper pipelines allocate fresh, exactly as
+// before). The shared_ptr's deleter recycles into the RELEASING
+// thread's pool, so cross-thread handoff (convert here, release after
+// grow commit elsewhere) migrates shells instead of racing. Bounded:
+// one idle shell per converting thread; overflow frees as unpooled.
+// Deliberately depth-1: the ~270MB emission pool measurably slowed
+// downstream fresh allocs and was reverted (scatter.cpp); this retains
+// at most one convert (68MB at 1M roots) per thread.
+thread_local std::unique_ptr<gpu::ScatterGrowRoots> t_convertShell;
+void RecycleConvertShell(gpu::ScatterGrowRoots const* roots)
+{
+    std::unique_ptr<gpu::ScatterGrowRoots> shell(
+        const_cast<gpu::ScatterGrowRoots*>(roots));
+    // Reset sizes, keep capacity: the n==0 convert skips every guarded
+    // assign, so a recycled shell must read empty, not stale. (An
+    // un-cleared pool returned 1M stale positions alongside 0 stableIds
+    // for empty converts, breaking session estimates downstream.)
+    shell->positions.clear();
+    shell->stableIds.clear();
+    shell->rootPrim.clear();
+    shell->rootUV.clear();
+    shell->rootT.clear();
+    shell->rootB.clear();
+    shell->rootN.clear();
+    if (!t_convertShell)
+        t_convertShell = std::move(shell);
+    // else pool occupied: shell frees here, as unpooled.
+}
+} // namespace
+
 CudaScatterInputStatus PrepareCudaScatterInput(
     UsdGenGraphDesc const& desc, SdfPath const& scatterPath,
     std::shared_ptr<const gpu::ScatterGrowRoots>* out, std::string* reason) {
@@ -477,7 +514,15 @@ CudaScatterInputStatus PrepareCudaScatterInput(
         roots.rootN.size() != n)
         return Fail(CudaScatterInputStatus::CaptureFailed,
                     "Scatter Capture produced an invalid root topology", reason);
-    auto prepared = std::make_shared<gpu::ScatterGrowRoots>();
+    // Pooled shell (see above): checkout the thread's idle shell or
+    // allocate fresh. Held uniquely until *out publishes, so a throwing
+    // assign() frees it exactly like the old make_shared path.
+    std::unique_ptr<gpu::ScatterGrowRoots> shell;
+    if (t_convertShell)
+        shell = std::move(t_convertShell);
+    else
+        shell = std::make_unique<gpu::ScatterGrowRoots>();
+    auto* prep = shell.get();
     // Layout-identical planes copy whole instead of element-wise: GfVec2f
     // (GfVec3f) is 2 (3) contiguous floats, the same bytes as float2
     // (float3). Only positions transposes from the SoA point planes.
@@ -501,7 +546,6 @@ CudaScatterInputStatus PrepareCudaScatterInput(
         rb = reinterpret_cast<float const*>(roots.rootB.cdata());
         rn = reinterpret_cast<float const*>(roots.rootN.cdata());
     }
-    auto* prep = prepared.get();
     auto copyPlane = [&](size_t i) {
         switch (i) {
         case 0:
@@ -557,7 +601,8 @@ CudaScatterInputStatus PrepareCudaScatterInput(
         for (size_t i = 0; i < 7; ++i)
             copyPlane(i);
     }
-    *out = std::move(prepared);
+    *out = std::shared_ptr<gpu::ScatterGrowRoots const>(
+        shell.release(), RecycleConvertShell);
     return CudaScatterInputStatus::Ok;
 }
 
