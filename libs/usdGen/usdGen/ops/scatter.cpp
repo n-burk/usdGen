@@ -159,7 +159,10 @@ UsdGenEpoch UsdGenScatterOp::CaptureDigest(UsdGenCaptureContext const &ctx) cons
         array("subset", surface.subsetFaces);
         feed("isSubset", surface.isSubset ? 1u : 0u);
         array("uv", surface.uv);
-        feed("subdivision", UsdGenSubdivisionDigest(surface));
+        // Tags-only subdivision cover: faceCounts/faceIndices already feed
+        // this digest directly above, so re-hashing them here would stream
+        // ~20MB twice. Coverage is unchanged (tags digest + both arrays).
+        feed("subdivision", UsdGenSubdivisionTagsDigest(surface));
         // The paint primvar edits no generation, so the multiplier content
         // itself joins the digest: without this a paint stroke would read
         // back the cached pre-stroke roots.

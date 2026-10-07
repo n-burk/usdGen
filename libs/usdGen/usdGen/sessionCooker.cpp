@@ -378,7 +378,9 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
         }
     }
     for (UsdGenSurfaceDesc const &surface : desc.surfaces) {
-        _CacheMix(&h0, UsdGenSubdivisionDigest(surface));
+        // Tags-only subdivision cover: faceVertexCounts/faceVertexIndices
+        // mix into this key directly below. Coverage is unchanged.
+        _CacheMix(&h0, UsdGenSubdivisionTagsDigest(surface));
         _CacheMixText(&h0, surface.path.GetString());
         _CacheMix(&h1, surface.id);
         _CacheMix(&h0, static_cast<uint64_t>(surface.restNormalDomain));

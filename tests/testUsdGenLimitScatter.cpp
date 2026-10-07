@@ -73,6 +73,29 @@ int main() {
         t = s; t.cornerIndices = {3}; CHECK(moved(t));
         t = s; t.cornerSharpnesses = {1.5f}; CHECK(moved(t));
     }
+    // The tags digest covers everything except the two face arrays: tags
+    // move it, face edits must not (callers mix those arrays themselves).
+    {
+        uint64_t const base = UsdGenSubdivisionTagsDigest(s);
+        CHECK(UsdGenSubdivisionTagsDigest(s) == base);
+        auto tmoved = [&](UsdGenSurfaceDesc m) {
+            return UsdGenSubdivisionTagsDigest(m) != base;
+        };
+        auto t = s; t.subdivisionScheme = TfToken("loop"); CHECK(tmoved(t));
+        t = s; t.orientation = TfToken("leftHanded"); CHECK(tmoved(t));
+        t = s; t.interpolateBoundary = TfToken("none"); CHECK(tmoved(t));
+        t = s; t.faceVaryingLinearInterpolation = TfToken("none"); CHECK(tmoved(t));
+        t = s; t.triangleSubdivisionRule = TfToken("smooth"); CHECK(tmoved(t));
+        t = s; t.creaseMethod = TfToken("chaikin"); CHECK(tmoved(t));
+        t = s; t.holeIndices = {2}; CHECK(tmoved(t));
+        t = s; t.creaseIndices = {0, 1}; CHECK(tmoved(t));
+        t = s; t.creaseLengths = {2}; CHECK(tmoved(t));
+        t = s; t.creaseSharpnesses = {2.5f}; CHECK(tmoved(t));
+        t = s; t.cornerIndices = {3}; CHECK(tmoved(t));
+        t = s; t.cornerSharpnesses = {1.5f}; CHECK(tmoved(t));
+        t = s; t.faceVertexCounts[0] = 3; CHECK(!tmoved(t));
+        t = s; t.faceVertexIndices[0] = 7; CHECK(!tmoved(t));
+    }
     UsdGenScatterOp op;auto d0=Desc(s,3),d1=Desc(tags,3);UsdGenCaptureContext c0,c1;c0.desc=&d0;c1.desc=&d1;
     CHECK(op.CaptureDigest(c0)!=op.CaptureDigest(c1));
     // Pose and parent motion are downstream deformation inputs, not rest
