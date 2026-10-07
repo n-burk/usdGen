@@ -98,8 +98,35 @@ float3 NormalizeHost(float3 v) {
 // halves the scatter's permuted stores (one 8-byte line hit instead of
 // two 4-byte hits) for the same permutation. n <= UINT32_MAX (indices
 // are 32-bit); the caller routes larger inputs to SetFirstDup.
+// Pooled dup-sort scratch (bit-identical): the sharded path's items/tmp
+// (8MB each at 1M roots) + histograms (2MB) and the legacy path's
+// items/tmp + counts/par tables churn fresh alloc+fault+free every
+// ValidateRoots call. The sharded and legacy paths never run in one
+// call, so one item pair plus one table block serves both. Growth-only
+// (never shrinks); the pack/partition writes every item slot, every
+// radix pass fully writes its output before the swap, and every table
+// is filled/prefixed before its read, so pooled contents never leak.
+// (An earlier round pooled only the par tables and measured slower --
+// fresh allocs then recycled hot pages. With the capture/sort/shell
+// pools retaining ~270MB/thread there are no hot bins left, so pooling
+// the whole temp set is what removes the fresh faults.)
+struct DupSortScratch {
+    std::unique_ptr<uint64_t[]> items;
+    std::unique_ptr<uint64_t[]> tmp;
+    std::unique_ptr<uint32_t[]> tab;
+    size_t nMax = 0;
+};
+thread_local DupSortScratch t_dupSortScratch;
 size_t RadixFirstDup(uint64_t const* ids, size_t n) {
     if (n <= 1) return n;
+    DupSortScratch& ds = t_dupSortScratch;
+    if (!ds.tab)
+        ds.tab.reset(new uint32_t[size_t(2) * 8 * 65536]);
+    if (ds.nMax < n) {
+        ds.items.reset(new uint64_t[n]);
+        ds.tmp.reset(new uint64_t[n]);
+        ds.nMax = n;
+    }
     {
         // Sharded dup sort (verdict-identical): hash-fold digits scatter
         // uniformly at random, so the global passes below dirty one 64B
@@ -166,11 +193,11 @@ size_t RadixFirstDup(uint64_t const* ids, size_t n) {
                 if (m > maxShard) maxShard = m;
             }
             if (maxShard <= n / 2) {
-                std::unique_ptr<uint64_t[]> shardItems(new uint64_t[n]);
-                std::unique_ptr<uint64_t[]> shardTmp(new uint64_t[n]);
-                std::unique_ptr<uint32_t[]> shardHist(
-                    new uint32_t[kShards * 65536]);
-                uint64_t* partOut = shardItems.get();
+                // Pooled (see above): the shard arrays alias the scratch.
+                uint64_t* shardItems = ds.items.get();
+                uint64_t* shardTmp = ds.tmp.get();
+                uint32_t* shardHist = ds.tab.get();
+                uint64_t* partOut = shardItems;
                 tbb::parallel_for(tbb::blocked_range<size_t>(0, nch),
                     [&](tbb::blocked_range<size_t> const& range) {
                         for (size_t c = range.begin(); c != range.end();
@@ -244,10 +271,10 @@ size_t RadixFirstDup(uint64_t const* ids, size_t n) {
                             size_t const b0 = shardBase[s];
                             size_t const m = shardBase[s + 1] - b0;
                             if (m <= 1) continue;
-                            uint64_t* w = shardItems.get() + b0;
-                            uint64_t* wOut = shardTmp.get() + b0;
+                            uint64_t* w = shardItems + b0;
+                            uint64_t* wOut = shardTmp + b0;
                             uint32_t* cnt =
-                                shardHist.get() + s * 65536;
+                                shardHist + s * 65536;
                             uint32_t orK = 0, andK = ~uint32_t(0);
                             for (size_t k = 0; k < m; ++k) {
                                 uint32_t const f = uint32_t(w[k] >> 32);
@@ -306,10 +333,11 @@ size_t RadixFirstDup(uint64_t const* ids, size_t n) {
     // arrays is overwritten before its read (pack fill, radix passes),
     // and counts is filled before each pass, so std::vector's value-init
     // (~16MB of zeroes) is pure waste; new[] leaves the trivial storage
-    // uninitialized. Same bytes in the same slots.
-    std::unique_ptr<uint64_t[]> items(new uint64_t[n]);
-    std::unique_ptr<uint64_t[]> tmpItems(new uint64_t[n]);
-    std::unique_ptr<uint32_t[]> counts(new uint32_t[65536]);
+    // uninitialized. Same bytes in the same slots. Pooled (see above):
+    // the legacy arrays alias the same scratch the sharded path uses.
+    uint64_t* items = ds.items.get();
+    uint64_t* tmpItems = ds.tmp.get();
+    uint32_t* counts = ds.tab.get();
     // Threaded pack + radix passes for big inputs (same n>32768 rule
     // the Capture sort uses; small inputs keep the serial spelling):
     // the pack writes disjoint slots with an order-free |/& reduction,
@@ -325,7 +353,7 @@ size_t RadixFirstDup(uint64_t const* ids, size_t n) {
             ? std::min({size_t(dupWorkers), size_t(8), n})
             : 1;
     uint32_t orKeys = 0, andKeys = ~uint32_t(0);
-    uint64_t* itemOut = items.get();
+    uint64_t* itemOut = items;
     if (dupChunks == 1) {
         for (size_t i = 0; i < n; ++i) {
             uint64_t const id = ids[i];
@@ -360,22 +388,23 @@ size_t RadixFirstDup(uint64_t const* ids, size_t n) {
             andKeys &= p.andKeys;
         }
     }
-    uint64_t* w = items.get();
-    uint64_t* wOut = tmpItems.get();
-    uint32_t* cnt = counts.get();
+    uint64_t* w = items;
+    uint64_t* wOut = tmpItems;
+    uint32_t* cnt = counts;
     uint32_t const vary = orKeys ^ andKeys;
     // Per-chunk histograms + scatter offsets for the threaded passes
     // (chunk-major [c * 65536 + d], each chunk's worker touching only
-    // its own region). Fresh per call, uninitialized like the item
-    // arrays: pooling them across calls measures slower (4/4 A/B pairs
-    // favor fresh; the allocator recycles the same hot pages anyway).
-    // Every counts slot is filled each pass and every offset slot is
-    // prefixed, so no contents leak anywhere.
-    std::unique_ptr<uint32_t[]> parCnt, parOff;
+    // its own region). Pooled in the table block's two halves (dupChunks
+    // <= 8, so need <= half a block each). Every counts slot is filled
+    // each pass and every offset slot is prefixed, so no contents leak
+    // anywhere. (Pooling only these tables measured slower when fresh
+    // allocs recycled hot pages; with the capture pools retaining the
+    // heap, pooling the whole temp set removes the fresh faults.)
+    uint32_t* parCnt = nullptr;
+    uint32_t* parOff = nullptr;
     if (dupChunks > 1) {
-        size_t const need = dupChunks * 65536;
-        parCnt.reset(new uint32_t[need]);
-        parOff.reset(new uint32_t[need]);
+        parCnt = ds.tab.get();
+        parOff = ds.tab.get() + size_t(8) * 65536;
     }
     for (int pass = 0; pass < 2; ++pass) {
         int const shift = 32 + pass * 16;
@@ -396,8 +425,8 @@ size_t RadixFirstDup(uint64_t const* ids, size_t n) {
                 wOut[cnt[d]++] = wi;
             }
         } else {
-            uint32_t* cntBase = parCnt.get();
-            uint32_t* offBase = parOff.get();
+            uint32_t* cntBase = parCnt;
+            uint32_t* offBase = parOff;
             std::fill(cntBase, cntBase + dupChunks * 65536, uint32_t(0));
             uint64_t const* wIn = w;
             tbb::parallel_for(tbb::blocked_range<size_t>(0, dupChunks),
