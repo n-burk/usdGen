@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <limits>
 #include <map>
@@ -29,6 +30,9 @@
 #include <set>
 #include <string>
 #include <utility>
+
+#include "tbb/parallel_for.h"
+#include "tbb/task_arena.h"
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -1940,7 +1944,22 @@ UsdGenStats publishedStats, bool invalidateValues,
     phases.Phase("preview");
 
     TRACE_SCOPE("usdGen build tile publications");
+    // Serial triage (cheap): carry-over and streamed reuse resolve here in
+    // result.tiles order; only the _BuildTilePublication calls fan out.
+    // Every tile reads only its own view plus shared-immutable run state
+    // (terminal buffer, graph, desc, preview colors) and writes only its
+    // own publication, so any build order fills identical tiles -- and the
+    // streaming path already invokes _BuildTilePublication concurrently
+    // from scheduler workers, so the function is production-hardened for
+    // it. Assembly below restores result.tiles order, the progress emits
+    // keep their serial sequence, and the first failing tile's exception
+    // still wins (captured per slot, rethrown in order). One deliberate
+    // edge difference: on a layout-corruption throw with a progress
+    // callback set, no partial progress emits (serial interleaved them);
+    // success paths -- the only contracted case -- are identical.
     size_t rebuiltTiles = 0;
+    size_t rebuildCvs = 0;
+    std::vector<UsdGenTileView const *> buildViews;
     for (UsdGenTileView const &tv : result.tiles) {
         // E-4: untouched tiles carry over their publication wholesale (the
         // VtArray copies share buffers, so step 7 sees IsIdentical == true).
@@ -1962,9 +1981,57 @@ UsdGenStats publishedStats, bool invalidateValues,
         }
         ++rebuiltTiles;
         auto streamed = streamedTiles.find(tv.tile);
-        gen.tiles.push_back(streamed != streamedTiles.end()
-            ? streamed->second : _BuildTilePublication(tv, result, prev));
-        if (progress && streamed == streamedTiles.end())
+        if (streamed != streamedTiles.end()) {
+            gen.tiles.push_back(streamed->second);
+            continue;
+        }
+        rebuildCvs += tv.totalLiveCvs;
+        buildViews.push_back(&tv);
+    }
+    std::vector<UsdGenTilePublication> built(buildViews.size());
+    // Threaded over tiles for big rebuilds (plain TBB: Cook owns no
+    // scheduler context here): each worker builds whole tiles into
+    // indexed slots. Small rebuilds keep the serial driver below. Chunks
+    // cap at 8 like every other site: uncapped auto-partitioning over the
+    // 20-thread arena regressed this loop 5x (oversubscription on the
+    // pinned cores plus co-tenant contention).
+    int const tileWorkers = tbb::this_task_arena::max_concurrency();
+    size_t const tileChunks =
+        (tileWorkers > 1 && rebuildCvs > 32768)
+            ? std::min({size_t(tileWorkers), size_t(8), buildViews.size()})
+            : 1;
+    if (tileChunks > 1) {
+        std::vector<std::exception_ptr> buildError(buildViews.size());
+        UsdGenRunResult const &buildResult = result;
+        UsdGenTileView const *const *views = buildViews.data();
+        UsdGenTilePublication *slots = built.data();
+        std::exception_ptr *errors = buildError.data();
+        size_t const jobs = buildViews.size();
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, tileChunks),
+            [&](tbb::blocked_range<size_t> const &range) {
+                for (size_t c = range.begin(); c != range.end(); ++c) {
+                    size_t const i0 = (c * jobs) / tileChunks;
+                    size_t const i1 = ((c + 1) * jobs) / tileChunks;
+                    for (size_t i = i0; i < i1; ++i) {
+                        try {
+                            slots[i] = _BuildTilePublication(
+                                *views[i], buildResult, prev);
+                        } catch (...) {
+                            errors[i] = std::current_exception();
+                        }
+                    }
+                }
+            });
+        for (std::exception_ptr const &e : buildError)
+            if (e)
+                std::rethrow_exception(e);
+    } else {
+        for (size_t i = 0; i < buildViews.size(); ++i)
+            built[i] = _BuildTilePublication(*buildViews[i], result, prev);
+    }
+    for (size_t i = 0; i < built.size(); ++i) {
+        gen.tiles.push_back(std::move(built[i]));
+        if (progress)
             emitProgress(gen.tiles.back());
     }
     std::sort(gen.tiles.begin(), gen.tiles.end(),
