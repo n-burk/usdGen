@@ -424,6 +424,14 @@ target_sources(usdGen PRIVATE
 set_source_files_properties(libs/usdGen/usdGen/expressions/frontend.cpp PROPERTIES
     COMPILE_DEFINITIONS "SeExpr2=UsdGenSeExprFrontend;SeExprInternal2=UsdGenSeExprFrontendInternal;USDGEN_SEEXPR_SANDBOX"
     INCLUDE_DIRECTORIES "${_usdgen_frontend_dir}")
+# The host suffix port (deformEvaluateCpu.h, inlined into
+# deformPipeline.cpp) needs sqrt vectorized: with math-errno the vectorizer
+# keeps the explicit-fma loop's sqrt scalar and the suffix runs ~2x slower.
+# Values are unchanged (errno only); nothing in the library reads errno.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties(libs/usdGen/usdGen/vulkan/deformPipeline.cpp PROPERTIES
+        COMPILE_OPTIONS "-fno-math-errno")
+endif()
 target_include_directories(usdGen PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen>
     $<INSTALL_INTERFACE:include>)
@@ -1115,6 +1123,9 @@ if(USDGEN_ENABLE_VULKAN_RUNTIME OR (USDGEN_BUILD_TESTS AND USDGEN_BUILD_VULKAN_T
     _usdgen_compile_vulkan_shader(noise_generate noiseGenerate)
     _usdgen_compile_vulkan_shader(deform_evaluate deformEvaluate)
     _usdgen_compile_vulkan_shader(deform_apply deformApply)
+    _usdgen_compile_vulkan_shader(deform_evaluate_verify deformEvaluateVerify)
+    _usdgen_compile_vulkan_shader(deform_evaluate_fill deformEvaluateFill)
+    _usdgen_compile_vulkan_shader(deform_evaluate_cached deformEvaluateCached)
     _usdgen_compile_vulkan_shader(overlap widthOverlapWitness)
     _usdgen_compile_vulkan_shader(resample_vk resampleVk)
     _usdgen_compile_vulkan_shader(mapvk_sample mapVkSample)
@@ -1126,6 +1137,9 @@ if(USDGEN_ENABLE_VULKAN_RUNTIME OR (USDGEN_BUILD_TESTS AND USDGEN_BUILD_VULKAN_T
     _usdgen_compile_vulkan_shader(rbfvk_trisolve rbfVkTriSolve)
     _usdgen_compile_vulkan_shader(rbfvk_evaluate rbfVkEvaluate)
     _usdgen_compile_vulkan_shader(rbfvk_apply rbfVkApply)
+    _usdgen_compile_vulkan_shader(rbfvk_verify rbfVkVerify)
+    _usdgen_compile_vulkan_shader(rbfvk_fill rbfVkFill)
+    _usdgen_compile_vulkan_shader(rbfvk_evaluate_cached rbfVkEvaluateCached)
     _usdgen_compile_vulkan_shader(picktile_pick picktileVkPick)
     _usdgen_compile_vulkan_shader(picktile_footprint picktileVkFootprint)
     _usdgen_compile_vulkan_shader(picktile_tiles picktileVkTiles)
@@ -1254,6 +1268,16 @@ add_executable(testUsdGenExecutionSequenceWindow tests/testUsdGenExecutionSequen
 target_link_libraries(testUsdGenExecutionSequenceWindow PRIVATE usdGen)
 add_test(NAME testUsdGenExecutionSequenceWindow COMMAND testUsdGenExecutionSequenceWindow)
 set_tests_properties(testUsdGenExecutionSequenceWindow PROPERTIES LABELS "T0;scheduling;resources" TIMEOUT 30)
+add_executable(testUsdGenSchedulerAffinity tests/testUsdGenSchedulerAffinity.cpp)
+target_link_libraries(testUsdGenSchedulerAffinity PRIVATE usdGen)
+add_test(NAME testUsdGenSchedulerAffinity COMMAND testUsdGenSchedulerAffinity)
+set_tests_properties(testUsdGenSchedulerAffinity PROPERTIES
+    LABELS "T0;scheduling;affinity" TIMEOUT 60
+    SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+add_executable(testUsdGenWorkerPool tests/testUsdGenWorkerPool.cpp)
+target_link_libraries(testUsdGenWorkerPool PRIVATE usdGen)
+add_test(NAME testUsdGenWorkerPool COMMAND testUsdGenWorkerPool)
+set_tests_properties(testUsdGenWorkerPool PROPERTIES LABELS "T0;scheduling;pool" TIMEOUT 60)
 add_executable(testUsdGenExecutionTaskGraph tests/testUsdGenExecutionTaskGraph.cpp)
 target_link_libraries(testUsdGenExecutionTaskGraph PRIVATE usdGen)
 add_test(NAME testUsdGenExecutionTaskGraph COMMAND testUsdGenExecutionTaskGraph)
@@ -1581,10 +1605,14 @@ if(USDGEN_BUILD_VULKAN_TESTS)
         LABELS "T1;parity;cuda;vulkan;operators;style" RESOURCE_LOCK usdgen_gpu
         TIMEOUT 120 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
     add_executable(testUsdGenVulkanDeform tests/testUsdGenVulkanDeform.cpp
-        "${_usdgen_vulkan_deform_evaluate_spv}" "${_usdgen_vulkan_deform_apply_spv}")
+        "${_usdgen_vulkan_deform_evaluate_spv}" "${_usdgen_vulkan_deform_apply_spv}"
+        "${_usdgen_vulkan_deform_evaluate_verify_spv}" "${_usdgen_vulkan_deform_evaluate_fill_spv}"
+        "${_usdgen_vulkan_deform_evaluate_cached_spv}")
     target_link_libraries(testUsdGenVulkanDeform PRIVATE usdGenVulkanNative usdGenMath)
     add_test(NAME testUsdGenVulkanDeform COMMAND testUsdGenVulkanDeform
-        "${_usdgen_vulkan_deform_evaluate_spv}" "${_usdgen_vulkan_deform_apply_spv}")
+        "${_usdgen_vulkan_deform_evaluate_spv}" "${_usdgen_vulkan_deform_apply_spv}"
+        "${_usdgen_vulkan_deform_evaluate_verify_spv}" "${_usdgen_vulkan_deform_evaluate_fill_spv}"
+        "${_usdgen_vulkan_deform_evaluate_cached_spv}")
     set_tests_properties(testUsdGenVulkanDeform PROPERTIES
         LABELS "T1;vulkan;operators;deform" RESOURCE_LOCK usdgen_gpu
         TIMEOUT 60 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
@@ -1601,14 +1629,14 @@ if(USDGEN_BUILD_VULKAN_TESTS)
         LABELS "T1;parity;cuda;vulkan;operators;deform;surface" RESOURCE_LOCK usdgen_gpu
         TIMEOUT 120 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
     add_executable(testUsdGenVulkanRbfVkParity tests/testUsdGenVulkanRbfVkParity.cpp
-        "${_usdgen_vulkan_rbfvk_extent_spv}" "${_usdgen_vulkan_rbfvk_gram_spv}" "${_usdgen_vulkan_rbfvk_build_matrix_spv}" "${_usdgen_vulkan_rbfvk_lu_spv}" "${_usdgen_vulkan_rbfvk_rhs_spv}" "${_usdgen_vulkan_rbfvk_trisolve_spv}" "${_usdgen_vulkan_rbfvk_evaluate_spv}" "${_usdgen_vulkan_rbfvk_apply_spv}")
+        "${_usdgen_vulkan_rbfvk_extent_spv}" "${_usdgen_vulkan_rbfvk_gram_spv}" "${_usdgen_vulkan_rbfvk_build_matrix_spv}" "${_usdgen_vulkan_rbfvk_lu_spv}" "${_usdgen_vulkan_rbfvk_rhs_spv}" "${_usdgen_vulkan_rbfvk_trisolve_spv}" "${_usdgen_vulkan_rbfvk_evaluate_spv}" "${_usdgen_vulkan_rbfvk_apply_spv}" "${_usdgen_vulkan_rbfvk_verify_spv}" "${_usdgen_vulkan_rbfvk_fill_spv}" "${_usdgen_vulkan_rbfvk_evaluate_cached_spv}")
     target_link_libraries(testUsdGenVulkanRbfVkParity PRIVATE usdGenVulkanNative usdGenMath)
     if(USDGEN_ENABLE_CUDA)
         target_link_libraries(testUsdGenVulkanRbfVkParity PRIVATE usdGenGpu)
         target_compile_definitions(testUsdGenVulkanRbfVkParity PRIVATE USDGEN_ENABLE_CUDA)
     endif()
     add_test(NAME testUsdGenVulkanRbfVkParity COMMAND testUsdGenVulkanRbfVkParity
-        "${_usdgen_vulkan_rbfvk_extent_spv}" "${_usdgen_vulkan_rbfvk_gram_spv}" "${_usdgen_vulkan_rbfvk_build_matrix_spv}" "${_usdgen_vulkan_rbfvk_lu_spv}" "${_usdgen_vulkan_rbfvk_rhs_spv}" "${_usdgen_vulkan_rbfvk_trisolve_spv}" "${_usdgen_vulkan_rbfvk_evaluate_spv}" "${_usdgen_vulkan_rbfvk_apply_spv}")
+        "${_usdgen_vulkan_rbfvk_extent_spv}" "${_usdgen_vulkan_rbfvk_gram_spv}" "${_usdgen_vulkan_rbfvk_build_matrix_spv}" "${_usdgen_vulkan_rbfvk_lu_spv}" "${_usdgen_vulkan_rbfvk_rhs_spv}" "${_usdgen_vulkan_rbfvk_trisolve_spv}" "${_usdgen_vulkan_rbfvk_evaluate_spv}" "${_usdgen_vulkan_rbfvk_apply_spv}" "${_usdgen_vulkan_rbfvk_verify_spv}" "${_usdgen_vulkan_rbfvk_fill_spv}" "${_usdgen_vulkan_rbfvk_evaluate_cached_spv}")
     set_tests_properties(testUsdGenVulkanRbfVkParity PROPERTIES
         LABELS "T1;parity;cuda;vulkan;operators;rbf;deform" RESOURCE_LOCK usdgen_gpu
         TIMEOUT 780 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
@@ -2836,6 +2864,34 @@ foreach(_t benchUsdGenChain benchUsdGenSparse)
 endforeach()
 set_tests_properties(benchUsdGenChain PROPERTIES LABELS "T0;perf;gate:E-1;gate:E-7")
 set_tests_properties(benchUsdGenSparse PROPERTIES LABELS "T0;perf;gate:E-2")
+add_executable(benchUsdGenRbfDeform tests/perf/benchUsdGenRbfDeform.cpp)
+target_link_libraries(benchUsdGenRbfDeform PRIVATE usdGenTestUtils)
+if(USDGEN_ENABLE_CUDA)
+    target_compile_definitions(benchUsdGenRbfDeform PRIVATE USDGEN_BENCH_CUDA)
+    target_link_libraries(benchUsdGenRbfDeform PRIVATE usdGenGpu)
+endif()
+add_test(NAME benchUsdGenRbfDeform COMMAND benchUsdGenRbfDeform)
+set_tests_properties(benchUsdGenRbfDeform PROPERTIES
+    LABELS "T0;perf;rbf;deform"
+    TIMEOUT 600 SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+if(USDGEN_ENABLE_VULKAN_RUNTIME)
+    target_compile_definitions(benchUsdGenRbfDeform PRIVATE USDGEN_BENCH_VULKAN)
+    target_link_libraries(benchUsdGenRbfDeform PRIVATE usdGenVulkanNative)
+    target_sources(benchUsdGenRbfDeform PRIVATE
+        "${_usdgen_vulkan_deform_evaluate_spv}" "${_usdgen_vulkan_deform_apply_spv}"
+        "${_usdgen_vulkan_deform_evaluate_verify_spv}" "${_usdgen_vulkan_deform_evaluate_fill_spv}"
+        "${_usdgen_vulkan_deform_evaluate_cached_spv}"
+        "${_usdgen_vulkan_rbfvk_extent_spv}" "${_usdgen_vulkan_rbfvk_gram_spv}"
+        "${_usdgen_vulkan_rbfvk_build_matrix_spv}" "${_usdgen_vulkan_rbfvk_lu_spv}"
+        "${_usdgen_vulkan_rbfvk_rhs_spv}" "${_usdgen_vulkan_rbfvk_trisolve_spv}"
+        "${_usdgen_vulkan_rbfvk_evaluate_spv}")
+    add_test(NAME benchUsdGenRbfDeformVulkan COMMAND benchUsdGenRbfDeform
+        --vulkan-spv "${CMAKE_CURRENT_BINARY_DIR}/vulkan")
+    set_tests_properties(benchUsdGenRbfDeformVulkan PROPERTIES
+        LABELS "T1;perf;vulkan;rbf;deform" RESOURCE_LOCK usdgen_gpu
+        TIMEOUT 600 SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77"
+        FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
+endif()
 add_executable(benchUsdGenSurfaceBindings tests/perf/benchUsdGenSurfaceBindings.cpp)
 target_link_libraries(benchUsdGenSurfaceBindings PRIVATE usdGenTestUtils)
 add_test(NAME benchUsdGenSurfaceBindings COMMAND benchUsdGenSurfaceBindings)
