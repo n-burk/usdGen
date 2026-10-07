@@ -215,29 +215,18 @@ __global__ void verifyKernel(const int* a, const int* b, size_t words, int* flag
 // Bind-memo digest: FNV-1a/64 over the rest samples as float words. The
 // probe copies the caller's rest words to pinned staging and hashes them
 // on the host instead of launching a digest kernel, trading a ~20us
-// kernel (launch latency dominates the 1.2KB hash) for a ~3us copy. Each
-// of 256 lanes folds its grid-stride words, then lane 0's serial pass
-// chains the lane digests byte-wise in lane order; the combination order
-// is fixed, so identical words always digest identically. Integers only,
-// so the value is exact on any evaluator; the memo key pairs this with
-// the shape and smoothing.
+// kernel (launch latency dominates the 1.2KB hash) for a ~3us copy. One
+// lane over the words in order: the retired digest kernel's 256-lane
+// fold-and-chain is gone and nothing cross-checks values against it (the
+// memo compares digests within the binding only), so the chain's ~2us of
+// serial multiplies buys nothing. Integers only, so identical words
+// always digest identically; the memo key pairs this with the shape and
+// smoothing.
 uint64_t BindDigestHost(uint32_t const* w, size_t words) {
-    uint64_t part[256];
-    for (int t = 0; t < 256; ++t) {
-        uint64_t h = 1469598103934665603ULL;
-        for (size_t i = size_t(t); i < words; i += 256) {
-            h ^= uint64_t(w[i]);
-            h *= 1099511628211ULL;
-        }
-        part[t] = h;
-    }
     uint64_t d = 1469598103934665603ULL;
-    for (int t = 0; t < 256; ++t) {
-        uint64_t v = part[t];
-        for (int b = 0; b < 8; ++b) {
-            d ^= (v >> (b * 8)) & 0xFFu;
-            d *= 1099511628211ULL;
-        }
+    for (size_t i = 0; i < words; ++i) {
+        d ^= uint64_t(w[i]);
+        d *= 1099511628211ULL;
     }
     return d;
 }
