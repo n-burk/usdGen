@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 namespace usdGen::vulkan {
 
@@ -40,8 +41,24 @@ struct DeformEvalCpuParams {
 
 namespace deformCpuDetail {
 
-inline bool FiniteF(float v) noexcept { return !(std::isinf(v) || std::isnan(v)); }
-inline bool FiniteD(double v) noexcept { return !(std::isinf(v) || std::isnan(v)); }
+// Exponent-bit finiteness: all-set exponent bits iff infinite or NaN (sNaN
+// included), exactly `!(isinf || isnan)` on each lane with no FP work, so
+// the per-CV checks run on the integer pipe (which the sample loop's FP
+// mix leaves idle) instead of fabs/fcmp/fccmp plus short-circuit
+// branches. The verdicts, the skip pattern, and the bad flag are
+// unchanged, so every output bit matches.
+inline bool FiniteF(float v) noexcept
+{
+    uint32_t u;
+    std::memcpy(&u, &v, sizeof u);
+    return (u & 0x7F800000u) != 0x7F800000u;
+}
+inline bool FiniteD(double v) noexcept
+{
+    uint64_t u;
+    std::memcpy(&u, &v, sizeof u);
+    return (u & 0x7FF0000000000000ull) != 0x7FF0000000000000ull;
+}
 
 // One W-wide block over qs[0..W) -> ds[0..W): shader text, lane-arrayed so
 // the vectorizer contracts across lanes. `bad` accumulates the non-finite
