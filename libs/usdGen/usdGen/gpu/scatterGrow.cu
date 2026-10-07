@@ -235,54 +235,131 @@ size_t RadixFirstDup(uint64_t const* ids, size_t n) {
         }
         std::swap(w, wOut);
     }
-    size_t dBad = n;
-    size_t run = 0;
-    // Scratch for resolving oversized fold groups (pathological shared
-    // folds): sort the group's members by full id, then the adjacent
-    // scan below is exact. Sorted once per group, reused across groups.
-    std::vector<uint32_t> big;
-    for (size_t i = 1; i <= n; ++i) {
-        if (i < n && uint32_t(w[i] >> 32) == uint32_t(w[run] >> 32)) continue;
+    // Per-group second-occurrence resolution, shared by the serial scan
+    // and the parallel chunks below: members run..i-1 share a fold in
+    // ascending-index order, so full-id loads stream rather than scatter.
+    // Returns the minimum of dBad and the group's second occurrences (1
+    // is the global floor: no second occurrence sits below index 1).
+    uint64_t const *wSorted = w;
+    auto foldAt = [wSorted](size_t i) -> uint32_t {
+        return uint32_t(wSorted[i] >> 32);
+    };
+    auto resolveGroup = [&](size_t run, size_t i,
+                            std::vector<uint32_t> &big,
+                            size_t dBad) -> size_t {
         size_t const g = i - run;
-        if (g > 1) {
-            // Members run..i-1 share a fold in ascending-index order.
-            // Full-id loads below run in ascending index order, so they
-            // stream rather than scatter.
-            if (g > 64) {
-                big.resize(g);
-                for (size_t t = 0; t < g; ++t)
-                    big[t] = uint32_t(w[run + t]);
-                std::sort(big.begin(), big.end(), [&](uint32_t a, uint32_t b) {
-                    return ids[a] != ids[b] ? ids[a] < ids[b] : a < b;
-                });
-                // Sorted by (full id, index): within an equal-id run the
-                // indices ascend, so run[1] is that id's 2nd occurrence.
-                for (size_t j = 1; j < g; ++j) {
-                    if (ids[big[j]] != ids[big[j - 1]]) continue;
-                    if (j > 1 && ids[big[j - 1]] == ids[big[j - 2]]) continue;
-                    if (size_t(big[j]) < dBad) {
-                        dBad = size_t(big[j]);
-                        if (dBad == 1) return 1;
-                    }
+        if (g > 64) {
+            // Scratch for oversized fold groups (pathological shared
+            // folds): sort the group's members by full id, then the
+            // adjacent scan below is exact.
+            big.resize(g);
+            for (size_t t = 0; t < g; ++t)
+                big[t] = uint32_t(wSorted[run + t]);
+            std::sort(big.begin(), big.end(), [&](uint32_t a, uint32_t b) {
+                return ids[a] != ids[b] ? ids[a] < ids[b] : a < b;
+            });
+            // Sorted by (full id, index): within an equal-id run the
+            // indices ascend, so run[1] is that id's 2nd occurrence.
+            for (size_t j = 1; j < g; ++j) {
+                if (ids[big[j]] != ids[big[j - 1]]) continue;
+                if (j > 1 && ids[big[j - 1]] == ids[big[j - 2]]) continue;
+                if (size_t(big[j]) < dBad) {
+                    dBad = size_t(big[j]);
+                    if (dBad == 1) return 1;
                 }
-            } else {
-                for (size_t j = run + 1; j < i; ++j) {
-                    // Member j is a true second occurrence exactly when
-                    // one earlier member shares its full id.
-                    uint32_t const jj = uint32_t(w[j]);
-                    int matches = 0;
-                    for (size_t q = run; q < j; ++q) {
-                        if (ids[jj] == ids[uint32_t(w[q])] && ++matches > 1)
-                            break;
-                    }
-                    if (matches == 1 && size_t(jj) < dBad) {
-                        dBad = size_t(jj);
-                        if (dBad == 1) return 1;
-                    }
+            }
+        } else {
+            for (size_t j = run + 1; j < i; ++j) {
+                // Member j is a true second occurrence exactly when
+                // one earlier member shares its full id.
+                uint32_t const jj = uint32_t(wSorted[j]);
+                int matches = 0;
+                for (size_t q = run; q < j; ++q) {
+                    if (ids[jj] == ids[uint32_t(wSorted[q])] && ++matches > 1)
+                        break;
+                }
+                if (matches == 1 && size_t(jj) < dBad) {
+                    dBad = size_t(jj);
+                    if (dBad == 1) return 1;
                 }
             }
         }
-        run = i;
+        return dBad;
+    };
+    // Parallel group resolution for big inputs (same rule as the radix
+    // passes; small inputs keep the serial scan): each chunk resolves
+    // the fold groups fully inside its range with the identical
+    // per-group logic, skipping groups that touch either edge, and a
+    // serial pass resolves each boundary-straddling group once
+    // (boundaries inside an already-resolved group compare equal to its
+    // start, so every group resolves exactly once). Every multi-group
+    // resolves with the same logic either way and the minima combine
+    // order-free, so any chunking returns the identical index.
+    size_t dBad = n;
+    if (dupChunks == 1) {
+        size_t run = 0;
+        std::vector<uint32_t> big;
+        for (size_t i = 1; i <= n; ++i) {
+            if (i < n && foldAt(i) == foldAt(run)) continue;
+            size_t const g = i - run;
+            if (g > 1) {
+                dBad = resolveGroup(run, i, big, dBad);
+                if (dBad == 1) return 1;
+            }
+            run = i;
+        }
+        return dBad;
+    }
+    std::vector<size_t> chunkMin(dupChunks, n);
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, dupChunks),
+        [&](tbb::blocked_range<size_t> const& range) {
+            for (size_t c = range.begin(); c != range.end(); ++c) {
+                size_t const i0 = (c * n) / dupChunks;
+                size_t const i1 = ((c + 1) * n) / dupChunks;
+                // Owned sub-range: skip the left-partial group (it
+                // extends below i0) and stop at the right-partial
+                // group's start (it extends past i1). What remains
+                // holds only complete groups.
+                size_t s0 = i0, s1 = i1;
+                if (c > 0 && s0 < n && foldAt(s0) == foldAt(s0 - 1))
+                    while (s0 < n && foldAt(s0) == foldAt(i0)) ++s0;
+                if (i1 < n && i1 > s0 && foldAt(i1 - 1) == foldAt(i1)) {
+                    s1 = i1 - 1;
+                    while (s1 > s0 && foldAt(s1 - 1) == foldAt(i1)) --s1;
+                }
+                size_t local = n;
+                if (s1 > s0) {
+                    std::vector<uint32_t> big;
+                    size_t run = s0;
+                    for (size_t j = s0 + 1; j <= s1; ++j) {
+                        if (j < s1 && foldAt(j) == foldAt(run)) continue;
+                        if (j - run > 1) {
+                            local = resolveGroup(run, j, big, local);
+                            if (local == 1) break;
+                        }
+                        run = j;
+                    }
+                }
+                chunkMin[c] = local;
+            }
+        });
+    for (size_t c = 0; c < dupChunks; ++c)
+        dBad = chunkMin[c] < dBad ? chunkMin[c] : dBad;
+    if (dBad > 1) {
+        std::vector<uint32_t> big;
+        size_t lastR = 0;
+        for (size_t c = 0; c + 1 < dupChunks; ++c) {
+            size_t const b = ((c + 1) * n) / dupChunks;
+            if (b == 0 || b >= n || foldAt(b - 1) != foldAt(b)) continue;
+            size_t L = b - 1;
+            while (L > 0 && foldAt(L - 1) == foldAt(b)) --L;
+            if (L < lastR) continue;  // inside an already-resolved group
+            size_t R = b + 1;
+            while (R < n && foldAt(R) == foldAt(b)) ++R;
+            dBad = resolveGroup(L, R, big, dBad);
+            lastR = R;
+            if (dBad == 1) break;
+        }
     }
     return dBad;
 }

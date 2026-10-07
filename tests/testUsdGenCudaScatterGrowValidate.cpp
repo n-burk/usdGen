@@ -7,6 +7,8 @@
 
 #include <cuda_runtime.h>
 
+#include "tbb/task_arena.h"
+
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
@@ -154,6 +156,8 @@ static ScatterGrowStatus ReferenceValidate(
     }
     return ScatterGrowStatus::Ok;
 }
+
+static bool CheckThreadedResolve();
 
 int main()
 {
@@ -657,6 +661,117 @@ int main()
             }
         }
     }
+    CHECK(CheckThreadedResolve());
     std::printf("testUsdGenCudaScatterGrowValidate: PASS\n");
     return 0;
+}
+
+// Threaded dup-resolve equivalence (r26): past 32768 ids the fold-group
+// resolution chunks over workers with a serial boundary pass. Every case
+// below runs under 1..8-worker arenas (chunk counts 1..8) with identical
+// verdicts. Statuses pin the duplicate minimum exactly through its mLim
+// coupling: a wrong-small minimum flips the finite-tie case to Dup, a
+// wrong-large minimum flips the overflow-before-dup case to NonFinite.
+static uint64_t SwapHalves(uint64_t v)
+{
+    return (v << 32) | (v >> 32);
+}
+
+static bool CheckResolveCase(std::shared_ptr<const ScatterGrowRoots> const &r,
+                             ScatterGrowControls const &c,
+                             ScatterGrowStatus want, size_t wantTotal)
+{
+    for (int workers = 1; workers <= 8; ++workers) {
+        tbb::task_arena arena(workers);
+        ScatterGrowStatus got = ScatterGrowStatus::CudaError;
+        size_t total = 0;
+        arena.execute([&] {
+            got = CudaScatterGrow::ValidateRoots(r, c, &total);
+        });
+        if (got != want)
+            return false;
+        if (want == ScatterGrowStatus::Ok && total != wantTotal)
+            return false;
+    }
+    return true;
+}
+
+static bool CheckThreadedResolve()
+{
+    size_t const n = 40000;  // past the 32768 threading threshold
+    ScatterGrowControls c = Controls();
+    // Unique ids: clean parallel resolve, scans, and fast-path math.
+    if (!CheckResolveCase(Roots(n), c, ScatterGrowStatus::Ok, n * 8))
+        return false;
+    // One dup pair at the extremes: full-range scan, last-index minimum.
+    {
+        auto r = Roots(n);
+        r->stableIds[n - 1] = r->stableIds[0];
+        if (!CheckResolveCase(r, c, ScatterGrowStatus::DuplicateStableId, 0))
+            return false;
+    }
+    // All equal: one group spanning every boundary at every chunking,
+    // through the oversized-group sort path.
+    {
+        auto r = Roots(n);
+        for (size_t i = 0; i < n; ++i)
+            r->stableIds[i] = 7;
+        if (!CheckResolveCase(r, c, ScatterGrowStatus::DuplicateStableId, 0))
+            return false;
+    }
+    // Nineteen medium groups (first 2000 unique): minima spread across
+    // chunks, several groups straddling boundaries at most chunkings.
+    {
+        auto r = Roots(n);
+        for (size_t g = 1; g < 20; ++g)
+            for (size_t i = g * 2000; i < (g + 1) * 2000; ++i)
+                r->stableIds[i] = 1000000 + g;
+        if (!CheckResolveCase(r, c, ScatterGrowStatus::DuplicateStableId, 0))
+            return false;
+    }
+    // Fold collisions that are NOT duplicates: swapped halves share the
+    // lo^hi fold but differ as full ids, so the resolve must accept.
+    {
+        auto r = Roots(n);
+        for (size_t k = 0; k < 1000; ++k) {
+            uint64_t const id = 2 * k + 1;
+            r->stableIds[2 * k] = id;
+            r->stableIds[2 * k + 1] = SwapHalves(id);
+        }
+        if (!CheckResolveCase(r, c, ScatterGrowStatus::Ok, n * 8))
+            return false;
+    }
+    // Minimum-exactness through mLim: dup at 100 hides the overflow at
+    // 200 (DuplicateStableId); dup at 300 exposes it (NonFiniteInput).
+    {
+        auto cOf = Controls();
+        cOf.length = double(FLT_MAX);
+        cOf.randomLo = 1.0;
+        cOf.randomHi = 1.0;
+        auto hidden = Roots(n);
+        hidden->stableIds[100] = hidden->stableIds[0];
+        hidden->positions[200] = make_float3(FLT_MAX, 0.0f, 0.0f);
+        hidden->rootN[200] = make_float3(1.0f, 0.0f, 0.0f);
+        if (!CheckResolveCase(hidden, cOf, ScatterGrowStatus::DuplicateStableId,
+                              0))
+            return false;
+        auto exposed = Roots(n);
+        exposed->stableIds[300] = exposed->stableIds[0];
+        exposed->positions[200] = make_float3(FLT_MAX, 0.0f, 0.0f);
+        exposed->rootN[200] = make_float3(1.0f, 0.0f, 0.0f);
+        if (!CheckResolveCase(exposed, cOf, ScatterGrowStatus::NonFiniteInput,
+                              0))
+            return false;
+    }
+    // Finite-tie: dup and NaN share index 500, finite wins ties. A
+    // wrong-small duplicate minimum would flip this to DuplicateStableId.
+    {
+        auto r = Roots(n);
+        r->stableIds[500] = r->stableIds[0];
+        r->positions[500] = make_float3(
+            std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f);
+        if (!CheckResolveCase(r, c, ScatterGrowStatus::NonFiniteInput, 0))
+            return false;
+    }
+    return true;
 }
