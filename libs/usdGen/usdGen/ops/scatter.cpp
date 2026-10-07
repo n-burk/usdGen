@@ -724,10 +724,18 @@ bool UsdGenScatterOp::Capture(
             float const u0 = UsdGenHash01(hSeedBary0 ^ curveId, kSaltScatterBary);
             float const u1 = UsdGenHash01(hSeedBary1 ^ curveId, kSaltScatterBary + 1u);
             float const u2 = UsdGenHash01(hSeedBary2 ^ curveId, kSaltScatterBary + 2u);
-            size_t ti = ntri - 1;
-            {
+            // Peeled quad pick (bit-identical): at ntri == 2 the loop
+            // computes ti = (target < triW[0]) ? 0 : 1 (ti starts at 1;
+            // t = 0 sets 0 or falls to t = 1, which sets 1 or leaves 1).
+            // Same comparisons in the same order, same ti, without the
+            // data-dependent trip count. Other fan sizes keep the loop.
+            double const target = double(u0) * areaRest;
+            size_t ti;
+            if (ntri == 2) {
+                ti = (target < double(triW[0])) ? 0 : 1;
+            } else {
+                ti = ntri - 1;
                 double cum = 0.0;
-                double const target = double(u0) * areaRest;
                 for (size_t t = 0; t < ntri; ++t) {
                     cum += double(triW[t]);
                     if (target < cum) { ti = t; break; }
@@ -967,10 +975,18 @@ bool UsdGenScatterOp::Capture(
             float const u0 = UsdGenHash01(hSeedBary0 ^ curveId, kSaltScatterBary);
             float const u1 = UsdGenHash01(hSeedBary1 ^ curveId, kSaltScatterBary + 1u);
             float const u2 = UsdGenHash01(hSeedBary2 ^ curveId, kSaltScatterBary + 2u);
-            size_t ti = ntri - 1;
-            {
+            // Peeled quad pick (bit-identical): at ntri == 2 the loop
+            // computes ti = (target < triW[0]) ? 0 : 1 (ti starts at 1;
+            // t = 0 sets 0 or falls to t = 1, which sets 1 or leaves 1).
+            // Same comparisons in the same order, same ti, without the
+            // data-dependent trip count. Other fan sizes keep the loop.
+            double const target = double(u0) * areaRest;
+            size_t ti;
+            if (ntri == 2) {
+                ti = (target < double(triW[0])) ? 0 : 1;
+            } else {
+                ti = ntri - 1;
                 double cum = 0.0;
-                double const target = double(u0) * areaRest;
                 for (size_t t = 0; t < ntri; ++t) {
                     cum += double(triW[t]);
                     if (target < cum) { ti = t; break; }
