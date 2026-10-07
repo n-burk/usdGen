@@ -34,6 +34,9 @@
 #include <string>
 #include <vector>
 
+#include "tbb/parallel_for.h"
+#include "tbb/task_arena.h"
+
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace usdGenImaging {
@@ -129,6 +132,43 @@ _PackVec3(VtFloatArray const &f, size_t n)
                     static_cast<void const*>(f.data()),
                     n * sizeof(GfVec3f));
     }
+    return packed;
+}
+
+// The scalp cap's packs (tens of MB) chunked over workers: same uninitialized
+// array + same bytes in the same slots, copied over disjoint byte ranges
+// (mirrors the instancer's _MemcpyChunked). Serial callers only — the tile
+// loop already runs one pack per worker, and nesting would only add task
+// overhead while the arena is saturated.
+VtVec3fArray
+_PackVec3Chunked(VtFloatArray const &f, size_t n)
+{
+    static_assert(sizeof(GfVec3f) == 3 * sizeof(float),
+                  "GfVec3f must be three contiguous floats for the pack memcpy");
+    VtVec3fArray packed;
+    packed.resize(n, [](GfVec3f *b, GfVec3f *e) {
+        std::uninitialized_default_construct(b, e);
+    });
+    size_t const bytes = n * sizeof(GfVec3f);
+    if (bytes == 0) return packed;
+    int const workers = tbb::this_task_arena::max_concurrency();
+    size_t const chunks =
+        (workers > 1 && bytes > 262144) ? size_t((std::min)(workers, 8)) : 1;
+    auto *d = static_cast<unsigned char *>(static_cast<void *>(packed.data()));
+    auto const *s = static_cast<unsigned char const *>(
+        static_cast<void const *>(f.data()));
+    if (chunks == 1) {
+        std::memcpy(d, s, bytes);
+        return packed;
+    }
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, chunks),
+        [&](tbb::blocked_range<size_t> const &range) {
+            for (size_t c = range.begin(); c != range.end(); ++c) {
+                size_t const b0 = (c * bytes) / chunks;
+                size_t const b1 = ((c + 1) * bytes) / chunks;
+                std::memcpy(d + b0, s + b0, b1 - b0);
+            }
+        });
     return packed;
 }
 
@@ -876,8 +916,9 @@ UsdGenTilePublisher::BuildScalpShadowDataSource(
     for (usdGen::UsdGenPlane const &plane : cap.extraUniform) {
         if (plane.arity != 3 || plane.f.size() != points * 3) continue;
         // The same vec3 packing a tile's depths get: separate scalar buffers
-        // exhaust GL's per-stage SSBO slots.
-        VtVec3fArray packed = _PackVec3(plane.f, points);
+        // exhaust GL's per-stage SSBO slots. Chunked: the cap's planes are
+        // tens of MB and this loop is serial.
+        VtVec3fArray packed = _PackVec3Chunked(plane.f, points);
         _Add(&pvNames, &pvValues, plane.name,
              _Primvar(_Samp(packed), plane.interpolation));
     }
