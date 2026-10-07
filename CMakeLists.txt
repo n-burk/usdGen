@@ -2804,7 +2804,8 @@ foreach(_t testUsdGenGraph testUsdGenKernelDeterminism testUsdGenWidth
            testUsdGenCpuCurveSource testUsdGenLengthRaggedLayout testUsdGenSurfaceRootFrames
            testUsdGenSurfaceRootBindings testUsdGenSurfaceRootBindingBoundaries
            testUsdGenSurfaceBindingCache testUsdGenScatterDensity testUsdGenLimitScatter
-           testUsdGenScatterTwoPass testUsdGenScatterSortSkips)
+           testUsdGenScatterTwoPass testUsdGenScatterSortSkips
+           testUsdGenScatterDegenerateFan)
     add_executable(${_t} tests/${_t}.cpp)
     target_link_libraries(${_t} PRIVATE usdGenTestUtils)
     add_test(NAME ${_t} COMMAND ${_t})
@@ -2827,6 +2828,8 @@ set_tests_properties(testUsdGenScatterTwoPass PROPERTIES LABELS "T0;sources;scat
 target_link_libraries(testUsdGenScatterTwoPass PRIVATE usdGenMath)
 set_tests_properties(testUsdGenScatterSortSkips PROPERTIES LABELS "T0;sources;scatter;sortskips")
 target_link_libraries(testUsdGenScatterSortSkips PRIVATE usdGenMath)
+set_tests_properties(testUsdGenScatterDegenerateFan PROPERTIES LABELS "T0;sources;scatter;degenfan")
+target_link_libraries(testUsdGenScatterDegenerateFan PRIVATE usdGenMath)
 
 # M1 T0 perf benches (E-1/E-7 via --threads; E-2 sparse; carried in from
 # prototypes/data-plane-benchmark, 11 §2.2).
