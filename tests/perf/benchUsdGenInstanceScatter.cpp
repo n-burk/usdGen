@@ -9,7 +9,9 @@
 //   bake_twist_ms        Bake, cards+surfaceFrame uniform twist (no random)
 //   bake_tangent_ms      UsdGenInstancer::Bake, cards+curveTangent
 //   bake_spheres_ms      UsdGenInstancer::Bake, spheres
+//   bake_strided_ms      Bake, cards stress with per-CV displayColor (root-CV gather)
 //   instancer_draw_ms    BuildInstancerDataSource + primvar readback
+//   draw_vary2_ms        draw assembly over displayColor + an arity-2 uniform plane
 //   attr_cook_ms         UsdGenAttributeCookInstances over the scattered roots
 //   cuda_input_ms        PrepareCudaScatterInput (CPU capture + convert)
 //   cuda_validate_ms     CudaScatterGrow::ValidateRoots (CPU-only preflight)
@@ -498,6 +500,99 @@ int RunDraw(Options const &opts, UsdGenCurveBuffer const &curves,
         Fold(&sum, f.h);
     }
     Report(opts, "instancer_draw", ms, sum);
+    return 0;
+}
+
+// Draw assembly over an arity-2 uniform varying plus displayColor: covers
+// the VtVec2fArray pack leg that instancer_draw never reaches. Baked once
+// outside the timer; the timed region mirrors RunDraw.
+int RunDrawVary2(Options const &opts, UsdGenCurveBuffer const &curves,
+                 VtVec3fArray const &color)
+{
+    UsdGenCurveBuffer vary = curves;
+    UsdGenPlane pair;
+    pair.name = TfToken("usdGen:pair");
+    pair.interpolation = TfToken("uniform");
+    pair.type = TfToken("float");
+    pair.arity = 2;
+    pair.f.resize(size_t(vary.totalCurves) * 2);
+    for (size_t i = 0; i < pair.f.size(); ++i)
+        pair.f[i] = float(i % 1024) / 1024.0f - 0.5f;
+    vary.extraCurve.push_back(pair);
+    UsdGenInstanceParams params =
+        BakeParams("cards", "surfaceFrame", 15.0f, 30.0f);
+    params.variationPrimvars =
+        VtArray<TfToken>{TfToken("displayColor"), TfToken("usdGen:pair")};
+    UsdGenInstanceCurves input;
+    input.curves = &vary;
+    input.displayColor = color;
+    UsdGenInstanceResult baked;
+    std::string error;
+    if (!UsdGenInstancer::Bake(params, input,
+                               SdfPath("/groom/__usdGenRender/inst_op"),
+                               &baked, &error)) {
+        std::printf("draw_vary2 error: bake failed: %s\n", error.c_str());
+        return 1;
+    }
+    std::vector<double> ms;
+    ms.reserve(size_t(opts.reps));
+    uint64_t sum = 0;
+    for (int r = 0; r < opts.reps; ++r) {
+        auto const t0 = std::chrono::steady_clock::now();
+        HdContainerDataSourceHandle const ds =
+            UsdGenInstancer::BuildInstancerDataSource(baked,
+                                                      SdfPath("/groom"));
+        VtVec3fArray tv, sv, cv;
+        VtQuathArray qv;
+        VtVec2fArray pv2;
+        HdContainerDataSourceHandle const pv = Child(ds, "primvars");
+        if (pv) {
+            char const *names[5] = {"hydra:instanceTranslations",
+                                    "hydra:instanceRotations",
+                                    "hydra:instanceScales", "displayColor",
+                                    "usdGen:pair"};
+            for (int k = 0; k < 5; ++k) {
+                HdContainerDataSourceHandle const prim =
+                    Child(pv, names[k]);
+                if (!prim)
+                    continue;
+                if (HdSampledDataSourceHandle s =
+                        HdSampledDataSource::Cast(
+                            prim->Get(TfToken("primvarValue")))) {
+                    VtValue const val = s->GetValue(0.0);
+                    if (val.IsHolding<VtVec3fArray>()) {
+                        VtVec3fArray const &a =
+                            val.UncheckedGet<VtVec3fArray>();
+                        if (k == 0)
+                            tv = a;
+                        else if (k == 2)
+                            sv = a;
+                        else if (k == 3)
+                            cv = a;
+                    } else if (val.IsHolding<VtQuathArray>()) {
+                        qv = val.UncheckedGet<VtQuathArray>();
+                    } else if (val.IsHolding<VtVec2fArray>()) {
+                        pv2 = val.UncheckedGet<VtVec2fArray>();
+                    }
+                }
+            }
+        }
+        auto const t1 = std::chrono::steady_clock::now();
+        if (!ds) {
+            std::printf("draw_vary2 error: null data source\n");
+            return 1;
+        }
+        ms.push_back(
+            std::chrono::duration<double, std::milli>(t1 - t0).count());
+        Fnv f;
+        HashArray(&f, tv);
+        HashArray(&f, qv);
+        HashArray(&f, sv);
+        HashArray(&f, cv);
+        HashArray(&f, pv2);
+        Fold(&sum, f.h);
+    }
+    Report(opts, "draw_vary2", ms, sum);
     return 0;
 }
 
@@ -1154,7 +1249,8 @@ int main(int argc, char **argv)
         WantStage(opts, "") || WantStage(opts, "bake_cards") ||
         WantStage(opts, "bake_tangent") || WantStage(opts, "bake_spheres") ||
         WantStage(opts, "bake_notwist") || WantStage(opts, "bake_twist") ||
-        WantStage(opts, "instancer_draw") || WantStage(opts, "attr_cook") ||
+        WantStage(opts, "bake_strided") || WantStage(opts, "instancer_draw") ||
+        WantStage(opts, "draw_vary2") || WantStage(opts, "attr_cook") ||
         WantStage(opts, "vk_build_targets") || WantStage(opts, "vk_build_cpu") ||
         WantStage(opts, "vk_dispatch");
     UsdGenCurveBuffer roots;
@@ -1170,7 +1266,8 @@ int main(int argc, char **argv)
     }
     if (WantStage(opts, "bake_cards") || WantStage(opts, "bake_tangent") ||
         WantStage(opts, "bake_spheres") || WantStage(opts, "bake_notwist") ||
-        WantStage(opts, "bake_twist") || WantStage(opts, "instancer_draw")) {
+        WantStage(opts, "bake_twist") || WantStage(opts, "bake_strided") ||
+        WantStage(opts, "instancer_draw") || WantStage(opts, "draw_vary2")) {
         UsdGenCurveBuffer const curves = GrowForBake(roots, opts.bakeCvs);
         VtVec3fArray color(curves.totalCurves);
         for (uint32_t c = 0; c < curves.totalCurves; ++c)
@@ -1198,8 +1295,23 @@ int main(int argc, char **argv)
             if (int rc = RunBake(opts, "bake_spheres", "spheres",
                                  "surfaceFrame", 15.0f, 30.0f, curves, color))
                 return rc;
+        // bake_strided re-runs the cards stress case with a per-CV color
+        // source (one color per CV, sampled at each curve's root CV).
+        if (WantStage(opts, "bake_strided")) {
+            VtVec3fArray colorCv(curves.totalCvs);
+            for (uint32_t i = 0; i < curves.totalCvs; ++i)
+                colorCv[i] =
+                    GfVec3f(float(i % 256) / 255.0f, 0.5f, 0.25f);
+            if (int rc = RunBake(opts, "bake_strided", "cards",
+                                 "surfaceFrame", 15.0f, 30.0f, curves,
+                                 colorCv))
+                return rc;
+        }
         if (WantStage(opts, "instancer_draw"))
             if (int rc = RunDraw(opts, curves, color))
+                return rc;
+        if (WantStage(opts, "draw_vary2"))
+            if (int rc = RunDrawVary2(opts, curves, color))
                 return rc;
     }
     if (WantStage(opts, "attr_cook"))
