@@ -35,116 +35,6 @@ bool AllowedScatterParam(TfToken const& name) {
 
 bool IsFloat(VtValue const& v) { return v.IsHolding<float>() || v.IsHolding<double>(); }
 
-// Assign-source iterator transposing the SoA point planes into float3
-// positions, so vector::assign copies into uninitialized storage:
-// resize(n) would value-init (zero) the same elements assign then
-// overwrites, and the non-scalar zeroing loop costs ~10% of the convert.
-struct TransposePositionsIterator {
-    float const* px = nullptr;
-    float const* py = nullptr;
-    float const* pz = nullptr;
-    using iterator_category = std::random_access_iterator_tag;
-    using value_type = float3;
-    using difference_type = std::ptrdiff_t;
-    using pointer = float3 const*;
-    using reference = float3;
-    TransposePositionsIterator() = default;
-    TransposePositionsIterator(float const* x, float const* y, float const* z)
-        : px(x), py(y), pz(z) {}
-    float3 operator*() const { return float3{px[0], py[0], pz[0]}; }
-    float3 operator[](difference_type i) const { return *(*this + i); }
-    TransposePositionsIterator& operator++()
-    {
-        ++px;
-        ++py;
-        ++pz;
-        return *this;
-    }
-    TransposePositionsIterator operator++(int)
-    {
-        TransposePositionsIterator c(*this);
-        ++*this;
-        return c;
-    }
-    TransposePositionsIterator& operator--()
-    {
-        --px;
-        --py;
-        --pz;
-        return *this;
-    }
-    TransposePositionsIterator operator--(int)
-    {
-        TransposePositionsIterator c(*this);
-        --*this;
-        return c;
-    }
-    TransposePositionsIterator& operator+=(difference_type i)
-    {
-        px += i;
-        py += i;
-        pz += i;
-        return *this;
-    }
-    TransposePositionsIterator& operator-=(difference_type i)
-    {
-        px -= i;
-        py -= i;
-        pz -= i;
-        return *this;
-    }
-    friend TransposePositionsIterator operator+(TransposePositionsIterator a,
-                                               difference_type i)
-    {
-        return a += i;
-    }
-    friend TransposePositionsIterator operator+(difference_type i,
-                                               TransposePositionsIterator a)
-    {
-        return a += i;
-    }
-    friend TransposePositionsIterator operator-(TransposePositionsIterator a,
-                                               difference_type i)
-    {
-        return a -= i;
-    }
-    friend difference_type operator-(TransposePositionsIterator const& a,
-                                    TransposePositionsIterator const& b)
-    {
-        return a.px - b.px;
-    }
-    friend bool operator==(TransposePositionsIterator const& a,
-                           TransposePositionsIterator const& b)
-    {
-        return a.px == b.px;
-    }
-    friend bool operator!=(TransposePositionsIterator const& a,
-                           TransposePositionsIterator const& b)
-    {
-        return a.px != b.px;
-    }
-    friend bool operator<(TransposePositionsIterator const& a,
-                          TransposePositionsIterator const& b)
-    {
-        return a.px < b.px;
-    }
-    friend bool operator<=(TransposePositionsIterator const& a,
-                           TransposePositionsIterator const& b)
-    {
-        return a.px <= b.px;
-    }
-    friend bool operator>(TransposePositionsIterator const& a,
-                          TransposePositionsIterator const& b)
-    {
-        return a.px > b.px;
-    }
-    friend bool operator>=(TransposePositionsIterator const& a,
-                           TransposePositionsIterator const& b)
-    {
-        return a.px >= b.px;
-    }
-};
-
 bool ValidScatterParam(UsdGenParamValue const& param) {
     if(param.name==TfToken("subdivisionLevel"))
         return param.value.IsHolding<int>() && param.value.UncheckedGet<int>()==0;
@@ -309,7 +199,7 @@ CudaScatterInputStatus ValidateSurface(UsdGenSurfaceDesc const& surface,
 namespace {
 // Pooled convert shells (bit-identical): the convert's positions plane
 // churns ~12MB of alloc+fault per 1M-root convert, and the transpose
-// assign() fully overwrites it, so a released shell's positions capacity
+// fill fully overwrites it, so a released shell's positions capacity
 // is purely a warm backing store with no observable contents. (The six
 // adopted planes move out of the capture buffer, so they never touch
 // shell storage.) Checkout is one shell per thread (depth 1: sequential
@@ -504,11 +394,13 @@ CudaScatterInputStatus PrepareCudaScatterInput(
     // bytes the capture gathered; the deleter donates them back to the
     // idle capture shell (see RecycleConvertShell), so sequential
     // converts reuse every buffer. Only positions still copies: it
-    // transposes the SoA point planes the moves leave behind.
-    // reserve+assign instead of resize+loop: resize value-inits (zeroes)
-    // every element through the non-scalar fill loop and the transpose
-    // then overwrites them all. assign copies straight into uninitialized
-    // storage with identical bytes.
+    // transposes the SoA point planes the moves leave behind, through an
+    // uninitialized fill over reused-or-fresh storage (a vector's resize
+    // would value-init first). Every output slot is an independent
+    // function of its three input floats into a disjoint lane, so the
+    // fill chunks over workers for big inputs (plain TBB: this runs
+    // outside any scheduler arena) and serially below the threshold.
+    // Same bytes, any chunking.
     {
         UsdGenCurveBuffer& mut = capture->MutableBuffer();
         prep->stableIds.adopt(std::move(mut.curveId));
@@ -518,14 +410,37 @@ CudaScatterInputStatus PrepareCudaScatterInput(
         prep->rootB.adopt(std::move(mut.rootB));
         prep->rootN.adopt(std::move(mut.rootN));
     }
-    prep->positions.reserve(n);
-    if (n)
-        prep->positions.assign(
-            TransposePositionsIterator(roots.px.cdata(), roots.py.cdata(),
-                                       roots.pz.cdata()),
-            TransposePositionsIterator(roots.px.cdata() + n,
-                                       roots.py.cdata() + n,
-                                       roots.pz.cdata() + n));
+    if (n) {
+        float const* px = roots.px.cdata();
+        float const* py = roots.py.cdata();
+        float const* pz = roots.pz.cdata();
+        int const transposeWorkers = tbb::this_task_arena::max_concurrency();
+        size_t const transposeChunks =
+            (transposeWorkers > 1 && n > 32768)
+                ? std::min({size_t(transposeWorkers), size_t(8), n})
+                : 1;
+        prep->positions.resize_fill(
+            n, [px, py, pz, transposeChunks](GfVec3f* b, GfVec3f* e) {
+                if (transposeChunks == 1) {
+                    size_t i = 0;
+                    for (GfVec3f* d = b; d != e; ++d, ++i)
+                        new (d) GfVec3f(px[i], py[i], pz[i]);
+                    return;
+                }
+                size_t const M = size_t(e - b);
+                tbb::parallel_for(
+                    tbb::blocked_range<size_t>(0, transposeChunks),
+                    [&](tbb::blocked_range<size_t> const& range) {
+                        for (size_t c = range.begin(); c != range.end();
+                             ++c) {
+                            size_t const i0 = (c * M) / transposeChunks;
+                            size_t const i1 = ((c + 1) * M) / transposeChunks;
+                            for (size_t i = i0; i < i1; ++i)
+                                new (b + i) GfVec3f(px[i], py[i], pz[i]);
+                        }
+                    });
+            });
+    }
     *out = std::shared_ptr<gpu::ScatterGrowRoots const>(
         shell.release(), RecycleConvertShell);
     // Recycle the capture shell (see above): every plane is clear()ed

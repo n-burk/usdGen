@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <initializer_list>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace usdGen::gpu {
@@ -48,7 +49,8 @@ inline int RootsFromPod(int32_t p) { return int(p); }
 
 // A VtArray-backed roots plane with the std::vector read API every consumer
 // already uses (size/empty/data/const-subscript) plus the small mutation
-// subset tests use (reserve/push_back/pop_back/init-list assign/clear).
+// subset tests use (reserve/push_back/pop_back/init-list assign/clear and
+// a mutable data() for word-level fault planting).
 // The producer adopts capture planes with O(1) moves instead of copying
 // them element-wise; the stored bytes are identical either way, so every
 // consumer observes the same values. Copies share storage copy-on-write
@@ -102,12 +104,29 @@ public:
     {
         return reinterpret_cast<Pod const*>(store.cdata());
     }
+    // Mutable base (detaches a COW-shared plane first, like every other
+    // VtArray mutation, so a live copy keeps its bytes).
+    Pod* data() noexcept
+    {
+        return reinterpret_cast<Pod*>(store.data());
+    }
     Pod operator[](size_t i) const { return RootsToPod(store[i]); }
     Ref operator[](size_t i) { return Ref(&store[i]); }
     void clear() { store.clear(); }
     void reserve(size_t n) { store.reserve(n); }
     void push_back(Pod const& v) { store.push_back(RootsFromPod(v)); }
     void pop_back() { store.pop_back(); }
+    // Uninitialized fill: clear + resize(n, fill), whose filler runs over
+    // reused-or-fresh storage, skipping the value-init a plain resize
+    // would zero first. The filler must construct every element exactly
+    // once (placement new); disjoint ranges fill disjoint lanes, so the
+    // threaded transpose below writes identical bytes under any chunking.
+    template <class Fill>
+    void resize_fill(size_t n, Fill&& fill)
+    {
+        store.clear();
+        store.resize(n, std::forward<Fill>(fill));
+    }
     // O(1) ownership take; the source is left moved-from (valid, empty).
     void adopt(Store&& s) { store = std::move(s); }
     // O(1) ownership give (adopt's inverse); this plane is left empty.
@@ -120,10 +139,12 @@ private:
 // Immutable, captured Scatter roots.  The producer retains the shared owner
 // until the producer stream's terminal callback has been proved and committed.
 // The six layout-identical planes are adopted (moved) from the capture's
-// VtArrays; positions is transposed from the SoA point planes and stays a
-// vector.  Same bytes as the old all-vector spelling, without the copies.
+// VtArrays; positions is transposed from the SoA point planes through an
+// uninitialized fill (a vector cannot fill thread-parallel without a
+// zero-init pass).  Same bytes as the old all-vector spelling, without
+// the copies.
 struct ScatterGrowRoots {
-    std::vector<float3> positions;
+    ScatterGrowPlane<PXR_NS::VtVec3fArray, float3, PXR_NS::GfVec3f> positions;
     ScatterGrowPlane<PXR_NS::VtArray<uint64_t>, uint64_t, uint64_t> stableIds;
     ScatterGrowPlane<PXR_NS::VtIntArray, int32_t, int> rootPrim;
     ScatterGrowPlane<PXR_NS::VtVec2fArray, float2, PXR_NS::GfVec2f> rootUV;

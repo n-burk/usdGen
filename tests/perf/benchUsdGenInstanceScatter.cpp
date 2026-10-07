@@ -711,7 +711,7 @@ int RunCuda(Options const &opts, UsdGenGraphDesc const &desc)
         inMs.push_back(
             std::chrono::duration<double, std::milli>(t1 - t0).count());
         Fnv f;
-        HashVector(&f, out->positions);
+        HashSpan(&f, out->positions.data(), out->positions.size());
         HashSpan(&f, out->stableIds.data(), out->stableIds.size());
         Fold(&inSum, f.h);
         nroots = out->positions.size();

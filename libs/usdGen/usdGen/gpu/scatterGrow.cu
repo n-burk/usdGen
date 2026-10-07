@@ -702,6 +702,9 @@ __global__ void GrowKernel(float3 const* roots, uint64_t const* ids,
 
 template <class T> cudaError_t Allocate(DeviceBuffer<T>& dst, std::vector<T> const& src,
                                          UsdGenExecutionMemoryReservation* r) { return dst.reset(src.size(), r); }
+// Count twin for the VtArray-backed roots planes (Allocate only sizes).
+template <class T> cudaError_t Allocate(DeviceBuffer<T>& dst, size_t n,
+                                        UsdGenExecutionMemoryReservation* r) { return dst.reset(n, r); }
 template <class T> cudaError_t Copy(DeviceBuffer<T>& dst, std::vector<T> const& src, cudaStream_t s) {
     return src.empty() ? cudaSuccess : cudaMemcpyAsync(dst.data(), src.data(), src.size()*sizeof(T), cudaMemcpyHostToDevice, s);
 }
@@ -1196,7 +1199,7 @@ ScatterGrowStatus CudaScatterGrow::BeginFresh(
     // Positions alone stage here: ids/prim/uv/frames upload directly into
     // their published pending_ buffers below, so the kernel's per-thread
     // copy tail (and its second allocation of the same bytes) is gone.
-    cudaError_t e=Allocate(in.points,roots->positions,reserve);
+    cudaError_t e=Allocate(in.points,roots->positions.size(),reserve);
     if(e!=cudaSuccess)return Status(e);
     e=pending_.points.reset(total,reserve); if(e==cudaSuccess)e=pending_.widths.reset(total,reserve); if(e==cudaSuccess)e=pending_.hairT.reset(total,reserve); if(e==cudaSuccess)e=pending_.offsets.reset(roots->positions.size()+1,reserve); if(e==cudaSuccess)e=pending_.stableIds.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootPrim.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootUV.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootT.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootB.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootN.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=error_.reset(1,reserve,UsdGenExecutionResourceKind::Scratch); if(e!=cudaSuccess){discardPending(); return Status(e);}
     if (!hostError_) {
@@ -1226,7 +1229,7 @@ ScatterGrowStatus CudaScatterGrow::BeginFresh(
     *hostError_ = kPendingStatus;
     e = cudaMemsetAsync(error_.data(), 0, sizeof(int), stream);
     if (e != cudaSuccess) return Status(e);
-    e=Copy(pendingInput_.points,rootsOwner_->positions,stream); if(e==cudaSuccess)e=Copy(pending_.stableIds,rootsOwner_->stableIds.data(),rootsOwner_->stableIds.size(),stream); if(e==cudaSuccess)e=Copy(pending_.rootPrim,rootsOwner_->rootPrim.data(),rootsOwner_->rootPrim.size(),stream); if(e==cudaSuccess)e=Copy(pending_.rootUV,rootsOwner_->rootUV.data(),rootsOwner_->rootUV.size(),stream); if(e==cudaSuccess)e=Copy(pending_.rootT,rootsOwner_->rootT.data(),rootsOwner_->rootT.size(),stream); if(e==cudaSuccess)e=Copy(pending_.rootB,rootsOwner_->rootB.data(),rootsOwner_->rootB.size(),stream); if(e==cudaSuccess)e=Copy(pending_.rootN,rootsOwner_->rootN.data(),rootsOwner_->rootN.size(),stream);
+    e=Copy(pendingInput_.points,rootsOwner_->positions.data(),rootsOwner_->positions.size(),stream); if(e==cudaSuccess)e=Copy(pending_.stableIds,rootsOwner_->stableIds.data(),rootsOwner_->stableIds.size(),stream); if(e==cudaSuccess)e=Copy(pending_.rootPrim,rootsOwner_->rootPrim.data(),rootsOwner_->rootPrim.size(),stream); if(e==cudaSuccess)e=Copy(pending_.rootUV,rootsOwner_->rootUV.data(),rootsOwner_->rootUV.size(),stream); if(e==cudaSuccess)e=Copy(pending_.rootT,rootsOwner_->rootT.data(),rootsOwner_->rootT.size(),stream); if(e==cudaSuccess)e=Copy(pending_.rootB,rootsOwner_->rootB.data(),rootsOwner_->rootB.size(),stream); if(e==cudaSuccess)e=Copy(pending_.rootN,rootsOwner_->rootN.data(),rootsOwner_->rootN.size(),stream);
     if(e!=cudaSuccess) return Status(e);
     if (!pendingCurves_) {
         e = cudaMemsetAsync(pending_.offsets.data(), 0, sizeof(uint32_t), stream);
