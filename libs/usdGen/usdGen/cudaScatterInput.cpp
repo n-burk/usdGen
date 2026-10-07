@@ -11,6 +11,7 @@
 #include <iterator>
 #include <limits>
 #include <set>
+#include <vector>
 
 namespace usdGen {
 namespace {
@@ -225,6 +226,95 @@ bool ValidScatterParam(UsdGenParamValue const& param) {
     return param.name == TfToken("flip") && param.value.IsHolding<bool>();
 }
 
+// Threaded validation scans (verdict-identical): every ValidateSurface
+// group below reports the same message for any failing element, and the
+// groups keep their serial order with the same early exit between groups,
+// so chunking within a group only changes how fast the verdict arrives.
+// Small arrays stay serial (dispatch costs more than the scan below ~32K
+// elements). Plain TBB: validation runs outside any scheduler arena.
+template <class T, class Bad>
+bool ValidateAnyBad(T const* data, size_t n, Bad bad) {
+    int const workers = tbb::this_task_arena::max_concurrency();
+    size_t const chunks =
+        (workers > 1 && n > 32768) ? std::min({size_t(workers), size_t(8), n})
+                                   : 1;
+    if (chunks == 1) {
+        for (size_t i = 0; i < n; ++i)
+            if (bad(data[i])) return true;
+        return false;
+    }
+    std::vector<unsigned char> partial(chunks, 0);
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, chunks),
+        [&](tbb::blocked_range<size_t> const& range) {
+            for (size_t c = range.begin(); c != range.end(); ++c) {
+                size_t const i0 = (c * n) / chunks;
+                size_t const i1 = ((c + 1) * n) / chunks;
+                bool hit = false;
+                for (size_t i = i0; i < i1; ++i) {
+                    if (bad(data[i])) { hit = true; break; }
+                }
+                partial[c] = hit ? 1 : 0;
+            }
+        });
+    for (unsigned char f : partial)
+        if (f) return true;
+    return false;
+}
+
+// Face-count validation with the exact corner total (verdict-identical):
+// each chunk scans its slice with the serial spelling (count<3 fails,
+// overflow-checked accumulation), then the chunk sums combine in chunk
+// order with the same overflow check. All terms are non-negative past
+// the count<3 filter, so the running total overflows exactly when the
+// grand total exceeds the maximum, and any count<3 fails either way.
+// Same verdict, same total, any chunking.
+bool ValidateCounts(int const* counts, size_t n, size_t* corners) {
+    constexpr size_t kMax = std::numeric_limits<size_t>::max();
+    int const workers = tbb::this_task_arena::max_concurrency();
+    size_t const chunks =
+        (workers > 1 && n > 32768) ? std::min({size_t(workers), size_t(8), n})
+                                   : 1;
+    if (chunks == 1) {
+        size_t total = 0;
+        for (size_t i = 0; i < n; ++i) {
+            int const count = counts[i];
+            if (count < 3 || size_t(count) > kMax - total) return false;
+            total += size_t(count);
+        }
+        *corners = total;
+        return true;
+    }
+    struct CountChunk { bool bad = false; size_t sum = 0; };
+    std::vector<CountChunk> partial(chunks);
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, chunks),
+        [&](tbb::blocked_range<size_t> const& range) {
+            for (size_t c = range.begin(); c != range.end(); ++c) {
+                size_t const i0 = (c * n) / chunks;
+                size_t const i1 = ((c + 1) * n) / chunks;
+                size_t acc = 0;
+                bool bad = false;
+                for (size_t i = i0; i < i1; ++i) {
+                    int const count = counts[i];
+                    if (count < 3 || size_t(count) > kMax - acc) {
+                        bad = true;
+                        break;
+                    }
+                    acc += size_t(count);
+                }
+                partial[c].bad = bad;
+                partial[c].sum = acc;
+            }
+        });
+    size_t total = 0;
+    for (auto const& p : partial) {
+        if (p.bad) return false;
+        if (p.sum > kMax - total) return false;
+        total += p.sum;
+    }
+    *corners = total;
+    return true;
+}
+
 CudaScatterInputStatus ValidateSurface(UsdGenSurfaceDesc const& surface,
                                        std::string* reason) {
     if (surface.faceVertexCounts.empty()) {
@@ -234,12 +324,14 @@ CudaScatterInputStatus ValidateSurface(UsdGenSurfaceDesc const& surface,
         if (!surface.uv.empty() && surface.uv.size() != surface.restPoints.size())
             return Fail(CudaScatterInputStatus::InvalidSurface,
                         "Scatter surface UV cardinality differs from rest positions", reason);
-        for (GfVec3f const& p : surface.restPoints)
-            if (!Finite(p)) return Fail(CudaScatterInputStatus::InvalidSurface,
-                                        "Scatter surface has non-finite rest position", reason);
-        for (GfVec2f const& uv : surface.uv)
-            if (!Finite(uv)) return Fail(CudaScatterInputStatus::InvalidSurface,
-                                         "Scatter surface has non-finite UV", reason);
+        if (ValidateAnyBad(surface.restPoints.cdata(), surface.restPoints.size(),
+                           [](GfVec3f const& p) { return !Finite(p); }))
+            return Fail(CudaScatterInputStatus::InvalidSurface,
+                        "Scatter surface has non-finite rest position", reason);
+        if (ValidateAnyBad(surface.uv.cdata(), surface.uv.size(),
+                           [](GfVec2f const& uv) { return !Finite(uv); }))
+            return Fail(CudaScatterInputStatus::InvalidSurface,
+                        "Scatter surface has non-finite UV", reason);
         return CudaScatterInputStatus::Ok;
     }
     if (surface.restPoints.empty())
@@ -249,25 +341,32 @@ CudaScatterInputStatus ValidateSurface(UsdGenSurfaceDesc const& surface,
         return Fail(CudaScatterInputStatus::InvalidSurface,
                     "Scatter surface UV cardinality differs from rest positions", reason);
     size_t corners = 0;
-    for (int count : surface.faceVertexCounts) {
-        if (count < 3 || size_t(count) > std::numeric_limits<size_t>::max() - corners)
-            return Fail(CudaScatterInputStatus::InvalidSurface,
-                        "Scatter surface has invalid face cardinality", reason);
-        corners += size_t(count);
-    }
+    if (!ValidateCounts(surface.faceVertexCounts.cdata(),
+                        surface.faceVertexCounts.size(), &corners))
+        return Fail(CudaScatterInputStatus::InvalidSurface,
+                    "Scatter surface has invalid face cardinality", reason);
     if (corners != surface.faceVertexIndices.size())
         return Fail(CudaScatterInputStatus::InvalidSurface,
                     "Scatter surface face-index cardinality differs from face counts", reason);
-    for (GfVec3f const& p : surface.restPoints)
-        if (!Finite(p)) return Fail(CudaScatterInputStatus::InvalidSurface,
-                                    "Scatter surface has non-finite rest position", reason);
-    for (GfVec2f const& uv : surface.uv)
-        if (!Finite(uv)) return Fail(CudaScatterInputStatus::InvalidSurface,
-                                     "Scatter surface has non-finite UV", reason);
-    for (int index : surface.faceVertexIndices)
-        if (index < 0 || size_t(index) >= surface.restPoints.size())
-            return Fail(CudaScatterInputStatus::InvalidSurface,
-                        "Scatter surface has out-of-range face index", reason);
+    if (ValidateAnyBad(surface.restPoints.cdata(), surface.restPoints.size(),
+                       [](GfVec3f const& p) { return !Finite(p); }))
+        return Fail(CudaScatterInputStatus::InvalidSurface,
+                    "Scatter surface has non-finite rest position", reason);
+    if (ValidateAnyBad(surface.uv.cdata(), surface.uv.size(),
+                       [](GfVec2f const& uv) { return !Finite(uv); }))
+        return Fail(CudaScatterInputStatus::InvalidSurface,
+                    "Scatter surface has non-finite UV", reason);
+    size_t const points = surface.restPoints.size();
+    if (ValidateAnyBad(surface.faceVertexIndices.cdata(),
+                       surface.faceVertexIndices.size(),
+                       [points](int index) {
+                           return index < 0 || size_t(index) >= points;
+                       }))
+        return Fail(CudaScatterInputStatus::InvalidSurface,
+                    "Scatter surface has out-of-range face index", reason);
+    // The subset loop stays serial: range-vs-duplicate precedence is
+    // element-order-dependent (the first failing element names the
+    // message), and subsets are small (usually empty).
     std::set<int> subset;
     for (int face : surface.subsetFaces)
         if (face < 0 || size_t(face) >= surface.faceVertexCounts.size())

@@ -1,6 +1,8 @@
 #include "usdGen/cudaScatterInput.h"
 #include "usdGen/opRegistry.h"
 
+#include "tbb/task_arena.h"
+
 #include <cstdio>
 #include <limits>
 #include <memory>
@@ -31,6 +33,8 @@ static bool Direct(UsdGenGraphDesc const& d, UsdGenCurveBuffer* out) {
     *out=capture->Buffer();
     return true;
 }
+
+static bool CheckThreadedValidation();
 
 int main() {
     auto d=Desc(); UsdGenCurveBuffer direct; CHECK(Direct(d,&direct));
@@ -76,5 +80,164 @@ int main() {
     CHECK(PrepareCudaScatterInput(level,SdfPath("/scatter"),&roots,&reason)==CudaScatterInputStatus::Ok);
     level.nodes[0].params.back().value=VtValue(3);
     CHECK(PrepareCudaScatterInput(level,SdfPath("/scatter"),&roots,&reason)==CudaScatterInputStatus::Unsupported);
+    CHECK(CheckThreadedValidation());
     std::puts("testUsdGenCudaScatterInput: PASS"); return 0;
+}
+
+// Threaded validation equivalence (r26): past 32768 elements every
+// ValidateSurface group scans over workers. Verdicts (status + reason)
+// must match the serial spelling exactly, so each case runs in a
+// 1-worker arena and the default arena with identical results. Faults
+// sit in first/middle/last chunks of every group, so a chunking bug
+// that skipped elements fails loudly. Precedence cases pin the group
+// order under threading (counts before rest before uv before indices).
+static UsdGenGraphDesc BigDesc(int gx, int gy) {
+    UsdGenGraphDesc d;
+    UsdGenSurfaceDesc s; s.path=SdfPath("/surface");
+    for (int y = 0; y <= gy; ++y)
+        for (int x = 0; x <= gx; ++x) {
+            s.restPoints.push_back(GfVec3f(float(x), float(y), 0.0f));
+            s.uv.push_back(GfVec2f(float(x) / float(gx), float(y) / float(gy)));
+        }
+    for (int y = 0; y < gy; ++y)
+        for (int x = 0; x < gx; ++x) {
+            int v = y * (gx + 1) + x;
+            s.faceVertexCounts.push_back(4);
+            s.faceVertexIndices.push_back(v);
+            s.faceVertexIndices.push_back(v + 1);
+            s.faceVertexIndices.push_back(v + gx + 2);
+            s.faceVertexIndices.push_back(v + gx + 1);
+        }
+    d.surfaces.push_back(s);
+    UsdGenNodeDesc n; n.path=SdfPath("/scatter"); n.type=TfToken("UsdGenScatter"); n.seed=7;
+    n.surfaces={s.path}; n.params={{TfToken("density"),VtValue(8.0),false}};
+    d.nodes.push_back(n); return d;
+}
+
+struct ValidateVerdict {
+    CudaScatterInputStatus status = CudaScatterInputStatus::Ok;
+    std::string reason;
+    size_t roots = 0;
+};
+
+static ValidateVerdict RunVerdict(UsdGenGraphDesc const& d,
+                                 tbb::task_arena* arena) {
+    ValidateVerdict v;
+    auto run = [&] {
+        std::shared_ptr<const gpu::ScatterGrowRoots> roots;
+        v.status = PrepareCudaScatterInput(d, SdfPath("/scatter"), &roots,
+                                           &v.reason);
+        if (v.status == CudaScatterInputStatus::Ok && roots)
+            v.roots = roots->positions.size();
+    };
+    if (arena) arena->execute(run);
+    else run();
+    return v;
+}
+
+static bool VerdictMatches(UsdGenGraphDesc const& d,
+                           tbb::task_arena& serialArena,
+                           CudaScatterInputStatus want,
+                           char const* wantReason) {
+    ValidateVerdict s = RunVerdict(d, &serialArena);
+    ValidateVerdict t = RunVerdict(d, nullptr);
+    if (s.status != want || t.status != want) return false;
+    if (want == CudaScatterInputStatus::Ok)
+        return s.roots == t.roots;
+    return s.reason == wantReason && t.reason == wantReason;
+}
+
+static bool CheckThreadedValidation() {
+    tbb::task_arena serialArena(1);
+    auto big = BigDesc(200, 200);
+    // Every validation group sits past the 32768 threading threshold.
+    if (big.surfaces[0].restPoints.size() <= 32768 ||
+        big.surfaces[0].uv.size() <= 32768 ||
+        big.surfaces[0].faceVertexCounts.size() <= 32768 ||
+        big.surfaces[0].faceVertexIndices.size() <= 32768)
+        return false;
+    float const qnan = std::numeric_limits<float>::quiet_NaN();
+    if (!VerdictMatches(big, serialArena, CudaScatterInputStatus::Ok, ""))
+        return false;
+    if (RunVerdict(big, nullptr).roots == 0)
+        return false;
+    auto badRest = big;
+    badRest.surfaces[0].restPoints[0] = GfVec3f(qnan, 0, 0);
+    if (!VerdictMatches(badRest, serialArena,
+                        CudaScatterInputStatus::InvalidSurface,
+                        "Scatter surface has non-finite rest position"))
+        return false;
+    auto badRestLast = big;
+    badRestLast.surfaces[0].restPoints.back() = GfVec3f(0, 0, qnan);
+    if (!VerdictMatches(badRestLast, serialArena,
+                        CudaScatterInputStatus::InvalidSurface,
+                        "Scatter surface has non-finite rest position"))
+        return false;
+    auto badUv = big;
+    badUv.surfaces[0].uv[badUv.surfaces[0].uv.size() / 2] =
+        GfVec2f(0, qnan);
+    if (!VerdictMatches(badUv, serialArena,
+                        CudaScatterInputStatus::InvalidSurface,
+                        "Scatter surface has non-finite UV"))
+        return false;
+    auto badCount = big;
+    badCount.surfaces[0].faceVertexCounts[35000] = 2;
+    if (!VerdictMatches(badCount, serialArena,
+                        CudaScatterInputStatus::InvalidSurface,
+                        "Scatter surface has invalid face cardinality"))
+        return false;
+    auto badCorners = big;
+    badCorners.surfaces[0].faceVertexIndices.pop_back();
+    if (!VerdictMatches(badCorners, serialArena,
+                        CudaScatterInputStatus::InvalidSurface,
+                        "Scatter surface face-index cardinality differs from face counts"))
+        return false;
+    auto badIndex = big;
+    badIndex.surfaces[0].faceVertexIndices[100000] = 100000000;
+    if (!VerdictMatches(badIndex, serialArena,
+                        CudaScatterInputStatus::InvalidSurface,
+                        "Scatter surface has out-of-range face index"))
+        return false;
+    auto badIndexLast = big;
+    badIndexLast.surfaces[0].faceVertexIndices.back() = -1;
+    if (!VerdictMatches(badIndexLast, serialArena,
+                        CudaScatterInputStatus::InvalidSurface,
+                        "Scatter surface has out-of-range face index"))
+        return false;
+    // Group precedence under threading: the earliest failing group in
+    // serial order names the message, wherever the faults sit.
+    auto countsAndRest = big;
+    countsAndRest.surfaces[0].faceVertexCounts[0] = 1;
+    countsAndRest.surfaces[0].restPoints[5] = GfVec3f(qnan, 0, 0);
+    if (!VerdictMatches(countsAndRest, serialArena,
+                        CudaScatterInputStatus::InvalidSurface,
+                        "Scatter surface has invalid face cardinality"))
+        return false;
+    auto restAndIndex = big;
+    restAndIndex.surfaces[0].restPoints[5] = GfVec3f(qnan, 0, 0);
+    restAndIndex.surfaces[0].faceVertexIndices[7] = -1;
+    if (!VerdictMatches(restAndIndex, serialArena,
+                        CudaScatterInputStatus::InvalidSurface,
+                        "Scatter surface has non-finite rest position"))
+        return false;
+    auto uvAndIndex = big;
+    uvAndIndex.surfaces[0].uv[9] = GfVec2f(qnan, 0);
+    uvAndIndex.surfaces[0].faceVertexIndices[7] = -1;
+    if (!VerdictMatches(uvAndIndex, serialArena,
+                        CudaScatterInputStatus::InvalidSurface,
+                        "Scatter surface has non-finite UV"))
+        return false;
+    // The empty-faces path scans the same helpers past the threshold.
+    auto noFaces = big;
+    noFaces.surfaces[0].faceVertexCounts.clear();
+    noFaces.surfaces[0].faceVertexIndices.clear();
+    if (!VerdictMatches(noFaces, serialArena, CudaScatterInputStatus::Ok, ""))
+        return false;
+    auto noFacesBad = noFaces;
+    noFacesBad.surfaces[0].restPoints.back() = GfVec3f(qnan, 0, 0);
+    if (!VerdictMatches(noFacesBad, serialArena,
+                        CudaScatterInputStatus::InvalidSurface,
+                        "Scatter surface has non-finite rest position"))
+        return false;
+    return true;
 }
