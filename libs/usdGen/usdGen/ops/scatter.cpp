@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -176,6 +177,34 @@ inline uint64_t double_as_bits(double d)
     static_assert(sizeof(u) == sizeof(d), "");
     std::memcpy(&u, &d, sizeof(d));
     return u;
+}
+
+// Inline UsdGenMortonKey3 (kernels.cpp is canonical, copied verbatim):
+// the quantize is exact at every step (float->double is exact, the
+// cellScale multiply is exact for the 64.0f power of two, floor/clamp/
+// convert are exact) and the interleave is integer-only, so no
+// contraction-sensitive pattern exists and the inline is bit-identical
+// under any flags. Drops the cross-TU call per root and lets the key
+// loop vectorize. Re-check against kernels.cpp on touch.
+inline uint64_t ScatterMortonKey3(float x, float y, float z, float cellScale)
+{
+    auto split3 = [](uint32_t v) -> uint64_t {
+        uint64_t s = v & 0x1FFFFFull;
+        s = (s | (s << 32)) & 0x001F00000000FFFFull;
+        s = (s | (s << 16)) & 0x001F0000FF0000FFull;
+        s = (s | (s << 8)) & 0x100F00F00F00F00Full;
+        s = (s | (s << 4)) & 0x10C30C30C30C30C3ull;
+        s = (s | (s << 2)) & 0x1249249249249249ull;
+        return s;
+    };
+    auto quant = [cellScale](float v) -> uint32_t {
+        double q = std::floor(double(v) * double(cellScale));
+        if (q < double(-(1 << 20))) q = double(-(1 << 20));
+        if (q > double((1 << 20) - 1)) q = double((1 << 20) - 1);
+        return uint32_t(std::int64_t(q) + (1 << 20));
+    };
+    return split3(quant(x)) | (split3(quant(y)) << 1) |
+        (split3(quant(z)) << 2);
 }
 
 }  // namespace
@@ -801,7 +830,7 @@ bool UsdGenScatterOp::Capture(
                                    : 1;
     if (mortonChunks == 1) {
         for (size_t i = 0; i < N; ++i) {
-            uint64_t const key = UsdGenMortonKey3(ax[i], ay[i], az[i], 64.0f);
+            uint64_t const key = ScatterMortonKey3(ax[i], ay[i], az[i], 64.0f);
             morton[i] = key;
             order[i] = uint32_t(i);
             orKeys |= key;
@@ -821,7 +850,7 @@ bool UsdGenScatterOp::Capture(
             uint64_t orLocal = 0, andLocal = ~uint64_t(0);
             for (size_t i = i0; i < i1; ++i) {
                 uint64_t const key =
-                    UsdGenMortonKey3(px[i], py[i], pz[i], 64.0f);
+                    ScatterMortonKey3(px[i], py[i], pz[i], 64.0f);
                 mortonOut[i] = key;
                 orderOut[i] = uint32_t(i);
                 orLocal |= key;
