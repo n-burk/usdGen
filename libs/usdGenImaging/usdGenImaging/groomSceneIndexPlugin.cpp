@@ -25,6 +25,7 @@
 #include "pxr/base/tf/refPtr.h"
 #include "pxr/imaging/hd/systemMessages.h"
 #include <tbb/flow_graph.h>
+#include <tbb/parallel_for.h>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -986,10 +987,26 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         auto const publishStart = std::chrono::steady_clock::now();
         auto fresh = std::make_shared<TileMap>();
         const auto render = RenderPath(g->description);
+        // All-or-nothing namespace check, up front (was folded into the
+        // assembly loop): a stale tile discards the whole publication.
         for (auto const& tile : generation.tiles) {
             if (!tile.primPath.HasPrefix(render)) return; // old description namespace
-            fresh->emplace(tile.primPath,
-                ::usdGenImaging::UsdGenTilePublisher::BuildTileDataSource(tile, generation.id));
+        }
+        // Tile data sources are independent: assemble them on the TBB arena
+        // (the cook workers are idle this late in the frame), then emplace
+        // in tile order. TileMap is std::map, so iteration order — and the
+        // notices derived from it — are identical at any worker count.
+        std::vector<HdContainerDataSourceHandle> built(generation.tiles.size());
+        tbb::parallel_for(
+            tbb::blocked_range<size_t>(0, generation.tiles.size()),
+            [&](tbb::blocked_range<size_t> const& range) {
+                for (size_t i = range.begin(); i != range.end(); ++i) {
+                    built[i] = ::usdGenImaging::UsdGenTilePublisher::
+                        BuildTileDataSource(generation.tiles[i], generation.id);
+                }
+            });
+        for (size_t i = 0; i < generation.tiles.size(); ++i) {
+            fresh->emplace(generation.tiles[i].primPath, built[i]);
         }
         // The scalp-shadow cap lives beside the tiles, not in the TileMap:
         // it is a mesh, and the notice diff treats the two prim types
