@@ -115,8 +115,15 @@ public:
         ScatterGrowControls const& controls, size_t* total);
 
 private:
+    // No restPoints buffer: rest == points elementwise for grown roots
+    // (the kernel writes every point; the old D2D rest copy is gone), and
+    // a published generation is immutable (BeginFresh never mutates one;
+    // downstream styled points override the view with separately-owned
+    // buffers), so view() publishes the points buffer under both view
+    // slots. Identical bytes, one less allocation and 96MB less traffic
+    // per 1M-root/8cv grow.
     struct Storage {
-        DeviceBuffer<float3> points, restPoints, rootT, rootB, rootN;
+        DeviceBuffer<float3> points, rootT, rootB, rootN;
         DeviceBuffer<float> widths, hairT;
         DeviceBuffer<uint32_t> offsets;
         DeviceBuffer<uint64_t> stableIds;

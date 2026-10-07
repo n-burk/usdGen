@@ -726,7 +726,9 @@ ScatterGrowStatus GetScatterGrowRequirements(size_t curves, uint32_t cvs,
     // directly into their published output buffers (BeginFresh), so they
     // are counted in outputBytes below, not here.
     size_t const rootBytes = sizeof(float3);
-    size_t const pointBytes = 2 * sizeof(float3) + 2 * sizeof(float);
+    // One float3 per point: rest aliases the points buffer (see Storage),
+    // so there is no second rest allocation to account.
+    size_t const pointBytes = sizeof(float3) + 2 * sizeof(float);
     size_t const curveBytes = 3 * sizeof(float3) + sizeof(uint64_t) +
         sizeof(int32_t) + sizeof(float2) + sizeof(uint32_t);
     auto multiply = [](size_t a, size_t b, size_t* out) {
@@ -756,12 +758,12 @@ ScatterGrowStatus GetScatterGrowRequirements(size_t curves, uint32_t cvs,
     return ScatterGrowStatus::Ok;
 }
 
-void CudaScatterGrow::Storage::quarantine() noexcept { points.quarantine(); restPoints.quarantine(); rootT.quarantine(); rootB.quarantine(); rootN.quarantine(); widths.quarantine(); hairT.quarantine(); offsets.quarantine(); stableIds.quarantine(); rootPrim.quarantine(); rootUV.quarantine(); }
-size_t CudaScatterGrow::Storage::bytes() const noexcept { return points.bytes()+restPoints.bytes()+rootT.bytes()+rootB.bytes()+rootN.bytes()+widths.bytes()+hairT.bytes()+offsets.bytes()+stableIds.bytes()+rootPrim.bytes()+rootUV.bytes(); }
-void CudaScatterGrow::Storage::Reclassify(UsdGenExecutionResourceKind kind) noexcept { points.Reclassify(kind); restPoints.Reclassify(kind); rootT.Reclassify(kind); rootB.Reclassify(kind); rootN.Reclassify(kind); widths.Reclassify(kind); hairT.Reclassify(kind); offsets.Reclassify(kind); stableIds.Reclassify(kind); rootPrim.Reclassify(kind); rootUV.Reclassify(kind); }
-ScatterGrowStatus CudaScatterGrow::Storage::recordUse(cudaStream_t s) { cudaError_t e=points.recordUse(s); if(e==cudaSuccess)e=restPoints.recordUse(s); if(e==cudaSuccess)e=widths.recordUse(s); if(e==cudaSuccess)e=hairT.recordUse(s); if(e==cudaSuccess)e=offsets.recordUse(s); if(e==cudaSuccess)e=stableIds.recordUse(s); if(e==cudaSuccess)e=rootPrim.recordUse(s); if(e==cudaSuccess)e=rootUV.recordUse(s); if(e==cudaSuccess)e=rootT.recordUse(s); if(e==cudaSuccess)e=rootB.recordUse(s); if(e==cudaSuccess)e=rootN.recordUse(s); return Status(e); }
-ScatterGrowStatus CudaScatterGrow::Storage::waitOn(cudaStream_t s) const { cudaError_t e=points.waitOn(s); if(e==cudaSuccess)e=restPoints.waitOn(s); if(e==cudaSuccess)e=widths.waitOn(s); if(e==cudaSuccess)e=hairT.waitOn(s); if(e==cudaSuccess)e=offsets.waitOn(s); if(e==cudaSuccess)e=stableIds.waitOn(s); if(e==cudaSuccess)e=rootPrim.waitOn(s); if(e==cudaSuccess)e=rootUV.waitOn(s); if(e==cudaSuccess)e=rootT.waitOn(s); if(e==cudaSuccess)e=rootB.waitOn(s); if(e==cudaSuccess)e=rootN.waitOn(s); return Status(e); }
-ScatterGrowStatus CudaScatterGrow::Storage::synchronizeUse() const { cudaError_t e=points.synchronizeUse(); if(e==cudaSuccess)e=restPoints.synchronizeUse(); if(e==cudaSuccess)e=widths.synchronizeUse(); if(e==cudaSuccess)e=hairT.synchronizeUse(); if(e==cudaSuccess)e=offsets.synchronizeUse(); if(e==cudaSuccess)e=stableIds.synchronizeUse(); if(e==cudaSuccess)e=rootPrim.synchronizeUse(); if(e==cudaSuccess)e=rootUV.synchronizeUse(); if(e==cudaSuccess)e=rootT.synchronizeUse(); if(e==cudaSuccess)e=rootB.synchronizeUse(); if(e==cudaSuccess)e=rootN.synchronizeUse(); return Status(e); }
+void CudaScatterGrow::Storage::quarantine() noexcept { points.quarantine(); rootT.quarantine(); rootB.quarantine(); rootN.quarantine(); widths.quarantine(); hairT.quarantine(); offsets.quarantine(); stableIds.quarantine(); rootPrim.quarantine(); rootUV.quarantine(); }
+size_t CudaScatterGrow::Storage::bytes() const noexcept { return points.bytes()+rootT.bytes()+rootB.bytes()+rootN.bytes()+widths.bytes()+hairT.bytes()+offsets.bytes()+stableIds.bytes()+rootPrim.bytes()+rootUV.bytes(); }
+void CudaScatterGrow::Storage::Reclassify(UsdGenExecutionResourceKind kind) noexcept { points.Reclassify(kind); rootT.Reclassify(kind); rootB.Reclassify(kind); rootN.Reclassify(kind); widths.Reclassify(kind); hairT.Reclassify(kind); offsets.Reclassify(kind); stableIds.Reclassify(kind); rootPrim.Reclassify(kind); rootUV.Reclassify(kind); }
+ScatterGrowStatus CudaScatterGrow::Storage::recordUse(cudaStream_t s) { cudaError_t e=points.recordUse(s); if(e==cudaSuccess)e=widths.recordUse(s); if(e==cudaSuccess)e=hairT.recordUse(s); if(e==cudaSuccess)e=offsets.recordUse(s); if(e==cudaSuccess)e=stableIds.recordUse(s); if(e==cudaSuccess)e=rootPrim.recordUse(s); if(e==cudaSuccess)e=rootUV.recordUse(s); if(e==cudaSuccess)e=rootT.recordUse(s); if(e==cudaSuccess)e=rootB.recordUse(s); if(e==cudaSuccess)e=rootN.recordUse(s); return Status(e); }
+ScatterGrowStatus CudaScatterGrow::Storage::waitOn(cudaStream_t s) const { cudaError_t e=points.waitOn(s); if(e==cudaSuccess)e=widths.waitOn(s); if(e==cudaSuccess)e=hairT.waitOn(s); if(e==cudaSuccess)e=offsets.waitOn(s); if(e==cudaSuccess)e=stableIds.waitOn(s); if(e==cudaSuccess)e=rootPrim.waitOn(s); if(e==cudaSuccess)e=rootUV.waitOn(s); if(e==cudaSuccess)e=rootT.waitOn(s); if(e==cudaSuccess)e=rootB.waitOn(s); if(e==cudaSuccess)e=rootN.waitOn(s); return Status(e); }
+ScatterGrowStatus CudaScatterGrow::Storage::synchronizeUse() const { cudaError_t e=points.synchronizeUse(); if(e==cudaSuccess)e=widths.synchronizeUse(); if(e==cudaSuccess)e=hairT.synchronizeUse(); if(e==cudaSuccess)e=offsets.synchronizeUse(); if(e==cudaSuccess)e=stableIds.synchronizeUse(); if(e==cudaSuccess)e=rootPrim.synchronizeUse(); if(e==cudaSuccess)e=rootUV.synchronizeUse(); if(e==cudaSuccess)e=rootT.synchronizeUse(); if(e==cudaSuccess)e=rootB.synchronizeUse(); if(e==cudaSuccess)e=rootN.synchronizeUse(); return Status(e); }
 
 CudaScatterGrow::~CudaScatterGrow() {
     if (unprovenWork_) {
@@ -1161,7 +1163,7 @@ ScatterGrowStatus CudaScatterGrow::BeginFresh(
     // copy tail (and its second allocation of the same bytes) is gone.
     cudaError_t e=Allocate(in.points,roots->positions,reserve);
     if(e!=cudaSuccess)return Status(e);
-    e=pending_.points.reset(total,reserve); if(e==cudaSuccess)e=pending_.restPoints.reset(total,reserve); if(e==cudaSuccess)e=pending_.widths.reset(total,reserve); if(e==cudaSuccess)e=pending_.hairT.reset(total,reserve); if(e==cudaSuccess)e=pending_.offsets.reset(roots->positions.size()+1,reserve); if(e==cudaSuccess)e=pending_.stableIds.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootPrim.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootUV.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootT.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootB.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootN.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=error_.reset(1,reserve,UsdGenExecutionResourceKind::Scratch); if(e!=cudaSuccess){discardPending(); return Status(e);}
+    e=pending_.points.reset(total,reserve); if(e==cudaSuccess)e=pending_.widths.reset(total,reserve); if(e==cudaSuccess)e=pending_.hairT.reset(total,reserve); if(e==cudaSuccess)e=pending_.offsets.reset(roots->positions.size()+1,reserve); if(e==cudaSuccess)e=pending_.stableIds.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootPrim.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootUV.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootT.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootB.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootN.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=error_.reset(1,reserve,UsdGenExecutionResourceKind::Scratch); if(e!=cudaSuccess){discardPending(); return Status(e);}
     if (!hostError_) {
         auto permit = TryReserveCudaExecutionBytes(sizeof(int),
             UsdGenExecutionResourceKind::Scratch, reserve);
@@ -1198,11 +1200,11 @@ ScatterGrowStatus CudaScatterGrow::BeginFresh(
     }
     GrowKernel<<<(unsigned(pendingCurves_)+127)/128,128,0,stream>>>(pendingInput_.points.data(),pending_.stableIds.data(),pending_.rootT.data(),pending_.rootB.data(),pending_.rootN.data(),uint32_t(pendingCurves_),controls.cvCount,controls.seed,controls.length,controls.randomLo,controls.randomHi,controls.lift,controls.azimuth,controls.azimuthRandom,controls.fallbackWidth,controls.direction,controls.literalDirection,pending_.points.data(),pending_.widths.data(),pending_.hairT.data(),pending_.offsets.data(),error_.data());
     e=cudaGetLastError(); if(e!=cudaSuccess)return Status(e);
-    // rest == points elementwise: a streaming D2D copy replaces the kernel's
-    // second strided float3 write stream. Identical bytes on the success path
-    // (every element written before the copy); the error path discards both.
-    e=cudaMemcpyAsync(pending_.restPoints.data(),pending_.points.data(),pendingPoints_*sizeof(float3),cudaMemcpyDeviceToDevice,stream);
-    if(e!=cudaSuccess)return Status(e); return ScatterGrowStatus::Ok;
+    // rest == points elementwise (the kernel writes every point), and the
+    // published generation is immutable, so view() aliases the points
+    // buffer under the rest slot: no D2D rest copy, no second allocation.
+    // Identical bytes on the success path; the error path discards points.
+    return ScatterGrowStatus::Ok;
 }
 
 ScatterGrowStatus CudaScatterGrow::FinishFreshAsync(
@@ -1247,7 +1249,7 @@ ScatterGrowStatus CudaScatterGrow::CommitFreshFinish() {
     pendingCurves_=pendingPoints_=0; pendingWork_=finishScheduled_=false;
     unprovenWork_=false; ++generation_; return ScatterGrowStatus::Ok;
 }
-DeviceCurveGeometryView CudaScatterGrow::view() const { return {active_.points.view(),active_.restPoints.view(),active_.widths.view(),active_.offsets.view(),active_.stableIds.view(),curves_,points_}; }
+DeviceCurveGeometryView CudaScatterGrow::view() const { auto const pts=active_.points.view(); return {pts,pts,active_.widths.view(),active_.offsets.view(),active_.stableIds.view(),curves_,points_}; }
 DeviceView<const float> CudaScatterGrow::hairT() const{return active_.hairT.view();} DeviceView<const int32_t> CudaScatterGrow::rootPrim() const{return active_.rootPrim.view();} DeviceView<const float2> CudaScatterGrow::rootUV() const{return active_.rootUV.view();} DeviceView<const float3> CudaScatterGrow::rootT() const{return active_.rootT.view();} DeviceView<const float3> CudaScatterGrow::rootB() const{return active_.rootB.view();} DeviceView<const float3> CudaScatterGrow::rootN() const{return active_.rootN.view();}
 ScatterGrowStatus CudaScatterGrow::recordUse(cudaStream_t s){auto x=validateStream(s);return x==ScatterGrowStatus::Ok?active_.recordUse(s):x;} ScatterGrowStatus CudaScatterGrow::waitOn(cudaStream_t s) const{auto x=validateStream(s);return x==ScatterGrowStatus::Ok?active_.waitOn(s):x;} size_t CudaScatterGrow::ExclusiveRetainedBytes() const noexcept{return active_.bytes()+error_.bytes()+hostErrorPermit_.Bytes();}
 void CudaScatterGrow::ReclassifyPublishedGeneration() noexcept {
