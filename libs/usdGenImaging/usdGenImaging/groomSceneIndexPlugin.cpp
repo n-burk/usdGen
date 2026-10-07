@@ -1697,6 +1697,13 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                 std::shared_ptr<const _State::Snapshot>());
             if (target) {
                 TRACE_SCOPE("usdGen diff snapshot and notify Hydra");
+                // The notice lists outlive the diff scope: the notify scope
+                // below sends them.
+                Added added;
+                Removed removed;
+                Dirtied dirtied;
+                {
+                TRACE_SCOPE("usdGen drain: diff snapshots");
                 auto before = _state->VisibleSnapshot();
                 struct Synthetic {
                     TfToken type;
@@ -1804,9 +1811,6 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                 };
                 collect(before, beforeNames, beforeSynthetic);
                 collect(target, targetNames, targetSynthetic);
-                Added added;
-                Removed removed;
-                Dirtied dirtied;
                 std::set<SdfPath> removedPaths;
                 for (auto const& old : beforeNames) {
                     auto now = targetNames.find(old.first);
@@ -1952,12 +1956,16 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                     return a.primPath.GetPathElementCount() < b.primPath.GetPathElementCount();
                 });
                 std::atomic_store(&_state->visible, target);
+                }
+                {
+                TRACE_SCOPE("usdGen drain: notify Hydra");
                 try { if (!removed.empty()) index->_SendPrimsRemoved(removed); }
                 catch (...) { TF_WARN("usdGen removal observer threw"); }
                 try { if (!added.empty()) index->_SendPrimsAdded(added); }
                 catch (...) { TF_WARN("usdGen addition observer threw"); }
                 try { if (!dirtied.empty()) index->_SendPrimsDirtied(dirtied); }
                 catch (...) { TF_WARN("usdGen dirty observer threw"); }
+                }
             }
             // An observer can synchronously cause another input ingress.  It
             // cannot wait recursively; its causal flush belongs to this outer
