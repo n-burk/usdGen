@@ -56,6 +56,33 @@ struct BakeRangeSlot {
     BakeRangeError error;
 };
 
+// -- chunked bulk copy (bit-identical: disjoint ranges, same bytes) ---------
+// Small copies stay serial: below ~256KB the dispatch costs more than
+// the copy.
+void
+_MemcpyChunked(void *dst, void const *src, size_t bytes)
+{
+    int const workers = tbb::this_task_arena::max_concurrency();
+    size_t const chunks =
+        (workers > 1 && bytes > 262144) ? std::min({size_t(workers),
+                                                   size_t(8)})
+                                        : 1;
+    if (chunks == 1) {
+        std::memcpy(dst, src, bytes);
+        return;
+    }
+    auto *d = static_cast<unsigned char *>(dst);
+    auto const *s = static_cast<unsigned char const *>(src);
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, chunks),
+        [&](tbb::blocked_range<size_t> const &range) {
+            for (size_t c = range.begin(); c != range.end(); ++c) {
+                size_t const b0 = (c * bytes) / chunks;
+                size_t const b1 = ((c + 1) * bytes) / chunks;
+                std::memcpy(d + b0, s + b0, b1 - b0);
+            }
+        });
+}
+
 // -- vector quatf->quath (bit-identical to the scalar loop) ------------------
 // AArch64 FCVTN converts 4 floats to 4 halves per instruction against the
 // scalar loop's ~10 instructions per float (zero branch, exponent LUT,
@@ -1132,9 +1159,9 @@ UsdGenInstancer::BuildInstancerDataSource(
                 void const *packSrc = plane.f.cdata();
                 packed.resize(plane.f.size() / 3,
                               [packSrc](GfVec3f *b, GfVec3f *e) {
-                                  std::memcpy(b, packSrc,
-                                              size_t(e - b) *
-                                              sizeof(GfVec3f));
+                                  _MemcpyChunked(b, packSrc,
+                                                 size_t(e - b) *
+                                                 sizeof(GfVec3f));
                               });
                 sampled = _Samp(packed);
                 if (plane.name == TfToken("displayColor"))
