@@ -190,7 +190,9 @@ private:
     // evaluations. Best-effort residency only: every failure runs
     // through unmodified with identical bytes, and re-arms only when
     // the stream or the factors move, so the steady state pays nothing.
-    void armSolveL2Window(cudaStream_t stream);
+    // One slot shared by the direct and fresh paths; alternating paths
+    // re-arm (cold/test-only traffic, never the steady state).
+    void armFactorL2Window(cudaStream_t stream, void const* factors, size_t factorBytes);
     cudaStream_t pl2Stream_ = nullptr;
     void const* pl2Ptr_ = nullptr;
     size_t pl2Bytes_ = 0;

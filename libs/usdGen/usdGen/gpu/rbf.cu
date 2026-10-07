@@ -582,6 +582,7 @@ RbfStatus CudaRbfBinding::BeginFreshSolveFactors(cudaStream_t stream) {
         return fail(RbfStatus::InvalidArgument, "fresh RBF solve stream invalid");
     auto& c = *freshSolve_; auto& f = *acceptedFresh_;
     c.unproven = true; c.phase = FreshState::Phase::Solve;
+    armFactorL2Window(stream, f.matrix.data(), f.matrix.size() * sizeof(double));
     if (cusolverDnSetStream(f.solver, stream) != CUSOLVER_STATUS_SUCCESS ||
         cusolverDnDgetrs(f.solver, CUBLAS_OP_N, f.m, 3, f.matrix.data(), f.m, f.pivots.data(),
             c.coefficients.data(), f.m, c.info.data()) != CUSOLVER_STATUS_SUCCESS ||
@@ -1131,11 +1132,11 @@ RbfStatus CudaRbfBinding::submitSolveSliceGraphed(cudaStream_t stream, DeviceVie
     return submitSolveSlice(stream, posed, n, m, invScale);
 }
 
-void CudaRbfBinding::armSolveL2Window(cudaStream_t stream) {
+void CudaRbfBinding::armFactorL2Window(cudaStream_t stream, void const* ptr, size_t bytes) {
     // Ahead of any capture: stream attributes cannot change mid-capture,
-    // and the window applies to the graphed kernels once set.
-    void const* ptr = matrix_.data();
-    size_t const bytes = matrix_.size() * sizeof(double);
+    // and the window applies to the graphed kernels once set. The fresh
+    // Begins reject capturing streams; the direct call sits ahead of the
+    // slice capture.
     if (ptr == nullptr || bytes == 0) return;
     if (stream == pl2Stream_ && ptr == pl2Ptr_ && bytes == pl2Bytes_) return;
     pl2Stream_ = stream;
@@ -1184,7 +1185,7 @@ RbfStatus CudaRbfBinding::Solve(DeviceView<const float3> posed, cudaStream_t str
     // re-captures and any capture/launch failure runs the same submits
     // directly.
     int const n = (int)sampleCount_, m = (int)order_;
-    armSolveL2Window(stream);
+    armFactorL2Window(stream, matrix_.data(), matrix_.size() * sizeof(double));
     RbfStatus slice = submitSolveSliceGraphed(stream, posed, n, m, 1.0/scale_);
     if (slice != RbfStatus::Ok) return slice;
     if(!ok(cudaStreamSynchronize(stream))) {
