@@ -396,6 +396,19 @@ namespace {
 // downstream fresh allocs and was reverted (scatter.cpp); this retains
 // at most one convert (68MB at 1M roots) per thread.
 thread_local std::unique_ptr<gpu::ScatterGrowRoots> t_convertShell;
+// Pooled capture shells (bit-identical): PrepareCudaScatterInput builds a
+// fresh capture per call and destroys it after the convert, churning ~72MB
+// of touched VtArray pages through the kernel's page-table teardown every
+// call (~100% sys time by rusage split; the process runs with a raised
+// dynamic mmap threshold, so the churn spells as brk growth/contraction
+// rather than munmap). Capture already clear()s every plane it fills
+// before writing (the gather leg's resize is exact), and it never reads
+// incoming plane contents, so a cleared shell is indistinguishable from
+// fresh storage. Depth-1 per thread, same rationale as the convert shell;
+// checkout and recycle both happen inside PrepareCudaScatterInput on the
+// same thread (the capture never escapes), so no deleter handoff is
+// needed. Failure paths destroy instead of recycling.
+thread_local std::unique_ptr<UsdGenCapture> t_captureShell;
 void RecycleConvertShell(gpu::ScatterGrowRoots const* roots)
 {
     std::unique_ptr<gpu::ScatterGrowRoots> shell(
@@ -492,7 +505,11 @@ CudaScatterInputStatus PrepareCudaScatterInput(
     if (!op->Bind(params, &diagnostics))
         return Fail(CudaScatterInputStatus::CaptureFailed,
                     diagnostics.errors.empty() ? "Scatter Bind failed" : diagnostics.errors.front(), reason);
-    std::unique_ptr<UsdGenCapture> capture = op->CreateCapture();
+    // Pooled shell (see above): checkout the thread's idle capture or
+    // create fresh. Same null failure, same message, either way.
+    std::unique_ptr<UsdGenCapture> capture = std::move(t_captureShell);
+    if (!capture)
+        capture = op->CreateCapture();
     if (!capture)
         return Fail(CudaScatterInputStatus::CaptureFailed,
                     "Scatter kernel did not create capture storage", reason);
@@ -603,6 +620,24 @@ CudaScatterInputStatus PrepareCudaScatterInput(
     }
     *out = std::shared_ptr<gpu::ScatterGrowRoots const>(
         shell.release(), RecycleConvertShell);
+    // Recycle the capture shell (see above): every plane is clear()ed
+    // (capacity kept), so the next checkout reads exactly like a fresh
+    // capture, including the empty-topology early return (stale sizes
+    // would trip the convert's topology validation).
+    {
+        UsdGenCurveBuffer& buf = capture->MutableBuffer();
+        buf.px.clear(); buf.py.clear(); buf.pz.clear();
+        buf.rest.clear(); buf.width.clear(); buf.hairT.clear();
+        buf.extraCv.clear();
+        buf.curveId.clear();
+        buf.rootPrim.clear(); buf.rootUV.clear();
+        buf.rootT.clear(); buf.rootN.clear(); buf.rootB.clear();
+        buf.cvOffsets.clear(); buf.extraCurve.clear();
+        buf.chunks.clear();
+        buf.totalCurves = 0; buf.totalCvs = 0;
+        buf.topologyVersion = 0; buf.valueVersion = 0;
+    }
+    t_captureShell = std::move(capture);
     return CudaScatterInputStatus::Ok;
 }
 

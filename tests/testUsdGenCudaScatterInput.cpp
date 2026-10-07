@@ -80,6 +80,24 @@ int main() {
         CHECK(PrepareCudaScatterInput(zero,SdfPath("/scatter"),&empty2,&why3)==CudaScatterInputStatus::Ok && empty2);
         CHECK(empty2->positions.empty() && empty2->stableIds.empty() && empty2->rootPrim.empty() && empty2->rootUV.empty() && empty2->rootT.empty() && empty2->rootB.empty() && empty2->rootN.empty());
     }
+    // Capture-shell recycle pin: a full capture, recycled, then an
+    // empty-topology capture must read empty on EVERY plane. The empty
+    // early return sets only the totals, so the recycled shell must be
+    // cleared on release; without the clear the convert's topology
+    // validation trips on the stale sizes (CaptureFailed, not Ok).
+    {
+        std::shared_ptr<const gpu::ScatterGrowRoots> fullCap; std::string whyCap;
+        CHECK(PrepareCudaScatterInput(d,SdfPath("/scatter"),&fullCap,&whyCap)==CudaScatterInputStatus::Ok && fullCap && !fullCap->positions.empty());
+        fullCap.reset();
+        auto emptySurf=d;
+        emptySurf.surfaces[0].faceVertexCounts.clear();
+        emptySurf.surfaces[0].faceVertexIndices.clear();
+        emptySurf.surfaces[0].restPoints.clear();
+        emptySurf.surfaces[0].uv.clear();
+        std::shared_ptr<const gpu::ScatterGrowRoots> emptyCap; std::string whyEmpty;
+        CHECK(PrepareCudaScatterInput(emptySurf,SdfPath("/scatter"),&emptyCap,&whyEmpty)==CudaScatterInputStatus::Ok && emptyCap);
+        CHECK(emptyCap->positions.empty() && emptyCap->stableIds.empty() && emptyCap->rootPrim.empty() && emptyCap->rootUV.empty() && emptyCap->rootT.empty() && emptyCap->rootB.empty() && emptyCap->rootN.empty());
+    }
     // Scatter is a generator: it declares only density and flip, so any other
     // authored parameter (usdGen:mask included) is refused, not ignored.
     auto undeclared = d;
