@@ -105,6 +105,12 @@ private:
     DeviceBuffer<float3> rest_, current_;
     DeviceBuffer<double> matrix_, work_, coefficients_, normSamples_;
     DeviceBuffer<double> gram_;
+    // Device-side bind center/scale (cx, cy, cz, invScale): derived
+    // inside the extent kernel so the direct bind's gram + matrix build
+    // submit before the extent is host-proven and all three phases share
+    // one synchronization. Bitwise the host's center_/scale_ derivation;
+    // sized once, reused across binds.
+    DeviceBuffer<double> bindParams_;
     DeviceBuffer<int> pivots_, evalFlags_;
     // Evaluate R cache, shared by the direct and fresh paths: the
     // radius-cubed kernel values are pose-invariant (they depend only on

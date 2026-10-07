@@ -32,7 +32,7 @@ __device__ inline void mark(int* f, int v) { atomicOr(f, v); }
 // neutrally, and the shuffle mask is the converged warp so partial
 // blocks stay correct. Single-block launches only: every caller below
 // uses <<<1,128>>>, so warps 0-3 are exactly the block.
-__global__ void extentKernel(const float3* p, int n, float* e, int* flags) {
+__global__ void extentKernel(const float3* p, int n, float* e, int* flags, double* params) {
     __shared__ float red[4][6];
     __shared__ int bad[4];
     int const tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
@@ -72,9 +72,46 @@ __global__ void extentKernel(const float3* p, int n, float* e, int* flags) {
         }
         e[0] = ax; e[1] = ay; e[2] = az; e[3] = ix; e[4] = iy; e[5] = iz;
         *flags = f;
+        // Optional bind center/scale derive (direct Bind only; the fresh
+        // path passes null): the registers hold exactly the stored
+        // extent, and the expressions mirror the host derivation exactly
+        // (same operations in the same order, including std::max's
+        // first-on-tie rule), so the device values are bitwise the
+        // host's. Garbage in computes garbage the host's first-check
+        // rejects, exactly as if the downstream kernels had run on
+        // host-derived values.
+        if (params) {
+            double const cx = double(ax) + (double(ix) - double(ax)) * .5;
+            double const cy = double(ay) + (double(iy) - double(ay)) * .5;
+            double const cz = double(az) + (double(iz) - double(az)) * .5;
+            double const ex = double(ix) - double(ax);
+            double const ey = double(iy) - double(ay);
+            double const ez = double(iz) - double(az);
+            double const t = (ey < ez) ? ez : ey;
+            double const scale = (ex < t) ? t : ex;
+            params[0] = cx; params[1] = cy; params[2] = cz; params[3] = 1.0 / scale;
+        }
     }
 }
-__global__ void polynomialGram(const float3* p, int n, double* gram, double cx, double cy, double cz, double invScale) {
+// Bind center/scale delivery: the direct path derives them inside the
+// extent kernel so the extent proof shares the LU sync, while the fresh
+// path passes its host-proven values through. Both spellings carry the
+// same four doubles into the same arithmetic text, so the gram and
+// matrix bytes are identical either way. Uniform across the launch, so
+// the device loads broadcast and the host values ride in registers.
+struct HostBindParams {
+    double cx, cy, cz, invScale;
+    __device__ double c(int a) const { return a == 0 ? cx : (a == 1 ? cy : cz); }
+    __device__ double inv() const { return invScale; }
+};
+struct DeviceBindParams {
+    double const* p;
+    __device__ double c(int a) const { return p[a]; }
+    __device__ double inv() const { return p[3]; }
+};
+template <typename P>
+__global__ void polynomialGram(const float3* p, int n, double* gram, P params) {
+    double const cx = params.c(0), cy = params.c(1), cz = params.c(2), invScale = params.inv();
     for (int i=blockIdx.x*blockDim.x+threadIdx.x;i<n;i+=blockDim.x*gridDim.x) {
         float3 q=p[i]; double v[4]={1.,(q.x-cx)*invScale,(q.y-cy)*invScale,(q.z-cz)*invScale};
         for(int r=0;r<4;++r) for(int c=0;c<4;++c) atomicAdd(&gram[r*4+c],v[r]*v[c]);
@@ -120,7 +157,9 @@ cudaError_t validateFreshPointer(const void* p, size_t count, cudaStream_t strea
 // launches wrote disjoint addresses, so one launch writes bitwise the
 // same matrix and samples and saves a launch + a grid teardown on every
 // bind. m*m > n always, so threads 0..n-1 exist in the build grid.
-__global__ void buildMatrix(const float3* p, double* a, int n, int m, double cx, double cy, double cz, double invScale, double lambda, int* flags, double* sn) {
+template <typename P>
+__global__ void buildMatrix(const float3* p, double* a, int n, int m, P params, double lambda, int* flags, double* sn) {
+    double const cx = params.c(0), cy = params.c(1), cz = params.c(2), invScale = params.inv();
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= m*m) return;
     int row = k % m, col = k / m; // column major
@@ -392,7 +431,7 @@ RbfStatus CudaRbfBinding::BeginFreshBind(DeviceView<const float3> samples, doubl
     f.unproven = true; f.phase = FreshState::Phase::Extent;
     if (!ok(cudaMemcpyAsync(f.rest.data(), samples.data, f.n*sizeof(float3), cudaMemcpyDeviceToDevice, stream))) { f.failed=true; return fail(RbfStatus::CudaError,"fresh RBF rest copy failed"); }
     float* ex = f.extents.data(); int* exFlag = reinterpret_cast<int*>(ex + 6);
-    extentKernel<<<1,128,0,stream>>>(f.rest.data(),f.n,ex,exFlag);
+    extentKernel<<<1,128,0,stream>>>(f.rest.data(),f.n,ex,exFlag,nullptr);
     if (cudaGetLastError()!=cudaSuccess || !ok(cudaMemcpyAsync(f.host->extent,f.extents.data(),sizeof(f.host->extent)+sizeof(f.host->flag),cudaMemcpyDeviceToHost,stream))) { f.failed=true; return fail(RbfStatus::CudaError,"fresh RBF extent submit failed"); }
     if (failFreshBindAfterSubmit.exchange(false, std::memory_order_acq_rel)) { f.failed=true; return fail(RbfStatus::CudaError,"forced fresh RBF bind post-submit failure"); }
     return RbfStatus::Ok;
@@ -411,7 +450,7 @@ RbfStatus CudaRbfBinding::BeginFreshBindRank(cudaStream_t stream) {
     auto& f=*fresh_; int d=-1; if (validateFreshPointer(nullptr,0,stream,&d)!=cudaSuccess || d!=f.device) return fail(RbfStatus::InvalidArgument,"fresh RBF stream invalid");
     f.unproven=true; f.phase=FreshState::Phase::Rank;
     if (!ok(cudaMemsetAsync(f.gram.data(),0,16*sizeof(double),stream))) { f.failed=true; return fail(RbfStatus::CudaError,"fresh RBF rank reset failed"); }
-    polynomialGram<<<32,128,0,stream>>>(f.rest.data(),f.n,f.gram.data(),f.center[0],f.center[1],f.center[2],1./f.scale);
+    polynomialGram<<<32,128,0,stream>>>(f.rest.data(),f.n,f.gram.data(),HostBindParams{f.center[0],f.center[1],f.center[2],1./f.scale});
     if (cudaGetLastError()!=cudaSuccess || !ok(cudaMemcpyAsync(f.host->gram,f.gram.data(),sizeof(f.host->gram),cudaMemcpyDeviceToHost,stream))) { f.failed=true; return fail(RbfStatus::CudaError,"fresh RBF rank submit failed"); }
     return RbfStatus::Ok;
 }
@@ -424,7 +463,7 @@ RbfStatus CudaRbfBinding::BeginFreshBindLu(cudaStream_t stream) {
     if (!fresh_ || fresh_->phase != FreshState::Phase::RankReady || HasUnprovenWork()) return fail(RbfStatus::InvalidArgument,"fresh RBF rank not committed");
     auto& f=*fresh_; int d=-1; if (validateFreshPointer(nullptr,0,stream,&d)!=cudaSuccess || d!=f.device) return fail(RbfStatus::InvalidArgument,"fresh RBF stream invalid");
     f.unproven=true; f.phase=FreshState::Phase::Lu;
-    buildMatrix<<<(f.m*f.m+255)/256,256,0,stream>>>(f.rest.data(),f.matrix.data(),f.n,f.m,f.center[0],f.center[1],f.center[2],1./f.scale,f.smoothing,f.flags.data(),f.norm.data());
+    buildMatrix<<<(f.m*f.m+255)/256,256,0,stream>>>(f.rest.data(),f.matrix.data(),f.n,f.m,HostBindParams{f.center[0],f.center[1],f.center[2],1./f.scale},f.smoothing,f.flags.data(),f.norm.data());
     if (cudaGetLastError()!=cudaSuccess || cusolverDnSetStream(f.solver,stream)!=CUSOLVER_STATUS_SUCCESS || cusolverDnDgetrf(f.solver,f.m,f.m,f.matrix.data(),f.m,f.work.data(),f.pivots.data(),f.info.data())!=CUSOLVER_STATUS_SUCCESS || !ok(cudaMemsetAsync(f.coefficients.data(),0,f.coefficients.size()*sizeof(double),stream)) || !ok(cudaMemcpyAsync(&f.host->info,f.info.data(),sizeof(int),cudaMemcpyDeviceToHost,stream))) { f.failed=true; return fail(RbfStatus::SolverError,"fresh RBF LU submit failed"); }
     return RbfStatus::Ok;
 }
@@ -717,23 +756,26 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
     // sizes once below, after the bufferSize query; nothing reads it before
     // that. buildMatrix ignores its flags argument (hence nullptr).
     if(!ensureProofs()) return fail(RbfStatus::CudaError,"RBF proof allocation failed");
-    extentKernel<<<1,128,0,stream>>>(rest_.data(),n,proofDev_->extent,&proofDev_->flag);
-    if(!ok(cudaStreamSynchronize(stream))) return fail(RbfStatus::CudaError,"RBF extent query failed");
-    if(proofHost_->flag) return fail(RbfStatus::NonFiniteInput,"RBF rest samples contain non-finite values");
-    center_[0]=(double)proofHost_->extent[0] + ((double)proofHost_->extent[3]-(double)proofHost_->extent[0])*.5; center_[1]=(double)proofHost_->extent[1] + ((double)proofHost_->extent[4]-(double)proofHost_->extent[1])*.5; center_[2]=(double)proofHost_->extent[2] + ((double)proofHost_->extent[5]-(double)proofHost_->extent[2])*.5; scale_=std::max((double)proofHost_->extent[3]-proofHost_->extent[0],std::max((double)proofHost_->extent[4]-proofHost_->extent[1],(double)proofHost_->extent[5]-proofHost_->extent[2]));
-    if(!std::isfinite(scale_) || scale_ <= 0.0) return fail(RbfStatus::RankDeficient,"RBF rest samples have zero extent");
-    if(cudaGetLastError()!=cudaSuccess) return fail(RbfStatus::CudaError,"RBF extent launch failed");
+    if(!ok(bindParams_.reset(4))) return fail(RbfStatus::CudaError,"RBF device allocation failed");
+    // The extent, rank, and LU proofs share one synchronization: the
+    // center/scale derive inside the extent kernel (bitwise the host
+    // derivation below), so polynomialGram and buildMatrix submit before
+    // the extent is host-proven. The host checks run in the same order
+    // after the single sync, so error precedence (extent before rank
+    // before LU status) and every success-path byte are unchanged; an
+    // erroring bind just wastes one submit, as the rank path already did.
+    extentKernel<<<1,128,0,stream>>>(rest_.data(),n,proofDev_->extent,&proofDev_->flag,bindParams_.data());
     if(!ok(cudaMemsetAsync(gram_.data(),0,16*sizeof(double),stream))) return fail(RbfStatus::CudaError,"RBF rank diagnostic reset failed");
-    polynomialGram<<<32,128,0,stream>>>(rest_.data(),n,gram_.data(),center_[0],center_[1],center_[2],1.0/scale_);
+    polynomialGram<<<32,128,0,stream>>>(rest_.data(),n,gram_.data(),DeviceBindParams{bindParams_.data()});
     landGram<<<1,32,0,stream>>>(gram_.data(),proofDev_->gram);
-    // The rank proof and the LU share one synchronization: buildMatrix and
-    // getrf submit before the gram is known, and the rank decision is
-    // checked first after the single sync, so error precedence (rank before
-    // LU status) and every success-path byte are unchanged.
-    buildMatrix<<<(m*m+255)/256,256,0,stream>>>(rest_.data(),matrix_.data(),n,m,center_[0],center_[1],center_[2],1.0/scale_,smoothing,nullptr,normSamples_.data());
+    buildMatrix<<<(m*m+255)/256,256,0,stream>>>(rest_.data(),matrix_.data(),n,m,DeviceBindParams{bindParams_.data()},smoothing,nullptr,normSamples_.data());
     int lwork=0; if(cusolverDnDgetrf_bufferSize(solver_,m,m,matrix_.data(),m,&lwork)!=CUSOLVER_STATUS_SUCCESS || !ok(work_.reset(lwork))) return fail(RbfStatus::SolverError,"cuSOLVER LU workspace failed");
     if(cusolverDnSetStream(solver_,stream)!=CUSOLVER_STATUS_SUCCESS || cusolverDnDgetrf(solver_,m,m,matrix_.data(),m,work_.data(),pivots_.data(),&proofDev_->info)!=CUSOLVER_STATUS_SUCCESS) return fail(RbfStatus::SolverError,"cuSOLVER LU failed");
     if(!ok(cudaStreamSynchronize(stream)))return fail(RbfStatus::CudaError,"RBF LU status query failed");
+    if(proofHost_->flag) return fail(RbfStatus::NonFiniteInput,"RBF rest samples contain non-finite values");
+    center_[0]=(double)proofHost_->extent[0] + ((double)proofHost_->extent[3]-(double)proofHost_->extent[0])*.5; center_[1]=(double)proofHost_->extent[1] + ((double)proofHost_->extent[4]-(double)proofHost_->extent[1])*.5; center_[2]=(double)proofHost_->extent[2] + ((double)proofHost_->extent[5]-(double)proofHost_->extent[2])*.5; scale_=std::max((double)proofHost_->extent[3]-proofHost_->extent[0],std::max((double)proofHost_->extent[4]-proofHost_->extent[1],(double)proofHost_->extent[5]-proofHost_->extent[2]));
+    if(!std::isfinite(scale_) || scale_ <= 0.0) return fail(RbfStatus::RankDeficient,"RBF rest samples have zero extent");
+    if(cudaGetLastError()!=cudaSuccess) return fail(RbfStatus::CudaError,"RBF bind launch failed");
     double gram[16]; for(int i=0;i<16;++i) gram[i]=proofHost_->gram[i]; // fullAffineRank eliminates in place
     if(!fullAffineRank(gram)) return fail(RbfStatus::RankDeficient,"RBF samples lack numerically full affine 3D support");
     if(proofHost_->info>0) return fail(RbfStatus::RankDeficient,"RBF augmented LU is singular (including coplanar affine support)"); if(proofHost_->info<0)return fail(RbfStatus::SolverError,"RBF LU invalid argument");
