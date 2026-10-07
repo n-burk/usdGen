@@ -171,6 +171,22 @@ void MixArray(opUtil::Digest *d, void const *data, size_t bytes)
     d->MixBytes(data, bytes);
 }
 
+// Exponent-bit finiteness: all-set exponent bits iff infinite or NaN (sNaN
+// included), exactly std::isfinite's verdict on each lane with no FP work,
+// so the post loops test stored triples as integers off the FP pipe and
+// OR-reduce across the group with one store on failure.
+inline uint32_t NonFiniteBits(float f0, float f1, float f2)
+{
+    uint32_t u0, u1, u2;
+    static_assert(sizeof(u0) == sizeof(f0), "");
+    std::memcpy(&u0, &f0, sizeof(float));
+    std::memcpy(&u1, &f1, sizeof(float));
+    std::memcpy(&u2, &f2, sizeof(float));
+    uint32_t constexpr kExpMask = 0x7F800000u;
+    return ((u0 & kExpMask) == kExpMask) | ((u1 & kExpMask) == kExpMask) |
+        ((u2 & kExpMask) == kExpMask);
+}
+
 UsdGenCurveSetDesc const *FindCurves(UsdGenGraphDesc const *desc, SdfPath const &path)
 {
     if (!desc) return nullptr;
@@ -663,6 +679,7 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
                 // later sweep without re-capture (a value-only edit reuses
                 // this capture's deformed values).
                 GfRange3f groupRange;
+                uint32_t badBits = 0;
                 for (size_t c = c0; c < c1; ++c) {
                     size_t const first = spanAt(c), last = spanAt(c + 1);
                     if (first >= last) continue;
@@ -685,13 +702,14 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
                         result[cv * 3 + 1] = f1;
                         result[cv * 3 + 2] = f2;
                         if (recordExtents) groupRange.ExtendBy(GfVec3f(f0, f1, f2));
-                        if (!std::isfinite(f0) || !std::isfinite(f1) || !std::isfinite(f2))
-                            nonFinite.store(true, std::memory_order_relaxed);
+                        badBits |= NonFiniteBits(f0, f1, f2);
                     }
                 }
                 if (recordExtents) groupExtents[g] = groupRange;
+                if (badBits) nonFinite.store(true, std::memory_order_relaxed);
                 return;
             }
+            uint32_t badBits = 0;
             for (size_t c = c0; c < c1; ++c) {
                 size_t const first = spanAt(c), last = spanAt(c + 1);
                 if (first >= last) continue;
@@ -710,12 +728,13 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
                     result[cv * 3] = f0;
                     result[cv * 3 + 1] = f1;
                     result[cv * 3 + 2] = f2;
-                    if (!std::isfinite(f0) || !std::isfinite(f1) || !std::isfinite(f2))
-                        nonFinite.store(true, std::memory_order_relaxed);
+                    badBits |= NonFiniteBits(f0, f1, f2);
                 }
             }
+            if (badBits) nonFinite.store(true, std::memory_order_relaxed);
             return;
         }
+        uint32_t badBits = 0;
         for (size_t c = c0; c < c1; ++c) {
             size_t const first = spanAt(c), last = spanAt(c + 1);
             if (first >= last) continue;
@@ -736,10 +755,10 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
                 result[cv * 3] = f0;
                 result[cv * 3 + 1] = f1;
                 result[cv * 3 + 2] = f2;
-                if (!std::isfinite(f0) || !std::isfinite(f1) || !std::isfinite(f2))
-                    nonFinite.store(true, std::memory_order_relaxed);
+                badBits |= NonFiniteBits(f0, f1, f2);
             }
         }
+        if (badBits) nonFinite.store(true, std::memory_order_relaxed);
     });
     if (nonFinite.load(std::memory_order_relaxed)) {
         // Failure atomicity: direct mode leaves a partial mix of old and
