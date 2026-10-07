@@ -64,6 +64,18 @@ public:
     /// fills zeros.
     void DisplaceBatch(GfVec3d const *qs, GfVec3d *ds, size_t count) const;
 
+    /// A planar run of queries: (dx[t], dy[t], dz[t]) is bitwise
+    /// Displacement(GfVec3d(qx[t], qy[t], qz[t])) for every t.
+    ///
+    /// The deform strands loop's queries already sit in planar float
+    /// planes, so this entry skips the AoS transpose (and the vld3/vst3
+    /// shuffles) while running each query's operations in the same order
+    /// as DisplaceBatch, so the bits match. Tails fall back to
+    /// Displacement, and an unbound field fills zeros.
+    void DisplaceBatchPlanar(float const *qx, float const *qy, float const *qz,
+                             double *dx, double *dy, double *dz,
+                             size_t count) const;
+
     bool Bound() const { return _order != 0; }
     size_t SampleCount() const { return _rest.size(); }
 

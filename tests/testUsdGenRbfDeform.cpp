@@ -244,6 +244,71 @@ void CheckBatchPathsAgree()
     }
 }
 
+// DisplaceBatchPlanar is bitwise Displacement, through every cascade width
+// (8, 4, tail singles), on both the NEON and the forced-scalar path, and
+// for the unbound field. The planar queries round-trip through float, so
+// the singles compare against the same float triples the batch converts.
+void CheckBatchPlanarBitwise()
+{
+    for (size_t samples : {size_t(12), size_t(100), size_t(300)}) {
+        std::vector<GfVec3d> const rest = Cloud(samples, 7 + samples);
+        std::vector<GfVec3d> moved(rest.size());
+        for (size_t i = 0; i < rest.size(); ++i)
+            moved[i] = rest[i] + GfVec3d(0.2 * std::sin(3.0 * rest[i][1]),
+                                         0.1 * rest[i][0] * rest[i][2],
+                                         -0.15 * std::cos(2.0 * rest[i][0]));
+        rbf::CubicField field;
+        std::string error;
+        if (!field.Bind(rest, &error) || !field.Solve(moved, &error)) {
+            Check(false, "planar batch fixture binds (" + std::to_string(samples) +
+                             " samples)");
+            continue;
+        }
+        std::vector<GfVec3d> const cloud = Cloud(300, 1001);
+        std::vector<float> qx(300), qy(300), qz(300);
+        for (size_t i = 0; i < 300; ++i) {
+            qx[i] = float(cloud[i][0]);
+            qy[i] = float(cloud[i][1]);
+            qz[i] = float(cloud[i][2]);
+        }
+        size_t worst = 0;
+        for (int force = 0; force <= 1 && !worst; ++force) {
+            rbf::TestForceScalarDisplace(force != 0);
+            for (size_t count = 0; count <= 300; ++count) {
+                std::vector<double> dx(count), dy(count), dz(count);
+                field.DisplaceBatchPlanar(qx.data(), qy.data(), qz.data(), dx.data(),
+                                          dy.data(), dz.data(), count);
+                for (size_t t = 0; t < count; ++t) {
+                    GfVec3d const s =
+                        field.Displacement(GfVec3d(qx[t], qy[t], qz[t]));
+                    if (std::memcmp(&dx[t], &s[0], sizeof(double)) != 0 ||
+                        std::memcmp(&dy[t], &s[1], sizeof(double)) != 0 ||
+                        std::memcmp(&dz[t], &s[2], sizeof(double)) != 0) {
+                        worst = count * 2 + size_t(force) + 1;
+                        break;
+                    }
+                }
+                if (worst) break;
+            }
+        }
+        rbf::TestForceScalarDisplace(false);
+        Check(worst == 0, "DisplaceBatchPlanar is bitwise Displacement (" +
+                               std::to_string(samples) + " samples" +
+                               (worst ? ", first diff at " + std::to_string(worst) : "") +
+                               ")");
+    }
+    rbf::CubicField unbound;
+    std::vector<float> qx(10, 1.0f), qy(10, 2.0f), qz(10, 3.0f);
+    std::vector<double> dx(10, 1.0), dy(10, 1.0), dz(10, 1.0);
+    unbound.DisplaceBatchPlanar(qx.data(), qy.data(), qz.data(), dx.data(), dy.data(),
+                               dz.data(), dx.size());
+    std::vector<double> expect(10, 0.0);
+    Check(std::memcmp(dx.data(), expect.data(), dx.size() * sizeof(double)) == 0 &&
+              std::memcmp(dy.data(), expect.data(), dy.size() * sizeof(double)) == 0 &&
+              std::memcmp(dz.data(), expect.data(), dz.size() * sizeof(double)) == 0,
+          "an unbound field batches planar zeros");
+}
+
 // --- the example, through the engine ---------------------------------------------
 
 struct Cooked {
@@ -1524,6 +1589,7 @@ int main()
     CheckField();
     CheckBatchBitwise();
     CheckBatchPathsAgree();
+    CheckBatchPlanarBitwise();
     CheckDeformChosenDigest();
     CheckDeformEvaluateViewShapes();
     CheckFusedTileExtents();

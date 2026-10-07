@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <type_traits>
 #include <unordered_set>
 
 #if defined(__aarch64__) || defined(_M_ARM64)
@@ -257,6 +258,17 @@ void DisplaceBlocked(GfVec3d const &centre, double invScale, double scale,
 }
 
 #if defined(__aarch64__) || defined(_M_ARM64)
+// Block pointer bundles for the NEON 4-block template: AoS GfVec3d runs
+// (the DisplaceBatch shape) and planar float-in/double-out (the deform
+// strands shape, whose queries already sit in planar float planes).
+struct AosBlock4 {
+    GfVec3d const *qs;
+    GfVec3d *ds;
+};
+struct PlanarFBlock4 {
+    float const *qx, *qy, *qz;
+    double *dx, *dy, *dz;
+};
 // Fused 4-query NEON block: the same per-lane operations as DisplaceBlocked
 // (same FMA contraction association, correctly-rounded vector sqrt), but
 // the kernel evaluation and the accumulation fuse into one sample pass
@@ -265,27 +277,43 @@ void DisplaceBlocked(GfVec3d const &centre, double invScale, double scale,
 // reloads them twice per sample; at 0.62ns/pair it runs 2.2x off the
 // 0.28ns vector-sqrt roof, and the fused loop closes most of the
 // schedulable gap (0.48ns/pair, on the FP-pipe wall for this op mix).
-// vld3/vst3 move the AoS triples for free.
-void DisplaceBlockedNeon4(GfVec3d const &centre, double invScale, double scale,
-                          double const *restX, double const *restY, double const *restZ,
-                          double const *cx, double const *cy, double const *cz,
-                          size_t n, GfVec3d const *qs, GfVec3d *ds)
+// Only the query load and the displacement store vary by bundle (vld3/vst3
+// for AoS, plain loads/stores for planar); the affine prologue, the sample
+// pass, and the FMA association below are one shared text, so both bundles
+// evaluate bitwise what the other does.
+template <class B>
+void DisplaceBlockedNeon4T(GfVec3d const &centre, double invScale, double scale,
+                           double const *restX, double const *restY, double const *restZ,
+                           double const *cx, double const *cy, double const *cz,
+                           size_t n, B blk)
 {
     float64x2_t const c0 = vdupq_n_f64(centre[0]);
     float64x2_t const c1 = vdupq_n_f64(centre[1]);
     float64x2_t const c2 = vdupq_n_f64(centre[2]);
     float64x2_t const invS = vdupq_n_f64(invScale);
-    float64x2x3_t const q01 = vld3q_f64(&qs[0][0]);
-    float64x2x3_t const q23 = vld3q_f64(&qs[2][0]);
     // Plain locals, not arrays: the queries and accumulators must stay in
     // vector registers across the sample pass (arrays spill to the stack
     // and reload twice per sample).
-    float64x2_t const px0 = vmulq_f64(vsubq_f64(q01.val[0], c0), invS);
-    float64x2_t const px1 = vmulq_f64(vsubq_f64(q23.val[0], c0), invS);
-    float64x2_t const py0 = vmulq_f64(vsubq_f64(q01.val[1], c1), invS);
-    float64x2_t const py1 = vmulq_f64(vsubq_f64(q23.val[1], c1), invS);
-    float64x2_t const pz0 = vmulq_f64(vsubq_f64(q01.val[2], c2), invS);
-    float64x2_t const pz1 = vmulq_f64(vsubq_f64(q23.val[2], c2), invS);
+    float64x2_t px0, px1, py0, py1, pz0, pz1;
+    if constexpr (std::is_same<B, AosBlock4>::value) {
+        float64x2x3_t const q01 = vld3q_f64(&blk.qs[0][0]);
+        float64x2x3_t const q23 = vld3q_f64(&blk.qs[2][0]);
+        px0 = vmulq_f64(vsubq_f64(q01.val[0], c0), invS);
+        px1 = vmulq_f64(vsubq_f64(q23.val[0], c0), invS);
+        py0 = vmulq_f64(vsubq_f64(q01.val[1], c1), invS);
+        py1 = vmulq_f64(vsubq_f64(q23.val[1], c1), invS);
+        pz0 = vmulq_f64(vsubq_f64(q01.val[2], c2), invS);
+        pz1 = vmulq_f64(vsubq_f64(q23.val[2], c2), invS);
+    } else {
+        // float32x2 -> float64x2 is exact, so these six are bitwise the
+        // vld3 path's six for the same query values.
+        px0 = vmulq_f64(vsubq_f64(vcvt_f64_f32(vld1_f32(blk.qx)), c0), invS);
+        px1 = vmulq_f64(vsubq_f64(vcvt_f64_f32(vld1_f32(blk.qx + 2)), c0), invS);
+        py0 = vmulq_f64(vsubq_f64(vcvt_f64_f32(vld1_f32(blk.qy)), c1), invS);
+        py1 = vmulq_f64(vsubq_f64(vcvt_f64_f32(vld1_f32(blk.qy + 2)), c1), invS);
+        pz0 = vmulq_f64(vsubq_f64(vcvt_f64_f32(vld1_f32(blk.qz)), c2), invS);
+        pz1 = vmulq_f64(vsubq_f64(vcvt_f64_f32(vld1_f32(blk.qz + 2)), c2), invS);
+    }
     // One axis per scope: the twelve affine broadcasts must not all be
     // live at once, or the allocator spills the queries it just loaded.
     float64x2_t ox0, ox1, oy0, oy1, oz0, oz1;
@@ -362,15 +390,24 @@ void DisplaceBlockedNeon4(GfVec3d const &centre, double invScale, double scale,
         oz1 = vfmaq_f64(oz1, qz, kk1);
     }
     float64x2_t const sc = vdupq_n_f64(scale);
-    float64x2x3_t d01, d23;
-    d01.val[0] = vmulq_f64(ox0, sc);
-    d01.val[1] = vmulq_f64(oy0, sc);
-    d01.val[2] = vmulq_f64(oz0, sc);
-    d23.val[0] = vmulq_f64(ox1, sc);
-    d23.val[1] = vmulq_f64(oy1, sc);
-    d23.val[2] = vmulq_f64(oz1, sc);
-    vst3q_f64(&ds[0][0], d01);
-    vst3q_f64(&ds[2][0], d23);
+    if constexpr (std::is_same<B, AosBlock4>::value) {
+        float64x2x3_t d01, d23;
+        d01.val[0] = vmulq_f64(ox0, sc);
+        d01.val[1] = vmulq_f64(oy0, sc);
+        d01.val[2] = vmulq_f64(oz0, sc);
+        d23.val[0] = vmulq_f64(ox1, sc);
+        d23.val[1] = vmulq_f64(oy1, sc);
+        d23.val[2] = vmulq_f64(oz1, sc);
+        vst3q_f64(&blk.ds[0][0], d01);
+        vst3q_f64(&blk.ds[2][0], d23);
+    } else {
+        vst1q_f64(blk.dx, vmulq_f64(ox0, sc));
+        vst1q_f64(blk.dx + 2, vmulq_f64(ox1, sc));
+        vst1q_f64(blk.dy, vmulq_f64(oy0, sc));
+        vst1q_f64(blk.dy + 2, vmulq_f64(oy1, sc));
+        vst1q_f64(blk.dz, vmulq_f64(oz0, sc));
+        vst1q_f64(blk.dz + 2, vmulq_f64(oz1, sc));
+    }
 }
 #endif
 
@@ -400,8 +437,8 @@ void CubicField::DisplaceBatch(GfVec3d const *qs, GfVec3d *ds, size_t count) con
 #if defined(__aarch64__) || defined(_M_ARM64)
     if (!g_forceScalarDisplace.load(std::memory_order_relaxed)) {
         while (count >= 4) {
-            DisplaceBlockedNeon4(_centre, _invScale, _scale, rx, ry, rz,
-                                 cx, cy, cz, n, qs, ds);
+            DisplaceBlockedNeon4T(_centre, _invScale, _scale, rx, ry, rz,
+                                  cx, cy, cz, n, AosBlock4{qs, ds});
             qs += 4;
             ds += 4;
             count -= 4;
@@ -425,6 +462,90 @@ void CubicField::DisplaceBatch(GfVec3d const *qs, GfVec3d *ds, size_t count) con
         count -= 4;
     }
     for (size_t t = 0; t < count; ++t) ds[t] = Displacement(qs[t]);
+}
+
+void CubicField::DisplaceBatchPlanar(float const *qx, float const *qy, float const *qz,
+                                     double *dx, double *dy, double *dz,
+                                     size_t count) const
+{
+    if (count == 0) return;
+    size_t const n = _rest.size(), m = _order;
+    if (!m) {
+        for (size_t t = 0; t < count; ++t) dx[t] = dy[t] = dz[t] = 0.0;
+        return;
+    }
+    double const *cx = &_coefficients[0];
+    double const *cy = &_coefficients[m];
+    double const *cz = &_coefficients[2 * m];
+    double const *rx = _restX.data(), *ry = _restY.data(), *rz = _restZ.data();
+#if defined(__aarch64__) || defined(_M_ARM64)
+    if (!g_forceScalarDisplace.load(std::memory_order_relaxed)) {
+        while (count >= 4) {
+            DisplaceBlockedNeon4T(_centre, _invScale, _scale, rx, ry, rz,
+                                  cx, cy, cz, n,
+                                  PlanarFBlock4{qx, qy, qz, dx, dy, dz});
+            qx += 4;
+            qy += 4;
+            qz += 4;
+            dx += 4;
+            dy += 4;
+            dz += 4;
+            count -= 4;
+        }
+        for (size_t t = 0; t < count; ++t) {
+            GfVec3d const d = Displacement(GfVec3d(qx[t], qy[t], qz[t]));
+            dx[t] = d[0];
+            dy[t] = d[1];
+            dz[t] = d[2];
+        }
+        return;
+    }
+#endif
+    // Scalar widths transpose through the stack: the block template keeps
+    // its AoS spelling (and its FMA association), and the gather/scatter
+    // convert exactly.
+    while (count >= 8) {
+        GfVec3d q[8], d[8];
+        for (size_t t = 0; t < 8; ++t) q[t] = GfVec3d(qx[t], qy[t], qz[t]);
+        DisplaceBlocked<8>(_centre, _invScale, _scale, rx, ry, rz,
+                           cx, cy, cz, n, q, d);
+        for (size_t t = 0; t < 8; ++t) {
+            dx[t] = d[t][0];
+            dy[t] = d[t][1];
+            dz[t] = d[t][2];
+        }
+        qx += 8;
+        qy += 8;
+        qz += 8;
+        dx += 8;
+        dy += 8;
+        dz += 8;
+        count -= 8;
+    }
+    if (count >= 4) {
+        GfVec3d q[4], d[4];
+        for (size_t t = 0; t < 4; ++t) q[t] = GfVec3d(qx[t], qy[t], qz[t]);
+        DisplaceBlocked<4>(_centre, _invScale, _scale, rx, ry, rz,
+                           cx, cy, cz, n, q, d);
+        for (size_t t = 0; t < 4; ++t) {
+            dx[t] = d[t][0];
+            dy[t] = d[t][1];
+            dz[t] = d[t][2];
+        }
+        qx += 4;
+        qy += 4;
+        qz += 4;
+        dx += 4;
+        dy += 4;
+        dz += 4;
+        count -= 4;
+    }
+    for (size_t t = 0; t < count; ++t) {
+        GfVec3d const d = Displacement(GfVec3d(qx[t], qy[t], qz[t]));
+        dx[t] = d[0];
+        dy[t] = d[1];
+        dz[t] = d[2];
+    }
 }
 
 std::vector<size_t> SelectSamples(std::vector<GfVec3d> const &points, size_t budget,

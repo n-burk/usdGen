@@ -618,12 +618,12 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
     // stored triple is checked exactly once, so the verdict and the message
     // match the retired scan.
     std::atomic<bool> nonFinite{false};
-    // Strands displace in groups of kGroupStrands through one DisplaceBatch
-    // call: batch boundaries are bitwise-transparent per query (each query
-    // runs the same operations whatever its batch position), so the group
-    // pays the per-call, per-resize, and per-task overhead once instead of
-    // once per strand. 32 keeps the group's batchQ/batchD (~12KB at 8 CVs
-    // per strand) L1-resident.
+    // Strands displace in groups of kGroupStrands through one
+    // DisplaceBatchPlanar call: batch boundaries are bitwise-transparent per
+    // query (each query runs the same operations whatever its batch
+    // position), so the group pays the per-call, per-resize, and per-task
+    // overhead once instead of once per strand. 32 keeps the group's planar
+    // displacement scratch (~6KB at 8 CVs per strand) L1-resident.
     size_t constexpr kGroupStrands = 32;
     size_t const groups = (R + kGroupStrands - 1) / kGroupStrands;
     bool const recordExtents = direct && ctx.chunks != nullptr && ctx.chunkCount > 0 &&
@@ -640,25 +640,20 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
         if (!wrap) {
             // The RBF path displaces the whole group, roots included, in
             // one batch: each strand's root element doubles as its
-            // lockRoots shift exactly as in the loop below.
-            thread_local std::vector<GfVec3d> batchQ, batchD;
-            size_t qoff[kGroupStrands];
-            size_t total = 0;
-            for (size_t c = c0; c < c1; ++c) {
-                size_t const first = spanAt(c), last = spanAt(c + 1);
-                qoff[c - c0] = total;
-                if (last > first) total += last - first;
-            }
-            batchQ.resize(total);
-            batchD.resize(total);
-            for (size_t c = c0; c < c1; ++c) {
-                size_t const first = spanAt(c), last = spanAt(c + 1);
-                if (first >= last) continue;
-                size_t const o = qoff[c - c0];
-                for (size_t cv = first; cv < last; ++cv)
-                    batchQ[o + cv - first] = GfVec3d(opUtil::Point(upstream, cv));
-            }
-            field.DisplaceBatch(batchQ.data(), batchD.data(), total);
+            // lockRoots shift exactly as in the loop below. The group's
+            // CVs tile [spanAt(c0), spanAt(c1)) densely, so the planar
+            // entry reads the upstream planes directly (no AoS transpose)
+            // and the post loops below index the same CV minus the base.
+            size_t const cvBase = spanAt(c0), cvEnd = spanAt(c1);
+            size_t const total = cvEnd - cvBase;
+            thread_local std::vector<double> batchD3;
+            batchD3.resize(total * 3);
+            double *bx = batchD3.data(), *by = batchD3.data() + total,
+                   *bz = batchD3.data() + total * 2;
+            field.DisplaceBatchPlanar(upstream.px.cdata() + cvBase,
+                                      upstream.py.cdata() + cvBase,
+                                      upstream.pz.cdata() + cvBase, bx, by, bz,
+                                      total);
             if (direct) {
                 // Direct stores plus a local range: adjacent groups share
                 // cache lines in groupExtents, so the per-CV accumulation
@@ -671,12 +666,15 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
                 for (size_t c = c0; c < c1; ++c) {
                     size_t const first = spanAt(c), last = spanAt(c + 1);
                     if (first >= last) continue;
-                    size_t const o = qoff[c - c0];
-                    GfVec3d const shift =
-                        lock.Value(c, first) != 0.0 ? batchD[o] : GfVec3d(0.0);
+                    size_t const ro = first - cvBase;
+                    GfVec3d const shift = lock.Value(c, first) != 0.0
+                        ? GfVec3d(bx[ro], by[ro], bz[ro])
+                        : GfVec3d(0.0);
                     for (size_t cv = first; cv < last; ++cv) {
                         GfVec3d const x(opUtil::Point(upstream, cv));
-                        GfVec3d const moved = x + batchD[o + cv - first] - shift;
+                        size_t const k = cv - cvBase;
+                        GfVec3d const moved =
+                            x + GfVec3d(bx[k], by[k], bz[k]) - shift;
                         float const f0 = float(moved[0]);
                         float const f1 = float(moved[1]);
                         float const f2 = float(moved[2]);
@@ -697,12 +695,15 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
             for (size_t c = c0; c < c1; ++c) {
                 size_t const first = spanAt(c), last = spanAt(c + 1);
                 if (first >= last) continue;
-                size_t const o = qoff[c - c0];
-                GfVec3d const shift =
-                    lock.Value(c, first) != 0.0 ? batchD[o] : GfVec3d(0.0);
+                size_t const ro = first - cvBase;
+                GfVec3d const shift = lock.Value(c, first) != 0.0
+                    ? GfVec3d(bx[ro], by[ro], bz[ro])
+                    : GfVec3d(0.0);
                 for (size_t cv = first; cv < last; ++cv) {
                     GfVec3d const x(opUtil::Point(upstream, cv));
-                    GfVec3d const moved = x + batchD[o + cv - first] - shift;
+                    size_t const k = cv - cvBase;
+                    GfVec3d const moved =
+                        x + GfVec3d(bx[k], by[k], bz[k]) - shift;
                     float const f0 = float(moved[0]);
                     float const f1 = float(moved[1]);
                     float const f2 = float(moved[2]);
