@@ -391,5 +391,85 @@ int main(){
     assert(CudaRbfEvalCacheHitsForTesting()==fh0+1 && CudaRbfEvalCacheMissesForTesting()==fm0);
     cudaFree(fdr); cudaFree(fdp); cudaFree(fdc); cudaFree(fdo);
   }
+  // Direct-bind memo: rebinding bitwise-identical rest skips the factor
+  // slice (a counted hit); the solve+evaluate over the memo-hit binding
+  // is bitwise the full-slice path. A 1-ULP rest change misses and
+  // re-arms, a smoothing change skips the probe, the seam-disabled path
+  // never probes, and a failed bind disarms the memo.
+  {
+    int const mn=100;
+    auto mh01 = [&](uint64_t k){ k+=0x9e3779b97f4a7c15ULL; k=(k^(k>>30))*0xbf58476d1ce4e5b9ULL; k=(k^(k>>27))*0x94d049bb133111ebULL; return double((k^(k>>31))>>11)/double(1ull<<53); };
+    std::vector<float3> mrest(mn), mpose(mn);
+    for(int i=0;i<mn;i++){ int x=i%5,y=(i/5)%5,z=(i/25)%4; mrest[size_t(i)]=f(float(x)+.01f*float(i%7),float(y)+.01f*float((i+3)%7),float(z)+.01f*float((i+5)%7)); mpose[size_t(i)]=f(mrest[size_t(i)].x+.1f*float(mh01(uint64_t(i))-0.5),mrest[size_t(i)].y+.1f*float(mh01(uint64_t(i)+1000)-0.5),mrest[size_t(i)].z+.1f*float(mh01(uint64_t(i)+2000)-0.5)); }
+    std::vector<float3> mcvs={f(.1f,.2f,.3f),f(.4f,.5f,.6f),f(.7f,.8f,.9f),f(1.1f,1.2f,1.3f),f(-.5f,.25f,2.f)};
+    float3 *mr,*mp,*mc,*mo; check(cudaMalloc(&mr,size_t(mn)*sizeof(float3))); check(cudaMalloc(&mp,size_t(mn)*sizeof(float3))); check(cudaMalloc(&mc,5*sizeof(float3))); check(cudaMalloc(&mo,5*sizeof(float3)));
+    check(cudaMemcpyAsync(mr,mrest.data(),size_t(mn)*sizeof(float3),cudaMemcpyHostToDevice,s));
+    check(cudaMemcpyAsync(mp,mpose.data(),size_t(mn)*sizeof(float3),cudaMemcpyHostToDevice,s));
+    check(cudaMemcpyAsync(mc,mcvs.data(),5*sizeof(float3),cudaMemcpyHostToDevice,s));
+    auto mreadback = [&](){ std::vector<float3> v(5); check(cudaMemcpyAsync(v.data(),mo,5*sizeof(float3),cudaMemcpyDeviceToHost,s)); check(cudaStreamSynchronize(s)); return v; };
+    auto msameBits = [&](std::vector<float3> const& a, std::vector<float3> const& b){ return a.size()==b.size() && std::memcmp(a.data(),b.data(),a.size()*sizeof(float3))==0; };
+    CudaRbfBinding mb; assert(mb.Bind({mr,size_t(mn)},0,s)==RbfStatus::Ok); assert(mb.Solve({mp,size_t(mn)},s)==RbfStatus::Ok);
+    assert(mb.Evaluate({mc,5},{mo,5},s)==RbfStatus::Ok); assert(mb.Finish(s)==RbfStatus::Ok);
+    std::vector<float3> mout0=mreadback();
+    uint64_t bh0=CudaRbfBindMemoHitsForTesting(), bm0=CudaRbfBindMemoMissesForTesting();
+    // Identical rebind on another stream: one probe, one hit, same bits.
+    assert(mb.Bind({mr,size_t(mn)},0,s2)==RbfStatus::Ok);
+    assert(CudaRbfBindMemoHitsForTesting()==bh0+1 && CudaRbfBindMemoMissesForTesting()==bm0);
+    assert(mb.Solve({mp,size_t(mn)},s2)==RbfStatus::Ok);
+    assert(mb.Evaluate({mc,5},{mo,5},s2)==RbfStatus::Ok); assert(mb.Finish(s2)==RbfStatus::Ok);
+    assert(msameBits(mreadback(),mout0));
+    // A 1-ULP rest change misses; the miss path matches a clean binding
+    // bitwise, and the rebind re-arms into a hit with the same bits.
+    std::vector<float3> mrest2=mrest; mrest2[0].x=std::nextafterf(mrest2[0].x,2.f);
+    check(cudaMemcpyAsync(mr,mrest2.data(),size_t(mn)*sizeof(float3),cudaMemcpyHostToDevice,s));
+    assert(mb.Bind({mr,size_t(mn)},0,s)==RbfStatus::Ok);
+    assert(CudaRbfBindMemoHitsForTesting()==bh0+1 && CudaRbfBindMemoMissesForTesting()==bm0+1);
+    assert(mb.Solve({mp,size_t(mn)},s)==RbfStatus::Ok);
+    assert(mb.Evaluate({mc,5},{mo,5},s)==RbfStatus::Ok); assert(mb.Finish(s)==RbfStatus::Ok);
+    std::vector<float3> mout2=mreadback();
+    CudaRbfBinding mb2; assert(mb2.Bind({mr,size_t(mn)},0,s)==RbfStatus::Ok); assert(mb2.Solve({mp,size_t(mn)},s)==RbfStatus::Ok);
+    assert(mb2.Evaluate({mc,5},{mo,5},s)==RbfStatus::Ok); assert(mb2.Finish(s)==RbfStatus::Ok);
+    assert(msameBits(mreadback(),mout2));
+    assert(mb.Bind({mr,size_t(mn)},0,s)==RbfStatus::Ok);
+    assert(CudaRbfBindMemoHitsForTesting()==bh0+2 && CudaRbfBindMemoMissesForTesting()==bm0+1);
+    assert(mb.Solve({mp,size_t(mn)},s)==RbfStatus::Ok);
+    assert(mb.Evaluate({mc,5},{mo,5},s)==RbfStatus::Ok); assert(mb.Finish(s)==RbfStatus::Ok);
+    assert(msameBits(mreadback(),mout2));
+    // A smoothing change skips the probe (neither counter moves); the
+    // rebound field still solves and evaluates.
+    check(cudaMemcpyAsync(mr,mrest.data(),size_t(mn)*sizeof(float3),cudaMemcpyHostToDevice,s));
+    assert(mb.Bind({mr,size_t(mn)},1e-6,s)==RbfStatus::Ok);
+    assert(CudaRbfBindMemoHitsForTesting()==bh0+2 && CudaRbfBindMemoMissesForTesting()==bm0+1);
+    assert(mb.Solve({mp,size_t(mn)},s)==RbfStatus::Ok);
+    assert(mb.Evaluate({mc,5},{mo,5},s)==RbfStatus::Ok); assert(mb.Finish(s)==RbfStatus::Ok);
+    // Seam-disabled binds never probe and match the memo path bitwise.
+    TestDisableCudaRbfBindMemo(true);
+    assert(mb.Bind({mr,size_t(mn)},0,s)==RbfStatus::Ok);
+    assert(CudaRbfBindMemoHitsForTesting()==bh0+2 && CudaRbfBindMemoMissesForTesting()==bm0+1);
+    assert(mb.Solve({mp,size_t(mn)},s)==RbfStatus::Ok);
+    assert(mb.Evaluate({mc,5},{mo,5},s)==RbfStatus::Ok); assert(mb.Finish(s)==RbfStatus::Ok);
+    assert(msameBits(mreadback(),mout0));
+    TestDisableCudaRbfBindMemo(false);
+    // Re-arm with a successful bind (a disarmed memo runs the full slice
+    // without a probe and stores silently).
+    assert(mb.Bind({mr,size_t(mn)},0,s)==RbfStatus::Ok);
+    assert(CudaRbfBindMemoHitsForTesting()==bh0+2 && CudaRbfBindMemoMissesForTesting()==bm0+1);
+    // A failed bind disarms: the probe on the bad samples misses, the
+    // recovery bind runs the full slice without a probe, and only the
+    // rebind after it hits again.
+    std::vector<float3> mnan=mrest; mnan[7].z=NAN;
+    check(cudaMemcpyAsync(mr,mnan.data(),size_t(mn)*sizeof(float3),cudaMemcpyHostToDevice,s));
+    assert(mb.Bind({mr,size_t(mn)},0,s)==RbfStatus::NonFiniteInput);
+    assert(CudaRbfBindMemoHitsForTesting()==bh0+2 && CudaRbfBindMemoMissesForTesting()==bm0+2);
+    check(cudaMemcpyAsync(mr,mrest.data(),size_t(mn)*sizeof(float3),cudaMemcpyHostToDevice,s));
+    assert(mb.Bind({mr,size_t(mn)},0,s)==RbfStatus::Ok);
+    assert(CudaRbfBindMemoHitsForTesting()==bh0+2 && CudaRbfBindMemoMissesForTesting()==bm0+2);
+    assert(mb.Bind({mr,size_t(mn)},0,s)==RbfStatus::Ok);
+    assert(CudaRbfBindMemoHitsForTesting()==bh0+3 && CudaRbfBindMemoMissesForTesting()==bm0+2);
+    assert(mb.Solve({mp,size_t(mn)},s)==RbfStatus::Ok);
+    assert(mb.Evaluate({mc,5},{mo,5},s)==RbfStatus::Ok); assert(mb.Finish(s)==RbfStatus::Ok);
+    assert(msameBits(mreadback(),mout0));
+    cudaFree(mr); cudaFree(mp); cudaFree(mc); cudaFree(mo);
+  }
   cudaFree(dr);cudaFree(dp);cudaFree(do_);cudaStreamDestroy(s);cudaStreamDestroy(s2);
 }

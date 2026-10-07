@@ -18,6 +18,8 @@ std::atomic<bool> failFreshResolvePreflight{false}, failFreshResolveCommit{false
 std::atomic<uint64_t> freshAcceptAttempts{0}, freshRollbackAttempts{0};
 std::atomic<bool> disableEvalCache{false};
 std::atomic<uint64_t> evalCacheHits{0}, evalCacheMisses{0};
+std::atomic<bool> disableBindMemo{false};
+std::atomic<uint64_t> bindMemoHits{0}, bindMemoMisses{0};
 __device__ inline void mark(int* f, int v) { atomicOr(f, v); }
 // Each thread folds its grid stride into registers and each warp reduces
 // with shuffles; the 4 warp folds then combine through shared memory
@@ -210,6 +212,35 @@ __global__ void verifyKernel(const int* a, const int* b, size_t words, int* flag
     for (size_t i = size_t(blockIdx.x) * size_t(blockDim.x) + threadIdx.x; i < words; i += stride)
         if (a[i] != b[i]) *flag = 1;
 }
+// Bind-memo digest: FNV-1a/64 over the rest samples as float words.
+// Single-block launch (every caller uses <<<1,256>>>): each lane folds
+// its grid-stride words, lane 0 chains the 256 lane digests byte-wise in
+// lane order, and one store lands the digest. The combination order is
+// fixed, so identical words always digest identically whatever the
+// occupancy; the memo key pairs this with the shape and smoothing.
+__global__ void bindDigestKernel(const float3* p, int n, unsigned long long* out) {
+    __shared__ unsigned long long part[256];
+    unsigned long long h = 1469598103934665603ULL;
+    size_t const words = size_t(n) * 3;
+    auto const* w = reinterpret_cast<unsigned int const*>(p);
+    for (size_t i = size_t(threadIdx.x); i < words; i += 256) {
+        h ^= w[i];
+        h *= 1099511628211ULL;
+    }
+    part[threadIdx.x] = h;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        unsigned long long d = 1469598103934665603ULL;
+        for (int t = 0; t < 256; ++t) {
+            unsigned long long v = part[t];
+            for (int b = 0; b < 8; ++b) {
+                d ^= (v >> (b * 8)) & 0xFFu;
+                d *= 1099511628211ULL;
+            }
+        }
+        *out = d;
+    }
+}
 // Miss-predicated R fill for the fresh path: the whole verify/fill/eval
 // sequence submits as one stream slice with no host round-trip. On a
 // verify hit every thread exits after one flag read, so the cache serves
@@ -310,6 +341,9 @@ uint64_t FreshRbfRollbackAttemptCountForTesting() noexcept { return freshRollbac
 void TestDisableCudaRbfEvalCache(bool disable) noexcept { disableEvalCache.store(disable, std::memory_order_release); }
 uint64_t CudaRbfEvalCacheHitsForTesting() noexcept { return evalCacheHits.load(std::memory_order_acquire); }
 uint64_t CudaRbfEvalCacheMissesForTesting() noexcept { return evalCacheMisses.load(std::memory_order_acquire); }
+void TestDisableCudaRbfBindMemo(bool disable) noexcept { disableBindMemo.store(disable, std::memory_order_release); }
+uint64_t CudaRbfBindMemoHitsForTesting() noexcept { return bindMemoHits.load(std::memory_order_acquire); }
+uint64_t CudaRbfBindMemoMissesForTesting() noexcept { return bindMemoMisses.load(std::memory_order_acquire); }
 
 cudaError_t GetCudaRbfLuWorkspaceElements(size_t sampleCount,
                                           size_t* elements) noexcept {
@@ -339,6 +373,7 @@ struct CudaRbfBinding::DirectProofs {
     int flag;
     double gram[16];
     int info;
+    unsigned long long bindDigest;
 };
 
 struct CudaRbfBinding::FreshState {
@@ -850,6 +885,73 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
     if(!ensureProofs()) return fail(RbfStatus::CudaError,"RBF proof allocation failed");
     if(!ok(bindParams_.reset(4))) return fail(RbfStatus::CudaError,"RBF device allocation failed");
     int lwork=0; if(cusolverDnDgetrf_bufferSize(solver_,m,m,matrix_.data(),m,&lwork)!=CUSOLVER_STATUS_SUCCESS || !ok(work_.reset(lwork))) return fail(RbfStatus::SolverError,"cuSOLVER LU workspace failed");
+    // Steady-state memo probe: rest is Default-time, so a sync-API caller
+    // re-binds bitwise-identical samples every pose (the bench's steady
+    // state; the CPU CubicField already memos this way on rest identity).
+    // A digest hit proves the factor buffers (rest, params, gram, matrix,
+    // norms, pivots) still hold this bind's bytes, so the slice is skipped
+    // and only the identity state is re-established below. The digest reads
+    // the caller's samples directly (not rest_, which the skipped copy
+    // would have refreshed): a hit proves samples == last samples, and
+    // the last bind copied those into rest_, so rest_ is current.
+    bool const memoArmed = bindMemoValid_ && !disableBindMemo.load(std::memory_order_relaxed) &&
+        n == bindMemoN_ && smoothing == bindMemoSmoothing_;
+    // Sticky launch-error preservation: the probe submits and the staging
+    // submit below each query the launch status, which drains errors the
+    // pre-existing check (below) would otherwise observe. Both values
+    // feed that check, so error precedence and every verdict are
+    // unchanged.
+    cudaError_t probeErr = cudaSuccess;
+    bool probeStaged = false;
+    if (memoArmed) {
+        // Speculative hit work, all ahead of the probe sync: the digest,
+        // the identity memset, and the state marker. The slice never
+        // reads the coefficients the memset zeroes, and the tail below
+        // re-zeroes and re-records the marker after a miss, so the
+        // speculation is unobservable beyond the saved gaps. A hit then
+        // needs no further CUDA calls: the sync proves the memset and the
+        // marker already sits past it, exactly as if recorded after the
+        // compare.
+        bindDigestKernel<<<1, 256, 0, stream>>>(samples.data, n, &proofDev_->bindDigest);
+        probeErr = cudaGetLastError();
+        bool const probeSetupOk = (probeErr == cudaSuccess) &&
+            ok(cudaMemsetAsync(coefficients_.data(), 0,
+                               coefficients_.size() * sizeof(double), stream)) &&
+            ok(cudaEventRecord(stateReady_, stream));
+        if (!probeSetupOk) {
+            // Conservative: a probe that never fully submitted proves
+            // nothing; run the full slice, which surfaces any persistent
+            // problem the same way as before (a sticky launch error joins
+            // the check below; a direct memset/marker error recurs
+            // identically at the tail, with the same verdict).
+        } else if (!ok(cudaStreamSynchronize(stream))) {
+            // Catastrophe, like the slice sync below: the stream is
+            // broken, so the slice could not run either. The graph was
+            // never launched here, but mirror the leak-and-disable
+            // discipline rather than reasoning about exec state.
+            bindGraph_.exec = nullptr;
+            bindGraph_.disabled = true;
+            return fail(RbfStatus::CudaError,"RBF LU status query failed");
+        } else {
+            probeStaged = true;
+            if (proofHost_->bindDigest == bindDigest_) {
+                bindMemoHits.fetch_add(1, std::memory_order_relaxed);
+                // The extent/gram/LU proofs and center_/scale_ already
+                // hold this bind's proven values (a hit implies the
+                // storing bind succeeded, so every host check below would
+                // pass unchanged), and the sync proved the speculative
+                // identity state above.
+                sampleCount_=n; order_=m; smoothing_=smoothing; solved_=true; return RbfStatus::Ok;
+            }
+            bindMemoMisses.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    // Any slice submit below overwrites the factor buffers before success
+    // is known, so the memo disarms here; only the fully proven tail
+    // re-arms it. The probe's digest word (when it ran) is already staged
+    // for the store: the kernel precedes the slice on this stream, so the
+    // slice sync proves it with no added synchronization.
+    bindMemoValid_ = false;
     // The extent, rank, and LU proofs share one synchronization: the
     // center/scale derive inside the extent kernel (bitwise the host
     // derivation below), so polynomialGram and buildMatrix submit before
@@ -862,6 +964,15 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
     // capture/launch failure runs the same submits directly.
     RbfStatus slice = submitBindSliceGraphed(stream, samples, n, m, smoothing);
     if (slice != RbfStatus::Ok) return slice;
+    // Drain the slice's sticky launch status first (this is the value the
+    // pre-existing check below always observed); the staging submit after
+    // it then reports purely its own status.
+    cudaError_t const sliceLaunchErr = cudaGetLastError();
+    bool digestStaged = probeStaged;
+    if (!digestStaged && !disableBindMemo.load(std::memory_order_relaxed)) {
+        bindDigestKernel<<<1, 256, 0, stream>>>(samples.data, n, &proofDev_->bindDigest);
+        digestStaged = (cudaGetLastError() == cudaSuccess);
+    }
     if(!ok(cudaStreamSynchronize(stream))) {
         // Catastrophe (not a normal error path): the slice may be
         // in-flight, so leak the exec and disable replay rather than
@@ -873,12 +984,18 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
     if(proofHost_->flag) return fail(RbfStatus::NonFiniteInput,"RBF rest samples contain non-finite values");
     center_[0]=(double)proofHost_->extent[0] + ((double)proofHost_->extent[3]-(double)proofHost_->extent[0])*.5; center_[1]=(double)proofHost_->extent[1] + ((double)proofHost_->extent[4]-(double)proofHost_->extent[1])*.5; center_[2]=(double)proofHost_->extent[2] + ((double)proofHost_->extent[5]-(double)proofHost_->extent[2])*.5; scale_=std::max((double)proofHost_->extent[3]-proofHost_->extent[0],std::max((double)proofHost_->extent[4]-proofHost_->extent[1],(double)proofHost_->extent[5]-proofHost_->extent[2]));
     if(!std::isfinite(scale_) || scale_ <= 0.0) return fail(RbfStatus::RankDeficient,"RBF rest samples have zero extent");
-    if(cudaGetLastError()!=cudaSuccess) return fail(RbfStatus::CudaError,"RBF bind launch failed");
+    if(probeErr!=cudaSuccess || sliceLaunchErr!=cudaSuccess || cudaGetLastError()!=cudaSuccess) return fail(RbfStatus::CudaError,"RBF bind launch failed");
     double gram[16]; for(int i=0;i<16;++i) gram[i]=proofHost_->gram[i]; // fullAffineRank eliminates in place
     if(!fullAffineRank(gram)) return fail(RbfStatus::RankDeficient,"RBF samples lack numerically full affine 3D support");
     if(proofHost_->info>0) return fail(RbfStatus::RankDeficient,"RBF augmented LU is singular (including coplanar affine support)"); if(proofHost_->info<0)return fail(RbfStatus::SolverError,"RBF LU invalid argument");
     // A newly bound field has the mathematically defined rest (identity) state.
     if(!ok(cudaMemsetAsync(coefficients_.data(),0,coefficients_.size()*sizeof(double),stream)) || !ok(cudaEventRecord(stateReady_,stream))) return fail(RbfStatus::CudaError,"RBF identity-state initialization failed");
+    if (digestStaged) {
+        bindDigest_ = proofHost_->bindDigest;
+        bindMemoN_ = n;
+        bindMemoSmoothing_ = smoothing;
+        bindMemoValid_ = true;
+    }
     sampleCount_=n; order_=m; smoothing_=smoothing; solved_=true; return RbfStatus::Ok;
 }
 

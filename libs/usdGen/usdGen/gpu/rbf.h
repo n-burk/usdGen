@@ -30,6 +30,15 @@ void TestDisableCudaRbfEvalCache(bool disable) noexcept;
 // it first; the over-cap fallback increments neither.
 uint64_t CudaRbfEvalCacheHitsForTesting() noexcept;
 uint64_t CudaRbfEvalCacheMissesForTesting() noexcept;
+// Test-only direct-bind memo seam. While disabled, Bind always runs the
+// factor slice, so a test can compare the memo-hit and full-slice paths
+// bitwise on the same binding. The counters (global across bindings;
+// tests assert deltas) count digest-probe hits (slice skipped) and
+// digest-probe misses (slice ran); a bind that skips the probe (first
+// bind, or a shape/smoothing key mismatch) increments neither.
+void TestDisableCudaRbfBindMemo(bool disable) noexcept;
+uint64_t CudaRbfBindMemoHitsForTesting() noexcept;
+uint64_t CudaRbfBindMemoMissesForTesting() noexcept;
 
 // Queries the selected CUDA implementation's legacy dense-LU workspace
 // without allocating matrix storage or submitting device work.
@@ -206,6 +215,19 @@ private:
     int rN_ = 0;
     size_t rCount_ = 0;
     bool rValid_ = false;
+    // Steady-state bind memo: rest is Default-time, so a sync-API caller
+    // re-binds bitwise-identical samples every pose. A digest hit skips
+    // the factor slice (rest copy, extent, gram, matrix build, LU) and
+    // only re-establishes the identity state. The key is the device-side
+    // FNV-1a digest of the rest words plus the shape and smoothing; a hit
+    // proves the factor buffers still hold this bind's bytes, so every
+    // success-path byte is unchanged. Any slice submit clears the memo
+    // (its writes land before success is known); only a fully proven
+    // bind re-arms it.
+    uint64_t bindDigest_ = 0;
+    int bindMemoN_ = 0;
+    double bindMemoSmoothing_ = 0.0;
+    bool bindMemoValid_ = false;
     // Zero-copy direct-path proofs: one mapped allocation, read on the host
     // after the stream syncs, so no D2H node (and its ~7us drain bubble)
     // separates the phases. proofDev_ is re-queried if the binding moves.
