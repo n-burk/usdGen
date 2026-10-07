@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -129,6 +130,60 @@ struct alignas(128) ScatterEmitSlot {
     ScatterEmission emission;
     ScatterEmitError error;
 };
+
+// Two-pass spill: pass 1's per-face fan outputs for big level-0 captures
+// (see Capture). 32 bytes, naturally aligned, trivially constructible:
+// the slice is uninitialized storage (a resize-zero here would serialize
+// 8K first-touch faults every capture), so pass 1 fully writes every
+// visited slot -- valid faces get all five fields, skipped faces get an
+// explicit zero struct (nf == 0: pass 2 emits nothing for them, exactly
+// like a face whose stochastic rounding drew no roots). Faces past the
+// inline fan width (ntri > 2) spill zeros for the weights and recompute
+// the fan in pass 2 from the same fanFace code.
+struct ScatterSpill {
+    double areaRest;
+    float w0, w1;
+    GfVec3f nrest;
+    uint32_t nf;
+};
+static_assert(std::is_trivially_default_constructible<ScatterSpill>::value,
+              "spill slices stay uninitialized");
+static_assert(std::is_trivially_copyable<ScatterSpill>::value,
+              "spill assignment is a plain store");
+static_assert(sizeof(ScatterSpill) == 32, "spill is 32 bytes");
+static_assert(offsetof(ScatterSpill, areaRest) == 0, "spill layout");
+static_assert(offsetof(ScatterSpill, w0) == 8, "spill layout");
+static_assert(offsetof(ScatterSpill, nrest) == 16, "spill layout");
+static_assert(offsetof(ScatterSpill, nf) == 28, "spill layout");
+
+// One slot per two-pass range: the pass-1 spill slice, the range's root
+// total (for the serial inter-range prefix), and the range's first error.
+struct ScatterSpillSlot {
+    std::unique_ptr<ScatterSpill[]> spill;
+    size_t total = 0;
+    ScatterEmitError error;
+};
+
+// Two-pass merged roots: the nine planes as uninitialized buffers. Pass 2
+// writes every slot exactly once (per-face cursors partition [0, total)),
+// so no zero-fill runs and first-touch faults parallelize over the pass-2
+// workers for free. Trivial element types only (asserted): assignment
+// carries the same bytes push_back's copy-construction would.
+struct ScatterRawRoots {
+    std::unique_ptr<float[]> ax, ay, az;
+    std::unique_ptr<uint64_t[]> aids;
+    std::unique_ptr<int[]> aPrim;
+    std::unique_ptr<GfVec2f[]> aUv;
+    std::unique_ptr<GfVec3f[]> aT, aN, aB;
+};
+static_assert(std::is_trivially_default_constructible<GfVec2f>::value,
+              "raw vec2 planes stay uninitialized");
+static_assert(std::is_trivially_default_constructible<GfVec3f>::value,
+              "raw vec3 planes stay uninitialized");
+static_assert(std::is_trivially_copyable<GfVec2f>::value,
+              "raw vec2 assignment is a plain store");
+static_assert(std::is_trivially_copyable<GfVec3f>::value,
+              "raw vec3 assignment is a plain store");
 
 // Parallel-for over N slots: the scheduler-bound arena when Capture runs
 // under a graph (ctx.dispatcher), plain TBB when Capture is called
@@ -480,6 +535,32 @@ bool UsdGenScatterOp::Capture(
         for (size_t p = 0; p < partitions; ++p)
             rangeBase[p + 1] = rangeBase[p] + rangeSum[p];
     }
+    // Shared level-0 fan triangulation for the two-pass path (pass 1 and
+    // the pass-2 overflow recompute call the same code, so spilled and
+    // recomputed weights agree by construction): the same inline
+    // area-cross fusion as emitRange's fan below (kernels.cpp canonical,
+    // same float ops in the same order). triW takes nFan = nc - 2
+    // weights; the caller provides the stack/spill buffer.
+    auto fanFace = [&](size_t cbase, int nc, float *triW,
+                       GfVec3f *nAccOut, double *areaOut) {
+        GfVec3f const p0 = rest[fvi[cbase]];
+        double areaRest = 0.0;
+        GfVec3f nAcc(0.0f, 0.0f, 0.0f);
+        for (int t = 1; t + 1 < nc; ++t) {
+            GfVec3f const pb = rest[fvi[cbase + size_t(t)]];
+            GfVec3f const pc = rest[fvi[cbase + size_t(t) + 1]];
+            GfVec3f const eb = pb - p0;
+            GfVec3f const ec = pc - p0;
+            GfVec3f const x = GfCross(eb, ec);
+            float const w = 0.5f * std::sqrt(
+                x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
+            triW[size_t(t) - 1] = w;
+            areaRest += double(w);
+            nAcc += x;
+        }
+        *nAccOut = nAcc;
+        *areaOut = areaRest;
+    };
     auto emitRange = [&](size_t fi0, size_t fi1, size_t cbase0,
                          ScatterEmission &e, ScatterEmitError &err) {
     e.reserve((fi1 - fi0) * 4);
@@ -613,7 +694,6 @@ bool UsdGenScatterOp::Capture(
                           "uint32 cardinality at face " + std::to_string(f);
             break;
         }
-
         for (uint64_t k = 0; k < nf; ++k) {
             // UsdGenCurveId(seed, f, k) is Hash64(faceKey ^ k, salt): faceKey
             // above is exactly the id's documented inner fold, so one
@@ -714,91 +794,406 @@ bool UsdGenScatterOp::Capture(
         if (err.failed) break;
     }
     };
-    std::vector<ScatterEmitSlot> slots(partitions);
-    // Reserve every slot up front, serially: 72 near-simultaneous mmaps
-    // from 8 workers contend on the address-space lock (~6ms), while one
-    // thread mapping the same total pays ~1ms. The per-range reserve inside
-    // emitRange then no-ops (capacity already suffices).
-    for (size_t p = 0; p < partitions; ++p)
-        slots[p].emission.reserve(
-            (rangeStart[p + 1] - rangeStart[p]) * 4);
-    if (partitions == 1) {
-        emitRange(rangeStart[0], rangeStart[1], 0,
-                  slots[0].emission, slots[0].error);
-    } else {
-        ScatterParallelFor(ctx.dispatcher, partitions, [&](size_t p) {
-            emitRange(rangeStart[p], rangeStart[p + 1],
-                      restricted ? 0 : rangeBase[p],
-                      slots[p].emission, slots[p].error);
-        });
-    }
-    // Ranges are face-ordered, so the first failed range holds the serial
-    // loop's first failure: same return, same message.
-    for (size_t p = 0; p < partitions; ++p) {
-        if (!slots[p].error.failed)
-            continue;
-        if (diag && !slots[p].error.message.empty())
-            diag->Error(slots[p].error.message);
-        return false;
-    }
-    ScatterEmission all;
-    size_t total = 0;
-    for (auto const &s : slots)
-        total += s.emission.size();
-    size_t const maxTotal = std::numeric_limits<uint32_t>::max();
-    if (total > maxTotal) {
-        // The serial loop names the exact trip face, which needs per-face
-        // counts (4MB kept for a >2^32-root path no process survives —
-        // the emission vectors alone need 292GB+), so name the last face
-        // of the first range whose end total overflows instead. Same
-        // failure, same message shape; only the named face can differ.
-        int face = 0;
-        size_t acc = 0;
-        for (size_t p = 0; p < partitions; ++p) {
-            acc += slots[p].emission.size();
-            if (acc > maxTotal) {
-                size_t const fiFace =
-                    rangeStart[p + 1] ? rangeStart[p + 1] - 1 : 0;
-                face = restricted ? faces[fiFace] : int(fiFace);
+    // Pass 1 of the two-pass path (level 0 only): per-face validation,
+    // fan triangulation and root-count spill. Mirrors emitRange's face
+    // loop exactly (same checks, same messages, same skips) but writes a
+    // ScatterSpill per face instead of emitting roots: the spill slice is
+    // pre-sized and resize-zeroed, so skipped faces keep zeros (nf == 0)
+    // and valid faces overwrite their slot in full. The per-range root
+    // total accumulates for the inter-range prefix; the uint32 overflow
+    // check runs globally after the join (exact first-crossing face).
+    auto pass1Range = [&](size_t fi0, size_t fi1, size_t cbase0,
+                          ScatterSpill *spill,
+                          size_t *rangeTotal, ScatterEmitError &err) {
+    float triStack[64];
+    std::vector<float> triSpill;
+    triSpill.reserve(16);
+    // Explicit zero spill for skipped faces (the slice is uninitialized).
+    auto skipFace = [&](size_t fi) { spill[fi - fi0] = ScatterSpill{}; };
+    size_t runBase = cbase0;
+    size_t rangeN = 0;
+    for (size_t fi = fi0; fi < fi1; ++fi) {
+        int const f = restricted ? faces[fi] : int(fi);
+        if (f < 0 || size_t(f) >= surf.faceVertexCounts.size()) { skipFace(fi); continue; }
+        size_t cbase;
+        if (restricted) cbase = cornerOff[f];
+        else {
+            cbase = runBase;
+            runBase += size_t(fvc[f]);
+        }
+        int const nc = fvc[f];
+        if (nc < 3) { skipFace(fi); continue; }
+        bool bad = false;
+        for (int i = 0; i < nc; ++i)
+            if (fvi[cbase + size_t(i)] < 0 ||
+                size_t(fvi[cbase + size_t(i)]) >= surf.restPoints.size()) { bad = true; break; }
+        if (bad) { skipFace(fi); continue; }
+        size_t const nFan = size_t(nc) - 2;
+        float *triW = triStack;
+        if (nFan > 64) {
+            triSpill.assign(nFan, 0.0f);
+            triW = triSpill.data();
+        }
+        GfVec3f nAcc(0.0f, 0.0f, 0.0f);
+        double areaRest = 0.0;
+        fanFace(cbase, nc, triW, &nAcc, &areaRest);
+        GfVec3f const Nrest = Normalize3(nAcc);
+        double mult = 1.0;
+        if (hasMult) {
+            mult = double(surf.densityMultiplier[size_t(f)]);
+            if (!std::isfinite(mult) || mult < 0.0) {
+                err.failed = true; err.fi = fi;
+                err.message = "UsdGenScatter::Capture: density "
+                              "multiplier must be finite and >= 0";
                 break;
             }
         }
-        if (diag) diag->Error("UsdGenScatter::Capture: total root count exceeds "
-                              "uint32 cardinality at face " + std::to_string(face));
-        return false;
+        double const expected = density * areaRest * mult;
+        if (!std::isfinite(areaRest) || !std::isfinite(expected)) {
+            err.failed = true; err.fi = fi;
+            err.message = "UsdGenScatter::Capture: non-finite root count on face " +
+                          std::to_string(f);
+            break;
+        }
+        if (!(expected > 0.0)) { skipFace(fi); continue; }
+        double const whole = std::floor(expected);
+        double const frac = expected - whole;
+        if (whole > double(std::numeric_limits<uint32_t>::max())) {
+            err.failed = true; err.fi = fi;
+            err.message = "UsdGenScatter::Capture: root count exceeds uint32 "
+                          "cardinality on face " + std::to_string(f);
+            break;
+        }
+        uint64_t const faceKey = UsdGenHash64(
+            hSeedScatter ^ uint64_t(uint32_t(f)), kSaltScatter);
+        uint64_t const nf = uint64_t(whole)
+                          + (UsdGenHash01(faceKey, kSaltScatter) < float(frac) ? 1u : 0u);
+        ScatterSpill s;
+        s.areaRest = areaRest;
+        s.nrest = Nrest;
+        s.nf = uint32_t(nf);
+        if (nFan <= 2) {
+            s.w0 = triW[0];
+            s.w1 = nFan > 1 ? triW[1] : 0.0f;
+        } else {
+            s.w0 = 0.0f;
+            s.w1 = 0.0f;
+        }
+        spill[fi - fi0] = s;
+        rangeN += uint64_t(nf);
+        if (err.failed) break;
     }
-    if (partitions == 1) {
-        slots[0].emission.moveTo(all);
-    } else if (total > 0) {
-        std::vector<size_t> segBase(partitions + 1, 0);
-        for (size_t p = 0; p < partitions; ++p)
-            segBase[p + 1] = segBase[p] + slots[p].emission.size();
-        ScatterEmitSlot *slotData = slots.data();
-        size_t const *baseData = segBase.data();
-        ScatterParallelFor(ctx.dispatcher, 9, [&](size_t i) {
-            switch (i) {
-            case 0: ScatterCopyPlane(&ScatterEmission::ax, all, slotData, baseData, partitions, total); break;
-            case 1: ScatterCopyPlane(&ScatterEmission::ay, all, slotData, baseData, partitions, total); break;
-            case 2: ScatterCopyPlane(&ScatterEmission::az, all, slotData, baseData, partitions, total); break;
-            case 3: ScatterCopyPlane(&ScatterEmission::aids, all, slotData, baseData, partitions, total); break;
-            case 4: ScatterCopyPlane(&ScatterEmission::aPrim, all, slotData, baseData, partitions, total); break;
-            case 5: ScatterCopyPlane(&ScatterEmission::aUv, all, slotData, baseData, partitions, total); break;
-            case 6: ScatterCopyPlane(&ScatterEmission::aT, all, slotData, baseData, partitions, total); break;
-            case 7: ScatterCopyPlane(&ScatterEmission::aN, all, slotData, baseData, partitions, total); break;
-            default: ScatterCopyPlane(&ScatterEmission::aB, all, slotData, baseData, partitions, total); break;
+    *rangeTotal = rangeN;
+    };
+    // Pass 2 of the two-pass path (level 0 only): root sampling with
+    // direct-indexed writes. The per-root computation is emitRange's
+    // level-0 root loop verbatim (same draws, same pick, same blends,
+    // same frame tests); only the sink differs (indexed stores into the
+    // pre-sized raw planes instead of push_backs). Faces read their fan
+    // outputs from the pass-1 spill; overflow fans (ntri > 2) recompute
+    // triW from the same fanFace code. cbase/runBase advance exactly as
+    // in pass 1 (every in-range face), and the cursor partitions
+    // [cursor0, cursor0 + rangeTotal), so every slot is written once.
+    auto pass2Range = [&](size_t fi0, size_t fi1, size_t cbase0,
+                          size_t cursor0,
+                          ScatterSpill const *spill,
+                          ScatterRawRoots &roots) {
+    float *ax = roots.ax.get(), *ay = roots.ay.get(), *az = roots.az.get();
+    uint64_t *aids = roots.aids.get();
+    int *aPrim = roots.aPrim.get();
+    GfVec2f *aUv = roots.aUv.get();
+    GfVec3f *aT = roots.aT.get(), *aN = roots.aN.get(), *aB = roots.aB.get();
+    float triStack[64];
+    std::vector<float> triSpill;
+    triSpill.reserve(16);
+    size_t runBase = cbase0;
+    size_t cursor = cursor0;
+    for (size_t fi = fi0; fi < fi1; ++fi) {
+        int const f = restricted ? faces[fi] : int(fi);
+        if (f < 0 || size_t(f) >= surf.faceVertexCounts.size()) continue;
+        size_t cbase;
+        if (restricted) cbase = cornerOff[f];
+        else {
+            cbase = runBase;
+            runBase += size_t(fvc[f]);
+        }
+        ScatterSpill const &s = spill[fi - fi0];
+        if (s.nf == 0) continue;
+        // Valid spilled faces passed pass 1's nc >= 3 filter, so ntri >= 1.
+        size_t const ntri = size_t(fvc[f]) - 2;
+        float triLocal[2];
+        float *triW = triLocal;
+        if (ntri <= 2) {
+            triLocal[0] = s.w0;
+            triLocal[1] = s.w1;
+        } else {
+            if (ntri > 64) {
+                triSpill.assign(ntri, 0.0f);
+                triW = triSpill.data();
+            } else {
+                triW = triStack;
             }
-        });
+            // Recomputed for triW only (areaRest/Nrest come from the
+            // spill); same code as pass 1, so identical values.
+            GfVec3f nAccIgnored(0.0f, 0.0f, 0.0f);
+            double areaIgnored = 0.0;
+            fanFace(cbase, fvc[f], triW, &nAccIgnored, &areaIgnored);
+        }
+        GfVec3f const p0 = rest[fvi[cbase]];
+        GfVec3f const Nrest = s.nrest;
+        double const areaRest = s.areaRest;
+        uint64_t const faceKey = UsdGenHash64(
+            hSeedScatter ^ uint64_t(uint32_t(f)), kSaltScatter);
+        for (uint64_t k = 0; k < s.nf; ++k) {
+            uint64_t const curveId = UsdGenHash64(
+                faceKey ^ uint64_t(uint32_t(k)), kSaltScatter);
+            float const u0 = UsdGenHash01(hSeedBary0 ^ curveId, kSaltScatterBary);
+            float const u1 = UsdGenHash01(hSeedBary1 ^ curveId, kSaltScatterBary + 1u);
+            float const u2 = UsdGenHash01(hSeedBary2 ^ curveId, kSaltScatterBary + 2u);
+            size_t ti = ntri - 1;
+            {
+                double cum = 0.0;
+                double const target = double(u0) * areaRest;
+                for (size_t t = 0; t < ntri; ++t) {
+                    cum += double(triW[t]);
+                    if (target < cum) { ti = t; break; }
+                }
+            }
+            GfVec3f pos, T, N = Nrest;
+            GfVec2f puv;
+            size_t const ib = cbase + ti + 1;
+            size_t const ic = ib + 1;
+            GfVec3f const pb = rest[fvi[ib]];
+            GfVec3f const pc = rest[fvi[ic]];
+            float const r1 = std::sqrt(u1);
+            pos = p0 * (1.0f - r1) + pb * (u2 * r1) + pc * (r1 * (1.0f - u2));
+            puv = GfVec2f(1.0f / 3.0f, 1.0f / 3.0f);
+            if (uv)
+                puv = uv[fvi[cbase]] * (1.0f - r1)
+                    + uv[fvi[ib]] * (u2 * r1)
+                    + uv[fvi[ic]] * (r1 * (1.0f - u2));
+            GfVec3f e0 = pb - p0;
+            float const e0d = GfDot(e0, Nrest);
+            float const e0l2 = GfDot(e0, e0);
+            if (e0d * e0d > 0.81f * e0l2) {
+                e0 = pc - p0;
+                T = e0 - Nrest * GfDot(e0, Nrest);
+            } else {
+                T = e0 - Nrest * e0d;
+            }
+            float tLen = GfSqrt(T * T);
+            if (tLen < 1e-9f) {
+                T = std::abs(Nrest[0]) > 0.9f ? GfVec3f(0.0f, 1.0f, 0.0f)
+                                             : GfVec3f(1.0f, 0.0f, 0.0f);
+                T = T - Nrest * GfDot(T, Nrest);
+                T = Normalize3(T);
+            } else {
+                T = T / tLen;
+            }
+            GfVec3f B = Normalize3(GfCross(N, T));
+            if (flip) { T = -T; B = -B; }
+            size_t const w = cursor + size_t(k);
+            ax[w] = pos[0]; ay[w] = pos[1]; az[w] = pos[2];
+            aids[w] = curveId;
+            aPrim[w] = f;
+            aUv[w] = puv;
+            aT[w] = T; aN[w] = N; aB[w] = B;
+        }
+        cursor += s.nf;
     }
-    // Release the segments before the sort/gather legs: slots and the merged
-    // arrays hold the same roots twice (~136MB live), and the downstream
-    // passes are LLC-sensitive.
-    slots.clear();
-    slots.shrink_to_fit();
-    std::vector<float> &ax = all.ax, &ay = all.ay, &az = all.az;
-    std::vector<uint64_t> &aids = all.aids;
-    std::vector<int> &aPrim = all.aPrim;
-    std::vector<GfVec2f> &aUv = all.aUv;
-    std::vector<GfVec3f> &aT = all.aT, &aN = all.aN, &aB = all.aB;
+    };
+    // Big level-0 captures (past the threading threshold, restricted or
+    // not) take the two-pass path: pass 1 spills per-face fan outputs +
+    // root counts, a serial prefix over the <= 8 range totals sizes the
+    // merged planes exactly, and pass 2 samples roots with direct-indexed
+    // writes. No push_back growth, no 204MB concat: the same roots land
+    // in the same pre-sort slots either way. Small captures and the
+    // subdivision path keep the one-pass emission below.
+    bool const twoPass = (level == 0 && faceCount > 4096);
+    ScatterEmission all;
+    ScatterRawRoots raw;
+    size_t total = 0;
+    if (twoPass) {
+        std::vector<ScatterSpillSlot> spillSlots(partitions);
+        for (size_t p = 0; p < partitions; ++p)
+            spillSlots[p].spill.reset(new ScatterSpill[rangeStart[p + 1] -
+                                                         rangeStart[p]]);
+        if (partitions == 1) {
+            pass1Range(rangeStart[0], rangeStart[1], 0,
+                       spillSlots[0].spill.get(), &spillSlots[0].total,
+                       spillSlots[0].error);
+        } else {
+            ScatterParallelFor(ctx.dispatcher, partitions, [&](size_t p) {
+                pass1Range(rangeStart[p], rangeStart[p + 1],
+                           restricted ? 0 : rangeBase[p],
+                           spillSlots[p].spill.get(), &spillSlots[p].total,
+                           spillSlots[p].error);
+            });
+        }
+        // Ranges are face-ordered, so the first failed range holds the
+        // serial loop's first failure: same return, same message.
+        for (size_t p = 0; p < partitions; ++p) {
+            if (!spillSlots[p].error.failed)
+                continue;
+            if (diag && !spillSlots[p].error.message.empty())
+                diag->Error(spillSlots[p].error.message);
+            return false;
+        }
+        std::vector<size_t> rangeRootBase(partitions + 1, 0);
+        for (size_t p = 0; p < partitions; ++p)
+            rangeRootBase[p + 1] =
+                rangeRootBase[p] + spillSlots[p].total;
+        total = rangeRootBase[partitions];
+        size_t const maxTotal = std::numeric_limits<uint32_t>::max();
+        if (total > maxTotal) {
+            // Exact first-crossing face: the serial loop trips at the
+            // first face whose roots would overflow uint32 cardinality.
+            // (Unhittable in practice: 4G+ roots need 272GB+ of planes.)
+            int face = 0;
+            size_t acc = 0;
+            for (size_t p = 0; p < partitions; ++p) {
+                bool found = false;
+                for (size_t fi = rangeStart[p]; fi < rangeStart[p + 1];
+                     ++fi) {
+                    size_t const nf =
+                        spillSlots[p].spill[fi - rangeStart[p]].nf;
+                    if (acc > maxTotal || nf > maxTotal - acc) {
+                        face = restricted ? faces[fi] : int(fi);
+                        found = true;
+                        break;
+                    }
+                    acc += nf;
+                }
+                if (found) break;
+            }
+            if (diag) diag->Error("UsdGenScatter::Capture: total root count exceeds "
+                                  "uint32 cardinality at face " + std::to_string(face));
+            return false;
+        }
+        // Uninitialized sizing: pass 2 writes every slot exactly once.
+        raw.ax.reset(new float[total]);
+        raw.ay.reset(new float[total]);
+        raw.az.reset(new float[total]);
+        raw.aids.reset(new uint64_t[total]);
+        raw.aPrim.reset(new int[total]);
+        raw.aUv.reset(new GfVec2f[total]);
+        raw.aT.reset(new GfVec3f[total]);
+        raw.aN.reset(new GfVec3f[total]);
+        raw.aB.reset(new GfVec3f[total]);
+        if (partitions == 1) {
+            pass2Range(rangeStart[0], rangeStart[1], 0, rangeRootBase[0],
+                       spillSlots[0].spill.get(), raw);
+        } else {
+            ScatterParallelFor(ctx.dispatcher, partitions, [&](size_t p) {
+                pass2Range(rangeStart[p], rangeStart[p + 1],
+                           restricted ? 0 : rangeBase[p], rangeRootBase[p],
+                           spillSlots[p].spill.get(), raw);
+            });
+        }
+        // Release the spill before the sort/gather legs (same LLC
+        // rationale as the one-pass slots release below).
+        spillSlots.clear();
+        spillSlots.shrink_to_fit();
+    } else {
+        std::vector<ScatterEmitSlot> slots(partitions);
+        // Reserve every slot up front, serially: 72 near-simultaneous mmaps
+        // from 8 workers contend on the address-space lock (~6ms), while one
+        // thread mapping the same total pays ~1ms. The per-range reserve inside
+        // emitRange then no-ops (capacity already suffices).
+        for (size_t p = 0; p < partitions; ++p)
+            slots[p].emission.reserve(
+                (rangeStart[p + 1] - rangeStart[p]) * 4);
+        if (partitions == 1) {
+            emitRange(rangeStart[0], rangeStart[1], 0,
+                      slots[0].emission, slots[0].error);
+        } else {
+            ScatterParallelFor(ctx.dispatcher, partitions, [&](size_t p) {
+                emitRange(rangeStart[p], rangeStart[p + 1],
+                          restricted ? 0 : rangeBase[p],
+                          slots[p].emission, slots[p].error);
+            });
+        }
+        // Ranges are face-ordered, so the first failed range holds the serial
+        // loop's first failure: same return, same message.
+        for (size_t p = 0; p < partitions; ++p) {
+            if (!slots[p].error.failed)
+                continue;
+            if (diag && !slots[p].error.message.empty())
+                diag->Error(slots[p].error.message);
+            return false;
+        }
+        for (auto const &s : slots)
+            total += s.emission.size();
+        size_t const maxTotal = std::numeric_limits<uint32_t>::max();
+        if (total > maxTotal) {
+            // The serial loop names the exact trip face, which needs per-face
+            // counts (4MB kept for a >2^32-root path no process survives —
+            // the emission vectors alone need 292GB+), so name the last face
+            // of the first range whose end total overflows instead. Same
+            // failure, same message shape; only the named face can differ.
+            int face = 0;
+            size_t acc = 0;
+            for (size_t p = 0; p < partitions; ++p) {
+                acc += slots[p].emission.size();
+                if (acc > maxTotal) {
+                    size_t const fiFace =
+                        rangeStart[p + 1] ? rangeStart[p + 1] - 1 : 0;
+                    face = restricted ? faces[fiFace] : int(fiFace);
+                    break;
+                }
+            }
+            if (diag) diag->Error("UsdGenScatter::Capture: total root count exceeds "
+                                  "uint32 cardinality at face " + std::to_string(face));
+            return false;
+        }
+        if (partitions == 1) {
+            slots[0].emission.moveTo(all);
+        } else if (total > 0) {
+            std::vector<size_t> segBase(partitions + 1, 0);
+            for (size_t p = 0; p < partitions; ++p)
+                segBase[p + 1] = segBase[p] + slots[p].emission.size();
+            ScatterEmitSlot *slotData = slots.data();
+            size_t const *baseData = segBase.data();
+            ScatterParallelFor(ctx.dispatcher, 9, [&](size_t i) {
+                switch (i) {
+                case 0: ScatterCopyPlane(&ScatterEmission::ax, all, slotData, baseData, partitions, total); break;
+                case 1: ScatterCopyPlane(&ScatterEmission::ay, all, slotData, baseData, partitions, total); break;
+                case 2: ScatterCopyPlane(&ScatterEmission::az, all, slotData, baseData, partitions, total); break;
+                case 3: ScatterCopyPlane(&ScatterEmission::aids, all, slotData, baseData, partitions, total); break;
+                case 4: ScatterCopyPlane(&ScatterEmission::aPrim, all, slotData, baseData, partitions, total); break;
+                case 5: ScatterCopyPlane(&ScatterEmission::aUv, all, slotData, baseData, partitions, total); break;
+                case 6: ScatterCopyPlane(&ScatterEmission::aT, all, slotData, baseData, partitions, total); break;
+                case 7: ScatterCopyPlane(&ScatterEmission::aN, all, slotData, baseData, partitions, total); break;
+                default: ScatterCopyPlane(&ScatterEmission::aB, all, slotData, baseData, partitions, total); break;
+                }
+            });
+        }
+        // Release the segments before the sort/gather legs: slots and the merged
+        // arrays hold the same roots twice (~136MB live), and the downstream
+        // passes are LLC-sensitive.
+        slots.clear();
+        slots.shrink_to_fit();
+    }
+    // Merged pre-sort planes from either emission path: vectors for the
+    // one-pass concat, raw buffers for two-pass. Downstream only reads.
+    float const *ax = nullptr, *ay = nullptr, *az = nullptr;
+    uint64_t const *aids = nullptr;
+    int const *aPrim = nullptr;
+    GfVec2f const *aUv = nullptr;
+    GfVec3f const *aT = nullptr, *aN = nullptr, *aB = nullptr;
+    if (twoPass) {
+        ax = raw.ax.get(); ay = raw.ay.get(); az = raw.az.get();
+        aids = raw.aids.get();
+        aPrim = raw.aPrim.get();
+        aUv = raw.aUv.get();
+        aT = raw.aT.get(); aN = raw.aN.get(); aB = raw.aB.get();
+    } else {
+        ax = all.ax.data(); ay = all.ay.data(); az = all.az.data();
+        aids = all.aids.data();
+        aPrim = all.aPrim.data();
+        aUv = all.aUv.data();
+        aT = all.aT.data(); aN = all.aN.data(); aB = all.aB.data();
+    }
 
     // Morton-sort the roots by rest position: surface-major, locality-
     // preserving chunk placement (plan/04 :641, ADR §4.1). cellScale 64
@@ -810,7 +1205,7 @@ bool UsdGenScatterOp::Capture(
     // stable_sort order (primary morton key, ties in emission order) at
     // linear cost. The even pass count lands the result back in the
     // morton/order pair.
-    const size_t N = aids.size();
+    const size_t N = total;
     ScatterSortScratch &ss = t_scatterSortScratch;
     std::vector<uint64_t> &morton = ss.morton;
     morton.resize(N);
@@ -839,7 +1234,7 @@ bool UsdGenScatterOp::Capture(
     } else {
         uint64_t *mortonOut = morton.data();
         uint32_t *orderOut = order.data();
-        float const *px = ax.data(), *py = ay.data(), *pz = az.data();
+        float const *px = ax, *py = ay, *pz = az;
         struct MortonChunk {
             uint64_t orKeys = 0, andKeys = ~uint64_t(0);
         };
@@ -1039,15 +1434,15 @@ bool UsdGenScatterOp::Capture(
             });
         });
     };
-    gather(buf.px, ax.data());
-    gather(buf.py, ay.data());
-    gather(buf.pz, az.data());
-    gather(buf.curveId, aids.data());
-    gather(buf.rootPrim, aPrim.data());
-    gather(buf.rootUV, aUv.data());
-    gather(buf.rootT, aT.data());
-    gather(buf.rootN, aN.data());
-    gather(buf.rootB, aB.data());
+    gather(buf.px, ax);
+    gather(buf.py, ay);
+    gather(buf.pz, az);
+    gather(buf.curveId, aids);
+    gather(buf.rootPrim, aPrim);
+    gather(buf.rootUV, aUv);
+    gather(buf.rootT, aT);
+    gather(buf.rootN, aN);
+    gather(buf.rootB, aB);
     // Same chunking for the zero plane: clear + uninitialized resize with
     // a zero filler (identical bytes to VtFloatArray(N, 0.0f)).
     buf.hairT.clear();

@@ -2803,7 +2803,8 @@ foreach(_t testUsdGenGraph testUsdGenKernelDeterminism testUsdGenWidth
            testUsdGenCpuFanout testUsdGenCpuReferenceMap testUsdGenCurveRagged
            testUsdGenCpuCurveSource testUsdGenLengthRaggedLayout testUsdGenSurfaceRootFrames
            testUsdGenSurfaceRootBindings testUsdGenSurfaceRootBindingBoundaries
-           testUsdGenSurfaceBindingCache testUsdGenScatterDensity testUsdGenLimitScatter)
+           testUsdGenSurfaceBindingCache testUsdGenScatterDensity testUsdGenLimitScatter
+           testUsdGenScatterTwoPass)
     add_executable(${_t} tests/${_t}.cpp)
     target_link_libraries(${_t} PRIVATE usdGenTestUtils)
     add_test(NAME ${_t} COMMAND ${_t})
@@ -2822,6 +2823,8 @@ set_tests_properties(testUsdGenSurfaceRootBindings PROPERTIES LABELS "T0;sources
 set_tests_properties(testUsdGenSurfaceRootBindingBoundaries PROPERTIES LABELS "T0;sources;root-bindings")
 set_tests_properties(testUsdGenSurfaceBindingCache PROPERTIES LABELS "T0;sources;cache;cow")
 set_tests_properties(testUsdGenScatterDensity PROPERTIES LABELS "T0;sources;scatter;density")
+set_tests_properties(testUsdGenScatterTwoPass PROPERTIES LABELS "T0;sources;scatter;twopass")
+target_link_libraries(testUsdGenScatterTwoPass PRIVATE usdGenMath)
 
 # M1 T0 perf benches (E-1/E-7 via --threads; E-2 sparse; carried in from
 # prototypes/data-plane-benchmark, 11 §2.2).
