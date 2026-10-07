@@ -711,6 +711,10 @@ CudaRbfBinding::~CudaRbfBinding() {
     // into an implicit proof wait for that submission.
     // The direct-path proofs are never referenced by fresh candidates, so
     // they free on every destruction path, including a fresh abandon.
+    // The bind graph is idle here: every Bind proves its launch with the
+    // stream sync, and a sync failure leaks the exec and disables replay
+    // (below) rather than destroying a possibly-executing graph.
+    if (bindGraph_.exec) { cudaGraphExecDestroy(bindGraph_.exec); bindGraph_.exec = nullptr; }
     if (proofHost_) { cudaFreeHost(proofHost_); proofHost_ = nullptr; }
     if (HasUnprovenWork()) { AbandonFresh(); return; }
     if (stateReady_) { cudaEventSynchronize(stateReady_); cudaEventDestroy(stateReady_); }
@@ -737,6 +741,93 @@ bool CudaRbfBinding::ensureProofs() {
     return true;
 }
 
+RbfStatus CudaRbfBinding::submitBindSlice(cudaStream_t stream, DeviceView<const float3> samples,
+                                                 int n, int m, double smoothing) {
+    // The bind slice, exactly as submitted before: rest D2D, extent (which
+    // derives the device bind params), gram zero, gram, gram land, matrix
+    // build, LU. Called directly and under stream capture; diagnostics are
+    // unchanged either way. Callers size every buffer (including the LU
+    // workspace) before this runs: capture cannot contain an allocation.
+    if (!ok(cudaMemcpyAsync(rest_.data(),samples.data,n*sizeof(float3),cudaMemcpyDeviceToDevice,stream))) return fail(RbfStatus::CudaError,"RBF rest copy failed");
+    extentKernel<<<1,128,0,stream>>>(rest_.data(),n,proofDev_->extent,&proofDev_->flag,bindParams_.data());
+    if(!ok(cudaMemsetAsync(gram_.data(),0,16*sizeof(double),stream))) return fail(RbfStatus::CudaError,"RBF rank diagnostic reset failed");
+    polynomialGram<<<32,128,0,stream>>>(rest_.data(),n,gram_.data(),DeviceBindParams{bindParams_.data()});
+    landGram<<<1,32,0,stream>>>(gram_.data(),proofDev_->gram);
+    buildMatrix<<<(m*m+255)/256,256,0,stream>>>(rest_.data(),matrix_.data(),n,m,DeviceBindParams{bindParams_.data()},smoothing,nullptr,normSamples_.data());
+    if(cusolverDnSetStream(solver_,stream)!=CUSOLVER_STATUS_SUCCESS || cusolverDnDgetrf(solver_,m,m,matrix_.data(),m,work_.data(),pivots_.data(),&proofDev_->info)!=CUSOLVER_STATUS_SUCCESS) return fail(RbfStatus::SolverError,"cuSOLVER LU failed");
+    return RbfStatus::Ok;
+}
+
+RbfStatus CudaRbfBinding::submitBindSliceGraphed(cudaStream_t stream, DeviceView<const float3> samples,
+                                                         int n, int m, double smoothing) {
+    BindGraphKey key;
+    key.n = n; key.m = m; key.smoothing = smoothing; key.solver = solver_;
+    key.src = samples.data; key.rest = rest_.data(); key.proof = proofDev_;
+    key.params = bindParams_.data(); key.gram = gram_.data(); key.matrix = matrix_.data();
+    key.norm = normSamples_.data(); key.work = work_.data(); key.pivots = pivots_.data();
+    // Idle here: every prior Bind proved its launch with the stream sync (a
+    // sync failure leaks the exec and disables replay instead, in Bind).
+    auto destroyExec = [&]() {
+        if (bindGraph_.exec) { cudaGraphExecDestroy(bindGraph_.exec); bindGraph_.exec = nullptr; }
+    };
+    auto noteFailure = [&]() {
+        if (++bindGraph_.consecutiveFailures >= 2) bindGraph_.disabled = true;
+    };
+    if (!bindGraph_.disabled && bindGraph_.exec && bindGraph_.key == key) {
+        if (ok(cudaGraphLaunch(bindGraph_.exec, stream))) {
+            bindGraph_.consecutiveFailures = 0;
+            return RbfStatus::Ok;
+        }
+        // Launch failed: nothing runs, so the exec is idle; drop it, clear
+        // any sticky launch error, and run the same submits directly.
+        destroyExec();
+        noteFailure();
+        cudaGetLastError();
+        return submitBindSlice(stream, samples, n, m, smoothing);
+    }
+    if (!bindGraph_.disabled) {
+        destroyExec();
+        std::string savedDiag = diagnostic_;
+        cudaGraph_t graph = nullptr;
+        bool captured = false;
+        if (ok(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal))) {
+            RbfStatus sub = submitBindSlice(stream, samples, n, m, smoothing);
+            if (sub == RbfStatus::Ok && ok(cudaStreamEndCapture(stream, &graph)) && graph != nullptr) {
+                captured = true;
+            } else {
+                // Unpoison the stream: a failed submit still needs its
+                // capture ended. The graph (if any) is dropped, never run.
+                if (sub != RbfStatus::Ok) cudaStreamEndCapture(stream, &graph);
+                graph = nullptr;
+            }
+        }
+        cudaGraphExec_t exec = nullptr;
+        if (captured && ok(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0)) && exec != nullptr) {
+            cudaGraphDestroy(graph);
+            bindGraph_.exec = exec;
+            bindGraph_.key = key;
+            bindGraph_.consecutiveFailures = 0;
+            diagnostic_ = savedDiag;
+            // Capture only records; the fresh exec runs the slice for real.
+            if (ok(cudaGraphLaunch(exec, stream))) return RbfStatus::Ok;
+            destroyExec();
+            noteFailure();
+        } else {
+            if (graph) cudaGraphDestroy(graph);
+            noteFailure();
+        }
+        // The recorded work (if any) was discarded, and capture may have
+        // left a sticky launch error: clear it, then submit for real. A
+        // successful fallback restores the entry diagnostic; a failed one
+        // keeps its own.
+        cudaGetLastError();
+        RbfStatus fb = submitBindSlice(stream, samples, n, m, smoothing);
+        if (fb == RbfStatus::Ok) diagnostic_ = savedDiag;
+        return fb;
+    }
+    return submitBindSlice(stream, samples, n, m, smoothing);
+}
+
 RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothing, cudaStream_t stream) {
     if (HasUnprovenWork()) return fail(RbfStatus::InvalidArgument,"fresh RBF proof is pending");
     if (evalPending_) return fail(RbfStatus::InvalidArgument,"RBF Finish is required before rebinding a pending evaluation");
@@ -749,7 +840,6 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
     if (!evalReady_ && !ok(cudaEventCreateWithFlags(&evalReady_,cudaEventDisableTiming))) return fail(RbfStatus::CudaError,"RBF evaluation event creation failed");
     if (!solver_ && cusolverDnCreate(&solver_) != CUSOLVER_STATUS_SUCCESS) return fail(RbfStatus::SolverError,"cuSOLVER create failed");
     if (!ok(rest_.reset(n)) || !ok(normSamples_.reset(3*size_t(n))) || !ok(matrix_.reset(size_t(m)*m)) || !ok(coefficients_.reset(size_t(m)*3)) || !ok(pivots_.reset(m)) || !ok(evalFlags_.reset(1)) || !ok(gram_.reset(16))) return fail(RbfStatus::CudaError,"RBF device allocation failed");
-    if (!ok(cudaMemcpyAsync(rest_.data(),samples.data,n*sizeof(float3),cudaMemcpyDeviceToDevice,stream))) return fail(RbfStatus::CudaError,"RBF rest copy failed");
     // Zero-copy proofs (see Solve): the extent, gram, and info words live
     // in mapped host memory, read after the stream syncs, so no D2H node
     // (each carried a ~7us drain bubble) separates the phases. work_ still
@@ -757,6 +847,7 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
     // that. buildMatrix ignores its flags argument (hence nullptr).
     if(!ensureProofs()) return fail(RbfStatus::CudaError,"RBF proof allocation failed");
     if(!ok(bindParams_.reset(4))) return fail(RbfStatus::CudaError,"RBF device allocation failed");
+    int lwork=0; if(cusolverDnDgetrf_bufferSize(solver_,m,m,matrix_.data(),m,&lwork)!=CUSOLVER_STATUS_SUCCESS || !ok(work_.reset(lwork))) return fail(RbfStatus::SolverError,"cuSOLVER LU workspace failed");
     // The extent, rank, and LU proofs share one synchronization: the
     // center/scale derive inside the extent kernel (bitwise the host
     // derivation below), so polynomialGram and buildMatrix submit before
@@ -764,14 +855,19 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
     // after the single sync, so error precedence (extent before rank
     // before LU status) and every success-path byte are unchanged; an
     // erroring bind just wastes one submit, as the rank path already did.
-    extentKernel<<<1,128,0,stream>>>(rest_.data(),n,proofDev_->extent,&proofDev_->flag,bindParams_.data());
-    if(!ok(cudaMemsetAsync(gram_.data(),0,16*sizeof(double),stream))) return fail(RbfStatus::CudaError,"RBF rank diagnostic reset failed");
-    polynomialGram<<<32,128,0,stream>>>(rest_.data(),n,gram_.data(),DeviceBindParams{bindParams_.data()});
-    landGram<<<1,32,0,stream>>>(gram_.data(),proofDev_->gram);
-    buildMatrix<<<(m*m+255)/256,256,0,stream>>>(rest_.data(),matrix_.data(),n,m,DeviceBindParams{bindParams_.data()},smoothing,nullptr,normSamples_.data());
-    int lwork=0; if(cusolverDnDgetrf_bufferSize(solver_,m,m,matrix_.data(),m,&lwork)!=CUSOLVER_STATUS_SUCCESS || !ok(work_.reset(lwork))) return fail(RbfStatus::SolverError,"cuSOLVER LU workspace failed");
-    if(cusolverDnSetStream(solver_,stream)!=CUSOLVER_STATUS_SUCCESS || cusolverDnDgetrf(solver_,m,m,matrix_.data(),m,work_.data(),pivots_.data(),&proofDev_->info)!=CUSOLVER_STATUS_SUCCESS) return fail(RbfStatus::SolverError,"cuSOLVER LU failed");
-    if(!ok(cudaStreamSynchronize(stream)))return fail(RbfStatus::CudaError,"RBF LU status query failed");
+    // The slice replays from a captured graph while its key matches (one
+    // launch instead of one gap per node); a mismatch re-captures and any
+    // capture/launch failure runs the same submits directly.
+    RbfStatus slice = submitBindSliceGraphed(stream, samples, n, m, smoothing);
+    if (slice != RbfStatus::Ok) return slice;
+    if(!ok(cudaStreamSynchronize(stream))) {
+        // Catastrophe (not a normal error path): the slice may be
+        // in-flight, so leak the exec and disable replay rather than
+        // destroying a possibly-executing graph.
+        bindGraph_.exec = nullptr;
+        bindGraph_.disabled = true;
+        return fail(RbfStatus::CudaError,"RBF LU status query failed");
+    }
     if(proofHost_->flag) return fail(RbfStatus::NonFiniteInput,"RBF rest samples contain non-finite values");
     center_[0]=(double)proofHost_->extent[0] + ((double)proofHost_->extent[3]-(double)proofHost_->extent[0])*.5; center_[1]=(double)proofHost_->extent[1] + ((double)proofHost_->extent[4]-(double)proofHost_->extent[1])*.5; center_[2]=(double)proofHost_->extent[2] + ((double)proofHost_->extent[5]-(double)proofHost_->extent[2])*.5; scale_=std::max((double)proofHost_->extent[3]-proofHost_->extent[0],std::max((double)proofHost_->extent[4]-proofHost_->extent[1],(double)proofHost_->extent[5]-proofHost_->extent[2]));
     if(!std::isfinite(scale_) || scale_ <= 0.0) return fail(RbfStatus::RankDeficient,"RBF rest samples have zero extent");

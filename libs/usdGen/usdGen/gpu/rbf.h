@@ -96,6 +96,49 @@ private:
     struct DirectProofs;
     RbfStatus fail(RbfStatus status, const char* what);
     bool ensureProofs();
+    // Direct-bind CUDA-graph replay: the bind slice (rest D2D, extent,
+    // gram zero, gram, gram land, matrix build, LU) replays from one
+    // instantiated graph while the capture key matches, collapsing one
+    // launch gap per node into a single graph launch. Capture embeds
+    // addresses and value arguments, so the key covers the shape, the
+    // smoothing, the solver, and every address the slice reads or writes;
+    // any mismatch re-captures, and any capture/launch failure runs the
+    // same submits uncaptured (a capture only records, so the fallback
+    // submits for real). The graph changes the launch vehicle only, so
+    // every success-path byte is unchanged.
+    struct BindGraphKey {
+        int n = 0, m = 0;
+        double smoothing = 0.0;
+        cusolverDnHandle_t solver = nullptr;
+        const void* src = nullptr;
+        const void* rest = nullptr;
+        const void* proof = nullptr;
+        const void* params = nullptr;
+        const void* gram = nullptr;
+        const void* matrix = nullptr;
+        const void* norm = nullptr;
+        const void* work = nullptr;
+        const void* pivots = nullptr;
+        bool operator==(BindGraphKey const& o) const {
+            return n == o.n && m == o.m && smoothing == o.smoothing &&
+                solver == o.solver && src == o.src && rest == o.rest &&
+                proof == o.proof && params == o.params && gram == o.gram &&
+                matrix == o.matrix && norm == o.norm && work == o.work &&
+                pivots == o.pivots;
+        }
+        bool operator!=(BindGraphKey const& o) const { return !(*this == o); }
+    };
+    struct BindGraph {
+        cudaGraphExec_t exec = nullptr;
+        BindGraphKey key;
+        int consecutiveFailures = 0;
+        bool disabled = false;
+    };
+    BindGraph bindGraph_;
+    RbfStatus submitBindSlice(cudaStream_t stream, DeviceView<const float3> samples,
+                              int n, int m, double smoothing);
+    RbfStatus submitBindSliceGraphed(cudaStream_t stream, DeviceView<const float3> samples,
+                                     int n, int m, double smoothing);
     size_t sampleCount_ = 0, order_ = 0;
     bool solved_ = false, evalPending_ = false;
     double smoothing_ = 0.0, center_[3] = {}, scale_ = 1.0;
