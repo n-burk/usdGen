@@ -678,7 +678,28 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
                 // copy out of a result buffer. The result fills too, for a
                 // later sweep without re-capture (a value-only edit reuses
                 // this capture's deformed values).
-                GfRange3f groupRange;
+                // Branchless bounds: ExtendBy compiles to six conditional
+                // branches per CV (GCC will not if-convert float selects
+                // here); comparing the floats but selecting the bit
+                // patterns keeps its exact update rule (the incumbent
+                // wins ties and NaN, same FLT_MAX/-FLT_MAX start, same
+                // CV order) with csel instead of branches, so the
+                // published range is bitwise the per-CV ExtendBy
+                // sequence, empty groups included (untouched bounds are
+                // exactly the default empty range).
+                float mn0 = std::numeric_limits<float>::max();
+                float mn1 = std::numeric_limits<float>::max();
+                float mn2 = std::numeric_limits<float>::max();
+                float mx0 = -std::numeric_limits<float>::max();
+                float mx1 = -std::numeric_limits<float>::max();
+                float mx2 = -std::numeric_limits<float>::max();
+                uint32_t mn0b, mn1b, mn2b, mx0b, mx1b, mx2b;
+                std::memcpy(&mn0b, &mn0, sizeof(float));
+                std::memcpy(&mn1b, &mn1, sizeof(float));
+                std::memcpy(&mn2b, &mn2, sizeof(float));
+                std::memcpy(&mx0b, &mx0, sizeof(float));
+                std::memcpy(&mx1b, &mx1, sizeof(float));
+                std::memcpy(&mx2b, &mx2, sizeof(float));
                 uint32_t badBits = 0;
                 for (size_t c = c0; c < c1; ++c) {
                     size_t const first = spanAt(c), last = spanAt(c + 1);
@@ -701,11 +722,30 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
                         result[cv * 3] = f0;
                         result[cv * 3 + 1] = f1;
                         result[cv * 3 + 2] = f2;
-                        if (recordExtents) groupRange.ExtendBy(GfVec3f(f0, f1, f2));
+                        if (recordExtents) {
+                            uint32_t p0, p1, p2;
+                            std::memcpy(&p0, &f0, sizeof(float));
+                            std::memcpy(&p1, &f1, sizeof(float));
+                            std::memcpy(&p2, &f2, sizeof(float));
+                            mn0b = f0 < mn0 ? p0 : mn0b;
+                            mn1b = f1 < mn1 ? p1 : mn1b;
+                            mn2b = f2 < mn2 ? p2 : mn2b;
+                            mx0b = f0 > mx0 ? p0 : mx0b;
+                            mx1b = f1 > mx1 ? p1 : mx1b;
+                            mx2b = f2 > mx2 ? p2 : mx2b;
+                            std::memcpy(&mn0, &mn0b, sizeof(float));
+                            std::memcpy(&mn1, &mn1b, sizeof(float));
+                            std::memcpy(&mn2, &mn2b, sizeof(float));
+                            std::memcpy(&mx0, &mx0b, sizeof(float));
+                            std::memcpy(&mx1, &mx1b, sizeof(float));
+                            std::memcpy(&mx2, &mx2b, sizeof(float));
+                        }
                         badBits |= NonFiniteBits(f0, f1, f2);
                     }
                 }
-                if (recordExtents) groupExtents[g] = groupRange;
+                if (recordExtents)
+                    groupExtents[g] = GfRange3f(GfVec3f(mn0, mn1, mn2),
+                                                GfVec3f(mx0, mx1, mx2));
                 if (badBits) nonFinite.store(true, std::memory_order_relaxed);
                 return;
             }
