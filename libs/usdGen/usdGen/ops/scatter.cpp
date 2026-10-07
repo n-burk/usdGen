@@ -732,13 +732,50 @@ bool UsdGenScatterOp::Capture(
     // is below 2^32. Halves the permutation traffic of the sort.
     std::vector<uint32_t> &order = ss.order;
     order.resize(N);
+    // Morton keys + the varying-bits reduction, chunked over workers for
+    // big captures (level-independent: this runs on the merged arrays).
+    // Writes are disjoint and the |/& reductions are order-free, so any
+    // chunking is bit-identical. Small captures stay serial: below ~32K
+    // roots the dispatch costs more than the keys.
     uint64_t orKeys = 0, andKeys = ~uint64_t(0);
-    for (size_t i = 0; i < N; ++i) {
-        uint64_t const key = UsdGenMortonKey3(ax[i], ay[i], az[i], 64.0f);
-        morton[i] = key;
-        order[i] = uint32_t(i);
-        orKeys |= key;
-        andKeys &= key;
+    size_t const mortonChunks =
+        (workers > 1 && N > 32768) ? std::min({size_t(workers), size_t(8), N})
+                                   : 1;
+    if (mortonChunks == 1) {
+        for (size_t i = 0; i < N; ++i) {
+            uint64_t const key = UsdGenMortonKey3(ax[i], ay[i], az[i], 64.0f);
+            morton[i] = key;
+            order[i] = uint32_t(i);
+            orKeys |= key;
+            andKeys &= key;
+        }
+    } else {
+        uint64_t *mortonOut = morton.data();
+        uint32_t *orderOut = order.data();
+        float const *px = ax.data(), *py = ay.data(), *pz = az.data();
+        struct MortonChunk {
+            uint64_t orKeys = 0, andKeys = ~uint64_t(0);
+        };
+        std::vector<MortonChunk> partial(mortonChunks);
+        ScatterParallelFor(ctx.dispatcher, mortonChunks, [&](size_t c) {
+            size_t const i0 = (c * N) / mortonChunks;
+            size_t const i1 = ((c + 1) * N) / mortonChunks;
+            uint64_t orLocal = 0, andLocal = ~uint64_t(0);
+            for (size_t i = i0; i < i1; ++i) {
+                uint64_t const key =
+                    UsdGenMortonKey3(px[i], py[i], pz[i], 64.0f);
+                mortonOut[i] = key;
+                orderOut[i] = uint32_t(i);
+                orLocal |= key;
+                andLocal &= key;
+            }
+            partial[c].orKeys = orLocal;
+            partial[c].andKeys = andLocal;
+        });
+        for (auto const &p : partial) {
+            orKeys |= p.orKeys;
+            andKeys &= p.andKeys;
+        }
     }
     uint32_t const *perm = order.data();
     // Scratch pair at function scope: an odd surviving-pass count leaves the
