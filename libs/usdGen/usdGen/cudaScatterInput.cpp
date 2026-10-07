@@ -35,85 +35,10 @@ bool AllowedScatterParam(TfToken const& name) {
 
 bool IsFloat(VtValue const& v) { return v.IsHolding<float>() || v.IsHolding<double>(); }
 
-// Assign-source iterator building float2/float3 values from K consecutive
-// floats per step, so vector::assign copies into uninitialized storage:
+// Assign-source iterator transposing the SoA point planes into float3
+// positions, so vector::assign copies into uninitialized storage:
 // resize(n) would value-init (zero) the same elements assign then
 // overwrites, and the non-scalar zeroing loop costs ~10% of the convert.
-// GfVec2f/GfVec3f planes are contiguous floats (the static_asserts at the
-// convert pin the sizes), so float-wise reads carry the exact bytes.
-template <class Dst, int K>
-struct FloatRunIterator {
-    float const* p = nullptr;
-    using iterator_category = std::random_access_iterator_tag;
-    using value_type = Dst;
-    using difference_type = std::ptrdiff_t;
-    using pointer = Dst const*;
-    using reference = Dst;
-    FloatRunIterator() = default;
-    explicit FloatRunIterator(float const* q) : p(q) {}
-    Dst operator*() const;
-    Dst operator[](difference_type i) const { return *(*this + i); }
-    FloatRunIterator& operator++() { p += K; return *this; }
-    FloatRunIterator operator++(int) { FloatRunIterator c(*this); p += K; return c; }
-    FloatRunIterator& operator--() { p -= K; return *this; }
-    FloatRunIterator operator--(int) { FloatRunIterator c(*this); p -= K; return c; }
-    FloatRunIterator& operator+=(difference_type i) { p += K * i; return *this; }
-    FloatRunIterator& operator-=(difference_type i) { p -= K * i; return *this; }
-    friend FloatRunIterator operator+(FloatRunIterator a, difference_type i)
-    {
-        return a += i;
-    }
-    friend FloatRunIterator operator+(difference_type i, FloatRunIterator a)
-    {
-        return a += i;
-    }
-    friend FloatRunIterator operator-(FloatRunIterator a, difference_type i)
-    {
-        return a -= i;
-    }
-    friend difference_type operator-(FloatRunIterator const& a,
-                                    FloatRunIterator const& b)
-    {
-        return (a.p - b.p) / K;
-    }
-    friend bool operator==(FloatRunIterator const& a, FloatRunIterator const& b)
-    {
-        return a.p == b.p;
-    }
-    friend bool operator!=(FloatRunIterator const& a, FloatRunIterator const& b)
-    {
-        return a.p != b.p;
-    }
-    friend bool operator<(FloatRunIterator const& a, FloatRunIterator const& b)
-    {
-        return a.p < b.p;
-    }
-    friend bool operator<=(FloatRunIterator const& a, FloatRunIterator const& b)
-    {
-        return a.p <= b.p;
-    }
-    friend bool operator>(FloatRunIterator const& a, FloatRunIterator const& b)
-    {
-        return a.p > b.p;
-    }
-    friend bool operator>=(FloatRunIterator const& a, FloatRunIterator const& b)
-    {
-        return a.p >= b.p;
-    }
-};
-template <>
-inline float2 FloatRunIterator<float2, 2>::operator*() const
-{
-    return float2{p[0], p[1]};
-}
-template <>
-inline float3 FloatRunIterator<float3, 3>::operator*() const
-{
-    return float3{p[0], p[1], p[2]};
-}
-
-// Assign-source iterator transposing the SoA point planes into float3
-// positions: same no-zero-init rationale as FloatRunIterator.
 struct TransposePositionsIterator {
     float const* px = nullptr;
     float const* py = nullptr;
@@ -382,37 +307,70 @@ CudaScatterInputStatus ValidateSurface(UsdGenSurfaceDesc const& surface,
 } // namespace
 
 namespace {
-// Pooled convert shells (bit-identical): the seven output planes churn
-// ~68MB of alloc+fault per 1M-root convert, and every assign() fully
-// overwrites its plane, so a released shell's capacity is purely a
-// warm backing store with no observable contents. Checkout is one shell
-// per thread (depth 1: sequential converts, the bench and the session
-// task path, always hit; deeper pipelines allocate fresh, exactly as
-// before). The shared_ptr's deleter recycles into the RELEASING
-// thread's pool, so cross-thread handoff (convert here, release after
-// grow commit elsewhere) migrates shells instead of racing. Bounded:
-// one idle shell per converting thread; overflow frees as unpooled.
-// Deliberately depth-1: the ~270MB emission pool measurably slowed
-// downstream fresh allocs and was reverted (scatter.cpp); this retains
-// at most one convert (68MB at 1M roots) per thread.
+// Pooled convert shells (bit-identical): the convert's positions plane
+// churns ~12MB of alloc+fault per 1M-root convert, and the transpose
+// assign() fully overwrites it, so a released shell's positions capacity
+// is purely a warm backing store with no observable contents. (The six
+// adopted planes move out of the capture buffer, so they never touch
+// shell storage.) Checkout is one shell per thread (depth 1: sequential
+// converts, the bench and the session task path, always hit; deeper
+// pipelines allocate fresh, exactly as before). The shared_ptr's deleter
+// recycles into the RELEASING thread's pool, so cross-thread handoff
+// (convert here, release after grow commit elsewhere) migrates shells
+// instead of racing. Bounded: one idle shell per converting thread;
+// overflow frees as unpooled. Deliberately depth-1: the ~270MB emission
+// pool measurably slowed downstream fresh allocs and was reverted
+// (scatter.cpp); this retains at most one convert per thread.
 thread_local std::unique_ptr<gpu::ScatterGrowRoots> t_convertShell;
 // Pooled capture shells (bit-identical): PrepareCudaScatterInput builds a
-// fresh capture per call and destroys it after the convert, churning ~72MB
-// of touched VtArray pages through the kernel's page-table teardown every
+// fresh capture per call and destroys it after the convert, churning the
+// touched VtArray pages through the kernel's page-table teardown every
 // call (~100% sys time by rusage split; the process runs with a raised
 // dynamic mmap threshold, so the churn spells as brk growth/contraction
 // rather than munmap). Capture already clear()s every plane it fills
 // before writing (the gather leg's resize is exact), and it never reads
 // incoming plane contents, so a cleared shell is indistinguishable from
-// fresh storage. Depth-1 per thread, same rationale as the convert shell;
-// checkout and recycle both happen inside PrepareCudaScatterInput on the
-// same thread (the capture never escapes), so no deleter handoff is
-// needed. Failure paths destroy instead of recycling.
+// fresh storage. The six adopted planes move out to the roots and come
+// back by donation when the roots release (see RecycleConvertShell), so
+// a sequential stream never mallocs them twice; only an overlapped
+// pipeline (a live roots while the next capture checks out) allocates
+// fresh, malloc-only through the uninitialized-fill resize. Depth-1
+// per thread, same rationale as the convert shell; checkout and recycle
+// both happen inside PrepareCudaScatterInput on the same thread (the
+// capture never escapes), so no deleter handoff is needed. Failure
+// paths destroy instead of recycling.
 thread_local std::unique_ptr<UsdGenCapture> t_captureShell;
 void RecycleConvertShell(gpu::ScatterGrowRoots const* roots)
 {
     std::unique_ptr<gpu::ScatterGrowRoots> shell(
         const_cast<gpu::ScatterGrowRoots*>(roots));
+    // Donate the adopted planes back to the idle capture shell (O(1)
+    // moves): the convert adopted them out of a capture, so returning
+    // them keeps the next checkout fully warm instead of mallocing six
+    // fresh planes per call. t_captureShell is null exactly while a
+    // capture is checked out on this thread (including the *out-overwrite
+    // release mid-Prepare), so a present shell is always idle and safe
+    // to refill; a missing one frees the planes as unpooled. COW-shared
+    // planes (only tests copy roots) stay correct: the next Capture
+    // resize detaches before writing, preserving the live copy's bytes.
+    if (t_captureShell) {
+        UsdGenCurveBuffer& buf = t_captureShell->MutableBuffer();
+        shell->stableIds.donate(buf.curveId);
+        shell->rootPrim.donate(buf.rootPrim);
+        shell->rootUV.donate(buf.rootUV);
+        shell->rootT.donate(buf.rootT);
+        shell->rootB.donate(buf.rootB);
+        shell->rootN.donate(buf.rootN);
+        // The donated planes arrive sized; the shell must read empty
+        // (same invariant the recycle block establishes). clear() keeps
+        // the warm buffers when uniquely held, detaches when COW-shared.
+        buf.curveId.clear();
+        buf.rootPrim.clear();
+        buf.rootUV.clear();
+        buf.rootT.clear();
+        buf.rootB.clear();
+        buf.rootN.clear();
+    }
     // Reset sizes, keep capacity: the n==0 convert skips every guarded
     // assign, so a recycled shell must read empty, not stale. (An
     // un-cleared pool returned 1M stale positions alongside 0 stableIds
@@ -540,84 +498,34 @@ CudaScatterInputStatus PrepareCudaScatterInput(
     else
         shell = std::make_unique<gpu::ScatterGrowRoots>();
     auto* prep = shell.get();
-    // Layout-identical planes copy whole instead of element-wise: GfVec2f
-    // (GfVec3f) is 2 (3) contiguous floats, the same bytes as float2
-    // (float3). Only positions transposes from the SoA point planes.
-    static_assert(sizeof(float2) == sizeof(GfVec2f), "float2/GfVec2f layout");
-    static_assert(sizeof(float3) == sizeof(GfVec3f), "float3/GfVec3f layout");
-    // reserve+assign instead of resize+memcpy/loop: resize value-inits
-    // (zeroes) every element through the non-scalar fill loop and the
-    // copy then overwrites them all. assign copies straight into
-    // uninitialized storage with identical bytes.
-    // Every plane is an independent function of the capture buffer into a
-    // disjoint destination vector, so the seven copies run over workers
-    // for big inputs (plain TBB: this runs outside any scheduler arena)
-    // and serially below the threshold. Same bytes, any order.
-    float const* uv = nullptr;
-    float const* rt = nullptr;
-    float const* rb = nullptr;
-    float const* rn = nullptr;
-    if (n) {
-        uv = reinterpret_cast<float const*>(roots.rootUV.cdata());
-        rt = reinterpret_cast<float const*>(roots.rootT.cdata());
-        rb = reinterpret_cast<float const*>(roots.rootB.cdata());
-        rn = reinterpret_cast<float const*>(roots.rootN.cdata());
+    // Adopted planes (bit-identical): the six layout-identical planes move
+    // out of the capture buffer in O(1) instead of copying element-wise.
+    // VtArray moves steal the buffer pointer, so the roots own the exact
+    // bytes the capture gathered; the deleter donates them back to the
+    // idle capture shell (see RecycleConvertShell), so sequential
+    // converts reuse every buffer. Only positions still copies: it
+    // transposes the SoA point planes the moves leave behind.
+    // reserve+assign instead of resize+loop: resize value-inits (zeroes)
+    // every element through the non-scalar fill loop and the transpose
+    // then overwrites them all. assign copies straight into uninitialized
+    // storage with identical bytes.
+    {
+        UsdGenCurveBuffer& mut = capture->MutableBuffer();
+        prep->stableIds.adopt(std::move(mut.curveId));
+        prep->rootPrim.adopt(std::move(mut.rootPrim));
+        prep->rootUV.adopt(std::move(mut.rootUV));
+        prep->rootT.adopt(std::move(mut.rootT));
+        prep->rootB.adopt(std::move(mut.rootB));
+        prep->rootN.adopt(std::move(mut.rootN));
     }
-    auto copyPlane = [&](size_t i) {
-        switch (i) {
-        case 0:
-            prep->stableIds.assign(roots.curveId.cbegin(), roots.curveId.cend());
-            break;
-        case 1:
-            prep->rootPrim.assign(roots.rootPrim.cbegin(), roots.rootPrim.cend());
-            break;
-        case 2:
-            prep->rootUV.reserve(n);
-            if (n)
-                prep->rootUV.assign(FloatRunIterator<float2, 2>(uv),
-                                    FloatRunIterator<float2, 2>(uv + 2 * n));
-            break;
-        case 3:
-            prep->rootT.reserve(n);
-            if (n)
-                prep->rootT.assign(FloatRunIterator<float3, 3>(rt),
-                                   FloatRunIterator<float3, 3>(rt + 3 * n));
-            break;
-        case 4:
-            prep->rootB.reserve(n);
-            if (n)
-                prep->rootB.assign(FloatRunIterator<float3, 3>(rb),
-                                   FloatRunIterator<float3, 3>(rb + 3 * n));
-            break;
-        case 5:
-            prep->rootN.reserve(n);
-            if (n)
-                prep->rootN.assign(FloatRunIterator<float3, 3>(rn),
-                                   FloatRunIterator<float3, 3>(rn + 3 * n));
-            break;
-        default:
-            prep->positions.reserve(n);
-            if (n)
-                prep->positions.assign(
-                    TransposePositionsIterator(roots.px.cdata(), roots.py.cdata(),
-                                               roots.pz.cdata()),
-                    TransposePositionsIterator(roots.px.cdata() + n,
-                                               roots.py.cdata() + n,
-                                               roots.pz.cdata() + n));
-            break;
-        }
-    };
-    int const convertWorkers = tbb::this_task_arena::max_concurrency();
-    if (n > 32768 && convertWorkers > 1) {
-        tbb::parallel_for(tbb::blocked_range<size_t>(0, 7),
-            [&](tbb::blocked_range<size_t> const& range) {
-                for (size_t i = range.begin(); i != range.end(); ++i)
-                    copyPlane(i);
-            });
-    } else {
-        for (size_t i = 0; i < 7; ++i)
-            copyPlane(i);
-    }
+    prep->positions.reserve(n);
+    if (n)
+        prep->positions.assign(
+            TransposePositionsIterator(roots.px.cdata(), roots.py.cdata(),
+                                       roots.pz.cdata()),
+            TransposePositionsIterator(roots.px.cdata() + n,
+                                       roots.py.cdata() + n,
+                                       roots.pz.cdata() + n));
     *out = std::shared_ptr<gpu::ScatterGrowRoots const>(
         shell.release(), RecycleConvertShell);
     // Recycle the capture shell (see above): every plane is clear()ed

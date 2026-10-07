@@ -705,6 +705,12 @@ template <class T> cudaError_t Allocate(DeviceBuffer<T>& dst, std::vector<T> con
 template <class T> cudaError_t Copy(DeviceBuffer<T>& dst, std::vector<T> const& src, cudaStream_t s) {
     return src.empty() ? cudaSuccess : cudaMemcpyAsync(dst.data(), src.data(), src.size()*sizeof(T), cudaMemcpyHostToDevice, s);
 }
+// Pointer/size twin for the VtArray-backed roots planes: same empty
+// short-circuit (a null base with zero elements never reaches the copy),
+// same bytes.
+template <class T> cudaError_t Copy(DeviceBuffer<T>& dst, T const* src, size_t n, cudaStream_t s) {
+    return n == 0 ? cudaSuccess : cudaMemcpyAsync(dst.data(), src, n*sizeof(T), cudaMemcpyHostToDevice, s);
+}
 
 // Pinned error-relay pool: BeginFresh allocates one pinned int per grow
 // (~0.85ms cudaHostAlloc) and frees it at teardown. Proven-quiescent
@@ -1220,7 +1226,7 @@ ScatterGrowStatus CudaScatterGrow::BeginFresh(
     *hostError_ = kPendingStatus;
     e = cudaMemsetAsync(error_.data(), 0, sizeof(int), stream);
     if (e != cudaSuccess) return Status(e);
-    e=Copy(pendingInput_.points,rootsOwner_->positions,stream); if(e==cudaSuccess)e=Copy(pending_.stableIds,rootsOwner_->stableIds,stream); if(e==cudaSuccess)e=Copy(pending_.rootPrim,rootsOwner_->rootPrim,stream); if(e==cudaSuccess)e=Copy(pending_.rootUV,rootsOwner_->rootUV,stream); if(e==cudaSuccess)e=Copy(pending_.rootT,rootsOwner_->rootT,stream); if(e==cudaSuccess)e=Copy(pending_.rootB,rootsOwner_->rootB,stream); if(e==cudaSuccess)e=Copy(pending_.rootN,rootsOwner_->rootN,stream);
+    e=Copy(pendingInput_.points,rootsOwner_->positions,stream); if(e==cudaSuccess)e=Copy(pending_.stableIds,rootsOwner_->stableIds.data(),rootsOwner_->stableIds.size(),stream); if(e==cudaSuccess)e=Copy(pending_.rootPrim,rootsOwner_->rootPrim.data(),rootsOwner_->rootPrim.size(),stream); if(e==cudaSuccess)e=Copy(pending_.rootUV,rootsOwner_->rootUV.data(),rootsOwner_->rootUV.size(),stream); if(e==cudaSuccess)e=Copy(pending_.rootT,rootsOwner_->rootT.data(),rootsOwner_->rootT.size(),stream); if(e==cudaSuccess)e=Copy(pending_.rootB,rootsOwner_->rootB.data(),rootsOwner_->rootB.size(),stream); if(e==cudaSuccess)e=Copy(pending_.rootN,rootsOwner_->rootN.data(),rootsOwner_->rootN.size(),stream);
     if(e!=cudaSuccess) return Status(e);
     if (!pendingCurves_) {
         e = cudaMemsetAsync(pending_.offsets.data(), 0, sizeof(uint32_t), stream);

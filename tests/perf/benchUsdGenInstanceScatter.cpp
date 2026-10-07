@@ -124,6 +124,16 @@ void HashVector(Fnv *fnv, std::vector<T> const &v)
         fnv->Add(v.data(), v.size() * sizeof(T));
 }
 
+// Same size+bytes fold as HashVector, for the VtArray-backed roots planes
+// (identical checksums for identical bytes).
+template <class T>
+void HashSpan(Fnv *fnv, T const *d, size_t n)
+{
+    fnv->AddSize(n);
+    if (n)
+        fnv->Add(d, n * sizeof(T));
+}
+
 // Order-sensitive rep fold (XOR zeroes out on even rep counts when every rep
 // is identical, as it must be).
 void Fold(uint64_t *acc, uint64_t v)
@@ -702,7 +712,7 @@ int RunCuda(Options const &opts, UsdGenGraphDesc const &desc)
             std::chrono::duration<double, std::milli>(t1 - t0).count());
         Fnv f;
         HashVector(&f, out->positions);
-        HashVector(&f, out->stableIds);
+        HashSpan(&f, out->stableIds.data(), out->stableIds.size());
         Fold(&inSum, f.h);
         nroots = out->positions.size();
         if (r == 0)
