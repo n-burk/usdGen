@@ -711,10 +711,12 @@ CudaRbfBinding::~CudaRbfBinding() {
     // into an implicit proof wait for that submission.
     // The direct-path proofs are never referenced by fresh candidates, so
     // they free on every destruction path, including a fresh abandon.
-    // The bind graph is idle here: every Bind proves its launch with the
-    // stream sync, and a sync failure leaks the exec and disables replay
-    // (below) rather than destroying a possibly-executing graph.
+    // The bind/solve graphs are idle here: every Bind/Solve proves its
+    // launch with the stream sync, and a sync failure leaks the exec and
+    // disables replay (below) rather than destroying a possibly-executing
+    // graph.
     if (bindGraph_.exec) { cudaGraphExecDestroy(bindGraph_.exec); bindGraph_.exec = nullptr; }
+    if (solveGraph_.exec) { cudaGraphExecDestroy(solveGraph_.exec); solveGraph_.exec = nullptr; }
     if (proofHost_) { cudaFreeHost(proofHost_); proofHost_ = nullptr; }
     if (HasUnprovenWork()) { AbandonFresh(); return; }
     if (stateReady_) { cudaEventSynchronize(stateReady_); cudaEventDestroy(stateReady_); }
@@ -880,28 +882,122 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
     sampleCount_=n; order_=m; smoothing_=smoothing; solved_=true; return RbfStatus::Ok;
 }
 
+RbfStatus CudaRbfBinding::submitSolveSlice(cudaStream_t stream, DeviceView<const float3> posed,
+                                                  int n, int m, double invScale) {
+    // The solve slice, exactly as submitted before: posed D2D, RHS build,
+    // triangular solve. Called directly and under stream capture;
+    // diagnostics are unchanged either way. Callers size current_ before
+    // this runs: capture cannot contain an allocation.
+    if(!ok(cudaMemcpyAsync(current_.data(),posed.data,size_t(n)*sizeof(float3),cudaMemcpyDeviceToDevice,stream))) return fail(RbfStatus::CudaError,"RBF current sample copy failed");
+    rhsKernel<<<(n+255)/256,256,0,stream>>>(rest_.data(),current_.data(),coefficients_.data(),n,m,invScale,&proofDev_->flag);
+    if(cusolverDnSetStream(solver_,stream)!=CUSOLVER_STATUS_SUCCESS || cusolverDnDgetrs(solver_,CUBLAS_OP_N,m,3,matrix_.data(),m,pivots_.data(),coefficients_.data(),m,&proofDev_->info)!=CUSOLVER_STATUS_SUCCESS)return fail(RbfStatus::SolverError,"cuSOLVER triangular solve failed");
+    return RbfStatus::Ok;
+}
+
+RbfStatus CudaRbfBinding::submitSolveSliceGraphed(cudaStream_t stream, DeviceView<const float3> posed,
+                                                          int n, int m, double invScale) {
+    SolveGraphKey key;
+    key.n = n; key.m = m; key.invScale = invScale; key.solver = solver_;
+    key.src = posed.data; key.current = current_.data(); key.rest = rest_.data();
+    key.coefficients = coefficients_.data(); key.proof = proofDev_;
+    key.matrix = matrix_.data(); key.pivots = pivots_.data();
+    // Idle here: every prior Solve proved its launch with the stream sync (a
+    // sync failure leaks the exec and disables replay instead, in Solve).
+    auto destroyExec = [&]() {
+        if (solveGraph_.exec) { cudaGraphExecDestroy(solveGraph_.exec); solveGraph_.exec = nullptr; }
+    };
+    auto noteFailure = [&]() {
+        if (++solveGraph_.consecutiveFailures >= 2) solveGraph_.disabled = true;
+    };
+    if (!solveGraph_.disabled && solveGraph_.exec && solveGraph_.key == key) {
+        if (ok(cudaGraphLaunch(solveGraph_.exec, stream))) {
+            solveGraph_.consecutiveFailures = 0;
+            return RbfStatus::Ok;
+        }
+        // Launch failed: nothing runs, so the exec is idle; drop it, clear
+        // any sticky launch error, and run the same submits directly.
+        destroyExec();
+        noteFailure();
+        cudaGetLastError();
+        return submitSolveSlice(stream, posed, n, m, invScale);
+    }
+    if (!solveGraph_.disabled) {
+        destroyExec();
+        std::string savedDiag = diagnostic_;
+        cudaGraph_t graph = nullptr;
+        bool captured = false;
+        if (ok(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal))) {
+            RbfStatus sub = submitSolveSlice(stream, posed, n, m, invScale);
+            if (sub == RbfStatus::Ok && ok(cudaStreamEndCapture(stream, &graph)) && graph != nullptr) {
+                captured = true;
+            } else {
+                // Unpoison the stream: a failed submit still needs its
+                // capture ended. The graph (if any) is dropped, never run.
+                if (sub != RbfStatus::Ok) cudaStreamEndCapture(stream, &graph);
+                graph = nullptr;
+            }
+        }
+        cudaGraphExec_t exec = nullptr;
+        if (captured && ok(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0)) && exec != nullptr) {
+            cudaGraphDestroy(graph);
+            solveGraph_.exec = exec;
+            solveGraph_.key = key;
+            solveGraph_.consecutiveFailures = 0;
+            diagnostic_ = savedDiag;
+            // Capture only records; the fresh exec runs the slice for real.
+            if (ok(cudaGraphLaunch(exec, stream))) return RbfStatus::Ok;
+            destroyExec();
+            noteFailure();
+        } else {
+            if (graph) cudaGraphDestroy(graph);
+            noteFailure();
+        }
+        // The recorded work (if any) was discarded, and capture may have
+        // left a sticky launch error: clear it, then submit for real. A
+        // successful fallback restores the entry diagnostic; a failed one
+        // keeps its own.
+        cudaGetLastError();
+        RbfStatus fb = submitSolveSlice(stream, posed, n, m, invScale);
+        if (fb == RbfStatus::Ok) diagnostic_ = savedDiag;
+        return fb;
+    }
+    return submitSolveSlice(stream, posed, n, m, invScale);
+}
+
 RbfStatus CudaRbfBinding::Solve(DeviceView<const float3> posed, cudaStream_t stream) {
     if (HasUnprovenWork()) return fail(RbfStatus::InvalidArgument,"fresh RBF proof is pending");
     solved_=false;
     if (evalPending_) return fail(RbfStatus::InvalidArgument,"RBF Finish is required before changing a pending evaluation state");
     if(!sampleCount_ || posed.size!=sampleCount_ || !posed.data) return fail(RbfStatus::InvalidArgument,"RBF Solve samples do not match binding");
     if(!ok(cudaStreamWaitEvent(stream,stateReady_,0))) return fail(RbfStatus::CudaError,"RBF state wait failed");
-    if(!ok(current_.reset(sampleCount_)) || !ok(cudaMemcpyAsync(current_.data(),posed.data,sampleCount_*sizeof(float3),cudaMemcpyDeviceToDevice,stream))) return fail(RbfStatus::CudaError,"RBF current sample copy failed");
+    if(!ok(current_.reset(sampleCount_))) return fail(RbfStatus::CudaError,"RBF current sample copy failed");
     // Zero-copy proofs: the flag and info words live in mapped host memory,
     // so neither proof needs a D2H node (each carried a ~7us drain bubble).
     // The host zeroes the flag directly (was: a device memset node) and reads
     // both words after the single sync below.
     if(!ensureProofs()) return fail(RbfStatus::CudaError,"RBF proof allocation failed");
     proofHost_->flag = 0;
-    rhsKernel<<<(sampleCount_+255)/256,256,0,stream>>>(rest_.data(),current_.data(),coefficients_.data(),(int)sampleCount_,(int)order_,1.0/scale_,&proofDev_->flag);
     // The triangular solve submits before the flag is known, so one sync
     // proves both words: the mapped proofs removed the D2H nodes that used
     // to pin a drain bubble here. The flag is checked first after the sync,
     // so error precedence (NonFinite before SolverError) and every
     // success-path byte are unchanged; cuSOLVER completes normally on
-    // non-finite RHS, so the error path just wastes one submit.
-    if(cusolverDnSetStream(solver_,stream)!=CUSOLVER_STATUS_SUCCESS || cusolverDnDgetrs(solver_,CUBLAS_OP_N,(int)order_,3,matrix_.data(),(int)order_,pivots_.data(),coefficients_.data(),(int)order_,&proofDev_->info)!=CUSOLVER_STATUS_SUCCESS)return fail(RbfStatus::SolverError,"cuSOLVER triangular solve failed");
-    if(!ok(cudaStreamSynchronize(stream)))return fail(RbfStatus::CudaError,"RBF solve status query failed"); if(proofHost_->flag)return fail(RbfStatus::NonFiniteInput,"RBF current samples contain non-finite values"); if(proofHost_->info)return fail(RbfStatus::SolverError,"RBF solve returned an error"); if(!ok(cudaEventRecord(stateReady_,stream)))return fail(RbfStatus::CudaError,"RBF solve event failed"); solved_=true; return RbfStatus::Ok;
+    // non-finite RHS, so the error path just wastes one submit. The slice
+    // replays from a captured graph while its key matches; a mismatch
+    // re-captures and any capture/launch failure runs the same submits
+    // directly.
+    int const n = (int)sampleCount_, m = (int)order_;
+    RbfStatus slice = submitSolveSliceGraphed(stream, posed, n, m, 1.0/scale_);
+    if (slice != RbfStatus::Ok) return slice;
+    if(!ok(cudaStreamSynchronize(stream))) {
+        // Catastrophe (not a normal error path): the slice may be
+        // in-flight, so leak the exec and disable replay rather than
+        // destroying a possibly-executing graph.
+        solveGraph_.exec = nullptr;
+        solveGraph_.disabled = true;
+        return fail(RbfStatus::CudaError,"RBF solve status query failed");
+    }
+    if(proofHost_->flag)return fail(RbfStatus::NonFiniteInput,"RBF current samples contain non-finite values"); if(proofHost_->info)return fail(RbfStatus::SolverError,"RBF solve returned an error"); if(!ok(cudaEventRecord(stateReady_,stream)))return fail(RbfStatus::CudaError,"RBF solve event failed"); solved_=true; return RbfStatus::Ok;
 }
 RbfStatus CudaRbfBinding::Evaluate(DeviceView<const float3> cvs, DeviceView<float3> out, cudaStream_t stream) {
     if (HasUnprovenWork()) return fail(RbfStatus::InvalidArgument,"fresh RBF proof is pending");

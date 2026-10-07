@@ -139,6 +139,41 @@ private:
                               int n, int m, double smoothing);
     RbfStatus submitBindSliceGraphed(cudaStream_t stream, DeviceView<const float3> samples,
                                      int n, int m, double smoothing);
+    // Direct-solve replay, same discipline as the bind graph: the solve
+    // slice (posed D2D, RHS build, triangular solve) replays from one
+    // instantiated graph while its key (shape, the 1/scale value argument,
+    // solver, every address) matches; mismatch re-captures, failure runs
+    // the same submits directly.
+    struct SolveGraphKey {
+        int n = 0, m = 0;
+        double invScale = 0.0;
+        cusolverDnHandle_t solver = nullptr;
+        const void* src = nullptr;
+        const void* current = nullptr;
+        const void* rest = nullptr;
+        const void* coefficients = nullptr;
+        const void* proof = nullptr;
+        const void* matrix = nullptr;
+        const void* pivots = nullptr;
+        bool operator==(SolveGraphKey const& o) const {
+            return n == o.n && m == o.m && invScale == o.invScale &&
+                solver == o.solver && src == o.src && current == o.current &&
+                rest == o.rest && coefficients == o.coefficients &&
+                proof == o.proof && matrix == o.matrix && pivots == o.pivots;
+        }
+        bool operator!=(SolveGraphKey const& o) const { return !(*this == o); }
+    };
+    struct SolveGraph {
+        cudaGraphExec_t exec = nullptr;
+        SolveGraphKey key;
+        int consecutiveFailures = 0;
+        bool disabled = false;
+    };
+    SolveGraph solveGraph_;
+    RbfStatus submitSolveSlice(cudaStream_t stream, DeviceView<const float3> posed,
+                               int n, int m, double invScale);
+    RbfStatus submitSolveSliceGraphed(cudaStream_t stream, DeviceView<const float3> posed,
+                                      int n, int m, double invScale);
     size_t sampleCount_ = 0, order_ = 0;
     bool solved_ = false, evalPending_ = false;
     double smoothing_ = 0.0, center_[3] = {}, scale_ = 1.0;
