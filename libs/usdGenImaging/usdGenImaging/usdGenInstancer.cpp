@@ -991,14 +991,46 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
             } else {
                 GfVec3f const *colors = input.displayColor.cdata();
                 uint32_t const *offsets = spans.data();
-                plane.f.resize(count3, [colors, offsets](float *b, float *e) {
-                    float *d = b;
-                    for (uint32_t c = 0; d != e; ++c, d += 3) {
-                        GfVec3f const v = colors[offsets[c]];
-                        new (d + 0) float(v[0]);
-                        new (d + 1) float(v[1]);
-                        new (d + 2) float(v[2]);
+                // Chunked over curve ranges for big bakes (bit-identical):
+                // every curve reads its own root-CV color and writes a
+                // disjoint output triple, so any range split writes the
+                // same bytes. Small bakes stay serial: below ~32K curves
+                // the dispatch costs more than the gather.
+                size_t const gatherChunks =
+                    (workers > 1 && n > 32768)
+                        ? std::min({size_t(workers), size_t(8), size_t(n)})
+                        : 1;
+                plane.f.resize(count3, [colors, offsets,
+                                        gatherChunks](float *b, float *e) {
+                    if (gatherChunks == 1) {
+                        float *d = b;
+                        for (uint32_t c = 0; d != e; ++c, d += 3) {
+                            GfVec3f const v = colors[offsets[c]];
+                            new (d + 0) float(v[0]);
+                            new (d + 1) float(v[1]);
+                            new (d + 2) float(v[2]);
+                        }
+                        return;
                     }
+                    size_t const M = size_t(e - b) / 3;
+                    tbb::parallel_for(
+                        tbb::blocked_range<size_t>(0, gatherChunks),
+                        [&](tbb::blocked_range<size_t> const &range) {
+                            for (size_t t = range.begin(); t != range.end();
+                                 ++t) {
+                                size_t const c0 = (t * M) / gatherChunks;
+                                size_t const c1 =
+                                    ((t + 1) * M) / gatherChunks;
+                                for (size_t c = c0; c < c1; ++c) {
+                                    GfVec3f const v =
+                                        colors[offsets[c]];
+                                    float *d = b + 3 * c;
+                                    new (d + 0) float(v[0]);
+                                    new (d + 1) float(v[1]);
+                                    new (d + 2) float(v[2]);
+                                }
+                            }
+                        });
                 });
             }
             out.varyings.push_back(plane);

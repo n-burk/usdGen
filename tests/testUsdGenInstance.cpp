@@ -24,7 +24,8 @@
 //       MoonRay wire types: quath rotations, packed varyings, color role);
 //  (11) notice locators (Translations, never topology, for value edits).
 //  (12) inline rotation quat matches ExtractRotationQuat bit for bit.
-//  (13) threaded ranges: two big bakes agree bitwise on every output.
+//  (13) threaded ranges: two big bakes agree bitwise on every output,
+//       incl. the per-CV gather and the arity-2 pack at 40K curves.
 #include "usdGenImaging/usdGenInstancer.h"
 
 #include "usdGen/curveBuffer.h"
@@ -1206,6 +1207,87 @@ static void CheckThreadedRanges()
           "threaded spheres bakes repeatably");
     Check(s1.translations.size() == 40000 && SameBake(s1, s2),
           "threaded spheres ranges are bitwise identical");
+
+    // The same 40K curves drive the threaded per-CV gather (n > 32768)
+    // and the chunked arity-2 pack (320KB > 256KB): the gathered varyings
+    // must equal an independently sampled expectation bitwise, and the
+    // published VtVec2fArray must equal the source floats bitwise, across
+    // two bakes (thread scheduling varies run to run).
+    UsdGenCurveBuffer pairCurves = curves;
+    UsdGenPlane pair;
+    pair.name = TfToken("usdGen:pair");
+    pair.interpolation = TfToken("uniform");
+    pair.type = TfToken("float");
+    pair.arity = 2;
+    pair.f.resize(80000);
+    for (size_t i = 0; i != pair.f.size(); ++i)
+        pair.f[i] = float(int(i % 1024) - 512) / 512.0f;
+    pairCurves.extraCurve.push_back(pair);
+    UsdGenInstanceCurves vertexInput;
+    vertexInput.curves = &pairCurves;
+    vertexInput.displayColor.resize(pairCurves.totalCvs);
+    for (uint32_t i = 0; i != pairCurves.totalCvs; ++i)
+        vertexInput.displayColor[i] =
+            GfVec3f(float(i % 251) / 251.0f, float((i * 3) % 127) / 127.0f,
+                    float((i * 7) % 89) / 89.0f);
+    UsdGenInstanceParams vary = CardsParams();
+    vary.twist = 15.0f;
+    vary.twistRandom = 30.0f;
+    vary.variationPrimvars = VtArray<TfToken>{TfToken("displayColor"),
+                                              TfToken("usdGen:pair")};
+    UsdGenInstanceResult v1, v2;
+    Check(BakeOk(vary, vertexInput, &v1) &&
+              BakeOk(vary, vertexInput, &v2),
+          "threaded varyings bakes repeatably");
+    // Independent expectation: uniform topology, so curve c's root CV is
+    // CV 4c; the pair plane copies through verbatim.
+    VtFloatArray wantColor;
+    wantColor.resize(120000);
+    for (uint32_t c = 0; c != 40000; ++c) {
+        GfVec3f const rgb = vertexInput.displayColor[c * 4];
+        wantColor[3 * c + 0] = rgb[0];
+        wantColor[3 * c + 1] = rgb[1];
+        wantColor[3 * c + 2] = rgb[2];
+    }
+    auto findPlane = [](UsdGenInstanceResult const &r,
+                        TfToken const &name) -> UsdGenPlane const * {
+        for (UsdGenPlane const &p : r.varyings)
+            if (p.name == name)
+                return &p;
+        return nullptr;
+    };
+    bool gatherOk = false, pairBakeOk = false;
+    if (UsdGenPlane const *dc = findPlane(v1, TfToken("displayColor")))
+        gatherOk = dc->f == wantColor;
+    if (UsdGenPlane const *pp = findPlane(v1, TfToken("usdGen:pair")))
+        pairBakeOk = pp->f == pair.f;
+    Check(gatherOk, "threaded per-CV gather matches root-CV sampling");
+    Check(pairBakeOk, "threaded bake carries the arity-2 plane verbatim");
+    bool varyRepeat = false;
+    if (UsdGenPlane const *dc = findPlane(v2, TfToken("displayColor")))
+        varyRepeat = dc->f == wantColor;
+    if (UsdGenPlane const *pp = findPlane(v2, TfToken("usdGen:pair")))
+        varyRepeat = varyRepeat && pp->f == pair.f;
+    Check(varyRepeat && SameBake(v1, v2),
+          "threaded varyings repeat bitwise across bakes");
+    HdContainerDataSourceHandle vc = UsdGenInstancer::BuildInstancerDataSource(
+        v1, SdfPath("/groom"));
+    HdContainerDataSourceHandle vpv = Child(vc, "primvars");
+    HdContainerDataSourceHandle vpair =
+        vpv ? HdContainerDataSource::Cast(vpv->Get(TfToken("usdGen:pair")))
+            : nullptr;
+    bool packOk = false;
+    if (vpair) {
+        VtValue pairValue = LeafValue(vpair->Get(TfToken("primvarValue")));
+        if (pairValue.IsHolding<VtVec2fArray>()) {
+            VtVec2fArray const &a =
+                pairValue.UncheckedGet<VtVec2fArray>();
+            packOk = a.size() == 40000 &&
+                std::memcmp(a.cdata(), pair.f.cdata(),
+                            a.size() * sizeof(GfVec2f)) == 0;
+        }
+    }
+    Check(packOk, "chunked arity-2 pack matches the source floats bitwise");
 }
 
 int main()
