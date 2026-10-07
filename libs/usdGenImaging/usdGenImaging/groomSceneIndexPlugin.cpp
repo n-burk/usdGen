@@ -1829,6 +1829,80 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                         if (removedPaths.count(parent)) return true;
                     return false;
                 };
+                // Tile/scalp content diffs are pure (they read only immutable
+                // data-source handles) and dominate the drain on deform frames
+                // (tens of ms of VtArray compares while the cook workers sit
+                // idle), so run them on the TBB arena ahead of the serial
+                // notice merge. The gates below mirror the main loop's diff
+                // call conditions exactly; the loop looks each result up by
+                // prim path and falls back to the serial diff if a gate ever
+                // skews (same notices, just slower).
+                struct _PendingDiff {
+                    SdfPath path;
+                    HdDataSourceBaseHandle before, after;
+                };
+                std::vector<_PendingDiff> pendingDiffs;
+                for (auto const& now : targetNames) {
+                    if (now.first == SdfPath::AbsoluteRootPath()) continue;
+                    auto old = beforeNames.find(now.first);
+                    if (old == beforeNames.end() || old->second != now.second ||
+                        removedPaths.count(now.first) || removedAncestor(now.first))
+                        continue;
+                    auto targetSource = target->source->find(now.first);
+                    auto beforeSource = before->source->find(now.first);
+                    if (targetSource != target->source->end() &&
+                        beforeSource != before->source->end())
+                        continue;
+                    auto const& a = beforeSynthetic[now.first];
+                    auto const& b = targetSynthetic[now.first];
+                    bool const sameRoot = a.rootId == b.rootId;
+                    HdContainerDataSourceHandle beforeTile, targetTile;
+                    if (sameRoot && b.type == TfToken("basisCurves") &&
+                        a.tiles && b.tiles) {
+                        auto ia = a.tiles->find(now.first);
+                        auto ib = b.tiles->find(now.first);
+                        if (ia != a.tiles->end() && ib != b.tiles->end()) {
+                            beforeTile = ia->second;
+                            targetTile = ib->second;
+                        }
+                    }
+                    if (beforeTile && targetTile) {
+                        if (beforeTile != targetTile)
+                            pendingDiffs.push_back(
+                                _PendingDiff{now.first, beforeTile, targetTile});
+                    } else if (b.type != TfToken("basisCurves")) {
+                        if (!sameRoot || a.lookDigest != b.lookDigest) {
+                            // Universal dirty below; no content diff.
+                        } else if (b.type == TfToken("mesh") &&
+                                   a.scalpDigest != b.scalpDigest) {
+                            pendingDiffs.push_back(
+                                _PendingDiff{now.first, a.scalp, b.scalp});
+                        }
+                    }
+                }
+                std::vector<HdDataSourceLocatorSet> pendingResults(
+                    pendingDiffs.size());
+                if (pendingDiffs.size() > 1) {
+                    tbb::parallel_for(
+                        tbb::blocked_range<size_t>(0, pendingDiffs.size()),
+                        [&](tbb::blocked_range<size_t> const& range) {
+                            for (size_t i = range.begin(); i != range.end(); ++i) {
+                                DiffTileDataSources(pendingDiffs[i].before,
+                                                    pendingDiffs[i].after,
+                                                    HdDataSourceLocator(),
+                                                    &pendingResults[i]);
+                            }
+                        });
+                } else if (pendingDiffs.size() == 1) {
+                    DiffTileDataSources(pendingDiffs[0].before,
+                                        pendingDiffs[0].after,
+                                        HdDataSourceLocator(),
+                                        &pendingResults[0]);
+                }
+                std::map<SdfPath, HdDataSourceLocatorSet> precomputedDiffs;
+                for (size_t i = 0; i < pendingDiffs.size(); ++i)
+                    precomputedDiffs.emplace(pendingDiffs[i].path,
+                                             std::move(pendingResults[i]));
                 for (auto const& now : targetNames) {
                     if (now.first == SdfPath::AbsoluteRootPath()) continue;
                     auto old = beforeNames.find(now.first);
@@ -1864,11 +1938,23 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                             // curves, re-interpolates) just the primvars that
                             // moved, not widths/hairT/colours that did not.
                             if (beforeTile != targetTile) {
-                                HdDataSourceLocatorSet changed;
-                                DiffTileDataSources(beforeTile, targetTile,
-                                                    HdDataSourceLocator(), &changed);
-                                if (!changed.IsEmpty())
-                                    dirtied.emplace_back(now.first, changed);
+                                auto const found =
+                                    precomputedDiffs.find(now.first);
+                                if (found != precomputedDiffs.end()) {
+                                    if (!found->second.IsEmpty())
+                                        dirtied.emplace_back(now.first,
+                                                             found->second);
+                                } else {
+                                    // Defensive: the pre-pass gates mirror
+                                    // these call conditions, so this only runs
+                                    // if they ever skew — same notices.
+                                    HdDataSourceLocatorSet changed;
+                                    DiffTileDataSources(beforeTile, targetTile,
+                                                        HdDataSourceLocator(),
+                                                        &changed);
+                                    if (!changed.IsEmpty())
+                                        dirtied.emplace_back(now.first, changed);
+                                }
                             }
                             if (a.descriptionStamp != b.descriptionStamp)
                                 dirtied.emplace_back(now.first,
@@ -1888,12 +1974,23 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                                 // groom deforms, so it is diffed like a tile
                                 // rather than dirtied universally: a universal
                                 // dirty here would cost a full mesh re-sync
-                                // every frame of playback.
-                                HdDataSourceLocatorSet changed;
-                                DiffTileDataSources(a.scalp, b.scalp,
-                                                    HdDataSourceLocator(), &changed);
-                                if (!changed.IsEmpty())
-                                    dirtied.emplace_back(now.first, changed);
+                                // every frame of playback. The diff ran on the
+                                // pre-pass workers; the serial call below is
+                                // the same skew-only fallback as the tiles'.
+                                auto const found =
+                                    precomputedDiffs.find(now.first);
+                                if (found != precomputedDiffs.end()) {
+                                    if (!found->second.IsEmpty())
+                                        dirtied.emplace_back(now.first,
+                                                             found->second);
+                                } else {
+                                    HdDataSourceLocatorSet changed;
+                                    DiffTileDataSources(a.scalp, b.scalp,
+                                                        HdDataSourceLocator(),
+                                                        &changed);
+                                    if (!changed.IsEmpty())
+                                        dirtied.emplace_back(now.first, changed);
+                                }
                             }
                         } else if (!sameRoot || a.generation != b.generation || a.tiles != b.tiles) {
                             dirtied.emplace_back(now.first, HdDataSourceLocatorSet::UniversalSet());
