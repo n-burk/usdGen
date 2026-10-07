@@ -272,6 +272,10 @@ struct PlanarFBlock4 {
     float const *qx, *qy, *qz;
     double *dx, *dy, *dz;
 };
+struct PlanarFBlock8 {
+    float const *qx, *qy, *qz;
+    double *dx, *dy, *dz;
+};
 // Fused 4-query NEON block: the same per-lane operations as DisplaceBlocked
 // (same FMA contraction association, correctly-rounded vector sqrt), but
 // the kernel evaluation and the accumulation fuse into one sample pass
@@ -415,6 +419,143 @@ void DisplaceBlockedNeon4T(GfVec3d const &centre, double invScale, double scale,
         vst1q_f64(blk.dz + 2, vmulq_f64(oz1, sc));
     }
 }
+
+// Eight-wide planar NEON block: two 4-query halves over one shared sample
+// pass. Each lane runs the 4-wide block's operations in the 4-wide order
+// (same expression text per lane, same sample order), so the eight lanes
+// are bitwise the 4-wide block run twice; only the sample/coefficient
+// broadcasts amortize over eight queries instead of four. The wider pass
+// runs the planar kernel ~4% faster (9.53 -> 9.14ms single-threaded over
+// 200k x 100 bench-shaped pairs, 7/7 interleaved A/B pairs both orders).
+// The allocator spills a few accumulators to the L1-resident stack, but
+// the halved sample/coefficient broadcast traffic still wins net.
+// Planar only: the AoS bundle's
+// vld3/vst3 prologue and epilogue spill the 8-wide sample loop back over
+// the 4-wide time (+1.5%), so AoS keeps the 4-wide block above. Unroll
+// x16: x8/x16/x32 all tie (the overhead fully amortizes), so the middle
+// keeps the code small. Other compilers see no pragma and keep the rolled
+// loop.
+void DisplaceBlockedNeon8Planar(GfVec3d const &centre, double invScale,
+                               double scale, double const *restX,
+                               double const *restY, double const *restZ,
+                               double const *cx, double const *cy,
+                               double const *cz, size_t n, PlanarFBlock8 blk)
+{
+    float64x2_t const c0 = vdupq_n_f64(centre[0]);
+    float64x2_t const c1 = vdupq_n_f64(centre[1]);
+    float64x2_t const c2 = vdupq_n_f64(centre[2]);
+    float64x2_t const invS = vdupq_n_f64(invScale);
+    float64x2_t px0, px1, px2, px3, py0, py1, py2, py3, pz0, pz1, pz2, pz3;
+    px0 = vmulq_f64(vsubq_f64(vcvt_f64_f32(vld1_f32(blk.qx)), c0), invS);
+    px1 = vmulq_f64(vsubq_f64(vcvt_f64_f32(vld1_f32(blk.qx + 2)), c0), invS);
+    px2 = vmulq_f64(vsubq_f64(vcvt_f64_f32(vld1_f32(blk.qx + 4)), c0), invS);
+    px3 = vmulq_f64(vsubq_f64(vcvt_f64_f32(vld1_f32(blk.qx + 6)), c0), invS);
+    py0 = vmulq_f64(vsubq_f64(vcvt_f64_f32(vld1_f32(blk.qy)), c1), invS);
+    py1 = vmulq_f64(vsubq_f64(vcvt_f64_f32(vld1_f32(blk.qy + 2)), c1), invS);
+    py2 = vmulq_f64(vsubq_f64(vcvt_f64_f32(vld1_f32(blk.qy + 4)), c1), invS);
+    py3 = vmulq_f64(vsubq_f64(vcvt_f64_f32(vld1_f32(blk.qy + 6)), c1), invS);
+    pz0 = vmulq_f64(vsubq_f64(vcvt_f64_f32(vld1_f32(blk.qz)), c2), invS);
+    pz1 = vmulq_f64(vsubq_f64(vcvt_f64_f32(vld1_f32(blk.qz + 2)), c2), invS);
+    pz2 = vmulq_f64(vsubq_f64(vcvt_f64_f32(vld1_f32(blk.qz + 4)), c2), invS);
+    pz3 = vmulq_f64(vsubq_f64(vcvt_f64_f32(vld1_f32(blk.qz + 6)), c2), invS);
+    float64x2_t ox0, ox1, ox2, ox3, oy0, oy1, oy2, oy3, oz0, oz1, oz2, oz3;
+    {
+        float64x2_t const a0 = vdupq_n_f64(cx[n]);
+        float64x2_t const a1 = vdupq_n_f64(cx[n + 1]);
+        float64x2_t const a2 = vdupq_n_f64(cx[n + 2]);
+        float64x2_t const a3 = vdupq_n_f64(cx[n + 3]);
+        ox0 = vfmaq_f64(vfmaq_f64(vfmaq_f64(a0, a1, px0), a2, py0), a3, pz0);
+        ox1 = vfmaq_f64(vfmaq_f64(vfmaq_f64(a0, a1, px1), a2, py1), a3, pz1);
+        ox2 = vfmaq_f64(vfmaq_f64(vfmaq_f64(a0, a1, px2), a2, py2), a3, pz2);
+        ox3 = vfmaq_f64(vfmaq_f64(vfmaq_f64(a0, a1, px3), a2, py3), a3, pz3);
+    }
+    {
+        float64x2_t const a0 = vdupq_n_f64(cy[n]);
+        float64x2_t const a1 = vdupq_n_f64(cy[n + 1]);
+        float64x2_t const a2 = vdupq_n_f64(cy[n + 2]);
+        float64x2_t const a3 = vdupq_n_f64(cy[n + 3]);
+        oy0 = vfmaq_f64(vfmaq_f64(vfmaq_f64(a0, a1, px0), a2, py0), a3, pz0);
+        oy1 = vfmaq_f64(vfmaq_f64(vfmaq_f64(a0, a1, px1), a2, py1), a3, pz1);
+        oy2 = vfmaq_f64(vfmaq_f64(vfmaq_f64(a0, a1, px2), a2, py2), a3, pz2);
+        oy3 = vfmaq_f64(vfmaq_f64(vfmaq_f64(a0, a1, px3), a2, py3), a3, pz3);
+    }
+    {
+        float64x2_t const a0 = vdupq_n_f64(cz[n]);
+        float64x2_t const a1 = vdupq_n_f64(cz[n + 1]);
+        float64x2_t const a2 = vdupq_n_f64(cz[n + 2]);
+        float64x2_t const a3 = vdupq_n_f64(cz[n + 3]);
+        oz0 = vfmaq_f64(vfmaq_f64(vfmaq_f64(a0, a1, px0), a2, py0), a3, pz0);
+        oz1 = vfmaq_f64(vfmaq_f64(vfmaq_f64(a0, a1, px1), a2, py1), a3, pz1);
+        oz2 = vfmaq_f64(vfmaq_f64(vfmaq_f64(a0, a1, px2), a2, py2), a3, pz2);
+        oz3 = vfmaq_f64(vfmaq_f64(vfmaq_f64(a0, a1, px3), a2, py3), a3, pz3);
+    }
+#if defined(__clang__)
+#pragma clang loop unroll_count(16)
+#elif defined(__GNUC__)
+#pragma GCC unroll 16
+#endif
+    for (size_t i = 0; i < n; ++i) {
+        float64x2_t const sx = vld1q_dup_f64(&restX[i]);
+        float64x2_t const sy = vld1q_dup_f64(&restY[i]);
+        float64x2_t const sz = vld1q_dup_f64(&restZ[i]);
+        float64x2_t const qx = vld1q_dup_f64(&cx[i]);
+        float64x2_t const qy = vld1q_dup_f64(&cy[i]);
+        float64x2_t const qz = vld1q_dup_f64(&cz[i]);
+        float64x2_t const dx0 = vsubq_f64(px0, sx);
+        float64x2_t const dx1 = vsubq_f64(px1, sx);
+        float64x2_t const dx2 = vsubq_f64(px2, sx);
+        float64x2_t const dx3 = vsubq_f64(px3, sx);
+        float64x2_t const dy0 = vsubq_f64(py0, sy);
+        float64x2_t const dy1 = vsubq_f64(py1, sy);
+        float64x2_t const dy2 = vsubq_f64(py2, sy);
+        float64x2_t const dy3 = vsubq_f64(py3, sy);
+        float64x2_t const dz0 = vsubq_f64(pz0, sz);
+        float64x2_t const dz1 = vsubq_f64(pz1, sz);
+        float64x2_t const dz2 = vsubq_f64(pz2, sz);
+        float64x2_t const dz3 = vsubq_f64(pz3, sz);
+        float64x2_t s0 = vfmaq_f64(vmulq_f64(dy0, dy0), dx0, dx0);
+        s0 = vfmaq_f64(s0, dz0, dz0);
+        float64x2_t s1 = vfmaq_f64(vmulq_f64(dy1, dy1), dx1, dx1);
+        s1 = vfmaq_f64(s1, dz1, dz1);
+        float64x2_t s2 = vfmaq_f64(vmulq_f64(dy2, dy2), dx2, dx2);
+        s2 = vfmaq_f64(s2, dz2, dz2);
+        float64x2_t s3 = vfmaq_f64(vmulq_f64(dy3, dy3), dx3, dx3);
+        s3 = vfmaq_f64(s3, dz3, dz3);
+        float64x2_t const rr0 = vsqrtq_f64(s0);
+        float64x2_t const rr1 = vsqrtq_f64(s1);
+        float64x2_t const rr2 = vsqrtq_f64(s2);
+        float64x2_t const rr3 = vsqrtq_f64(s3);
+        float64x2_t const kk0 = vmulq_f64(vmulq_f64(rr0, rr0), rr0);
+        float64x2_t const kk1 = vmulq_f64(vmulq_f64(rr1, rr1), rr1);
+        float64x2_t const kk2 = vmulq_f64(vmulq_f64(rr2, rr2), rr2);
+        float64x2_t const kk3 = vmulq_f64(vmulq_f64(rr3, rr3), rr3);
+        ox0 = vfmaq_f64(ox0, qx, kk0);
+        oy0 = vfmaq_f64(oy0, qy, kk0);
+        oz0 = vfmaq_f64(oz0, qz, kk0);
+        ox1 = vfmaq_f64(ox1, qx, kk1);
+        oy1 = vfmaq_f64(oy1, qy, kk1);
+        oz1 = vfmaq_f64(oz1, qz, kk1);
+        ox2 = vfmaq_f64(ox2, qx, kk2);
+        oy2 = vfmaq_f64(oy2, qy, kk2);
+        oz2 = vfmaq_f64(oz2, qz, kk2);
+        ox3 = vfmaq_f64(ox3, qx, kk3);
+        oy3 = vfmaq_f64(oy3, qy, kk3);
+        oz3 = vfmaq_f64(oz3, qz, kk3);
+    }
+    float64x2_t const sc = vdupq_n_f64(scale);
+    vst1q_f64(blk.dx, vmulq_f64(ox0, sc));
+    vst1q_f64(blk.dx + 2, vmulq_f64(ox1, sc));
+    vst1q_f64(blk.dx + 4, vmulq_f64(ox2, sc));
+    vst1q_f64(blk.dx + 6, vmulq_f64(ox3, sc));
+    vst1q_f64(blk.dy, vmulq_f64(oy0, sc));
+    vst1q_f64(blk.dy + 2, vmulq_f64(oy1, sc));
+    vst1q_f64(blk.dy + 4, vmulq_f64(oy2, sc));
+    vst1q_f64(blk.dy + 6, vmulq_f64(oy3, sc));
+    vst1q_f64(blk.dz, vmulq_f64(oz0, sc));
+    vst1q_f64(blk.dz + 2, vmulq_f64(oz1, sc));
+    vst1q_f64(blk.dz + 4, vmulq_f64(oz2, sc));
+    vst1q_f64(blk.dz + 6, vmulq_f64(oz3, sc));
+}
 #endif
 
 // Shared per-range parameters for the serial loops below: every query
@@ -469,9 +610,9 @@ void DisplaceRangeAos(CubicField const &field, DisplaceParams const &p,
     for (size_t t = 0; t < count; ++t) ds[t] = field.Displacement(qs[t]);
 }
 
-// The DisplaceBatchPlanar serial loop over its planes: the same NEON
-// block through the planar bundle (scalar widths transpose through the
-// stack, as before) plus the Displacement tails.
+// The DisplaceBatchPlanar serial loop over its planes: the 8-wide NEON
+// block, then the 4-wide block for the remainder (scalar widths transpose
+// through the stack, as before) plus the Displacement tails.
 void DisplaceRangePlanar(CubicField const &field, DisplaceParams const &p,
                          bool scalar, float const *qx, float const *qy,
                          float const *qz, double *dx, double *dy, double *dz,
@@ -479,6 +620,18 @@ void DisplaceRangePlanar(CubicField const &field, DisplaceParams const &p,
 {
 #if defined(__aarch64__) || defined(_M_ARM64)
     if (!scalar) {
+        while (count >= 8) {
+            DisplaceBlockedNeon8Planar(p.centre, p.invScale, p.scale, p.rx,
+                                       p.ry, p.rz, p.cx, p.cy, p.cz, p.n,
+                                       PlanarFBlock8{qx, qy, qz, dx, dy, dz});
+            qx += 8;
+            qy += 8;
+            qz += 8;
+            dx += 8;
+            dy += 8;
+            dz += 8;
+            count -= 8;
+        }
         while (count >= 4) {
             DisplaceBlockedNeon4T(p.centre, p.invScale, p.scale, p.rx, p.ry,
                                   p.rz, p.cx, p.cy, p.cz, p.n,
