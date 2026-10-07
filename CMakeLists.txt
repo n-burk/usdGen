@@ -4268,6 +4268,25 @@ set_tests_properties(benchUsdGenStorm PROPERTIES
     LABELS "T2;perf;gate:S-1;gate:S-5;gate:S-6;gate:S-12"
     ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" ENVIRONMENT "HD_ENABLE_PERFLOG=1" SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 
+# Shader/viewport/render benchmark (benchUsdGenShaderRender): per-config
+# cold first frame, CPU submission, total frame, and color-AOV checksum on
+# the usd/fixtures/{sr,ss,gr,gs}{1m,10m}.usda matrix (stdlib-only
+# make_shader_scenes.py; gitignored outputs like G1-G5). The ctest entry
+# exercises the small sr010k scene briefly as a smoke gate; full-matrix
+# numbers come from direct bench runs, never ctest.
+if(NOT WIN32)
+    add_executable(benchUsdGenShaderRender tests/perf/benchUsdGenShaderRender.cpp)
+    target_link_libraries(benchUsdGenShaderRender PRIVATE usdGenTestUtilsHd)
+    target_include_directories(benchUsdGenShaderRender PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/test)
+endif()
+usdgen_add_unix_only_test(benchUsdGenShaderRender benchUsdGenShaderRender
+    --scene ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/sr010k.usda
+    --deform --refine 2 --frames 2 --warmup 1 --repeats 1 --res 640x360)
+set_tests_properties(benchUsdGenShaderRender PROPERTIES
+    LABELS "T2;perf"
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+
 # Groom fixtures G1-G5 (S-1/S-5/S-6/S-12/E-5 scenes): pure-text output of
 # usd/fixtures/make_fixtures.py (stdlib only, no pxr), so T2 stays
 # self-contained wherever python3 exists. Regeneration is byte-identical
@@ -4282,6 +4301,17 @@ if(NOT WIN32)
     add_custom_target(usdGenFixtures ALL
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/g3_head100k.usda)
     add_dependencies(benchUsdGenStorm usdGenFixtures)
+    # Small shader/render matrix (010k/100k; the full 1m/10m scenes are a
+    # manual `make_shader_scenes.py` run, never a default-build artifact).
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/sr010k.usda
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/make_shader_scenes.py --small
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/make_shader_scenes.py
+        COMMENT "Generating usdGen shader/render small scenes (gitignored)"
+        VERBATIM)
+    add_custom_target(usdGenShaderScenes ALL
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/sr010k.usda)
+    add_dependencies(benchUsdGenShaderRender usdGenShaderScenes)
 endif()
 
 # N-4 (09 §5.3/§5.4, 10 §5.6 + §6.5): the remaining M1 Storm decision gates.
