@@ -2,6 +2,9 @@
 
 #include "usdGen/opRegistry.h"
 
+#include "tbb/parallel_for.h"
+#include "tbb/task_arena.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -381,36 +384,79 @@ CudaScatterInputStatus PrepareCudaScatterInput(
     // (float3). Only positions transposes from the SoA point planes.
     static_assert(sizeof(float2) == sizeof(GfVec2f), "float2/GfVec2f layout");
     static_assert(sizeof(float3) == sizeof(GfVec3f), "float3/GfVec3f layout");
-    prepared->stableIds.assign(roots.curveId.cbegin(), roots.curveId.cend());
-    prepared->rootPrim.assign(roots.rootPrim.cbegin(), roots.rootPrim.cend());
     // reserve+assign instead of resize+memcpy/loop: resize value-inits
     // (zeroes) every element through the non-scalar fill loop and the
     // copy then overwrites them all. assign copies straight into
     // uninitialized storage with identical bytes.
-    prepared->rootUV.reserve(n);
-    prepared->rootT.reserve(n);
-    prepared->rootB.reserve(n);
-    prepared->rootN.reserve(n);
-    prepared->positions.reserve(n);
+    // Every plane is an independent function of the capture buffer into a
+    // disjoint destination vector, so the seven copies run over workers
+    // for big inputs (plain TBB: this runs outside any scheduler arena)
+    // and serially below the threshold. Same bytes, any order.
+    float const* uv = nullptr;
+    float const* rt = nullptr;
+    float const* rb = nullptr;
+    float const* rn = nullptr;
     if (n) {
-        float const* uv = reinterpret_cast<float const*>(roots.rootUV.cdata());
-        float const* rt = reinterpret_cast<float const*>(roots.rootT.cdata());
-        float const* rb = reinterpret_cast<float const*>(roots.rootB.cdata());
-        float const* rn = reinterpret_cast<float const*>(roots.rootN.cdata());
-        prepared->rootUV.assign(FloatRunIterator<float2, 2>(uv),
-                               FloatRunIterator<float2, 2>(uv + 2 * n));
-        prepared->rootT.assign(FloatRunIterator<float3, 3>(rt),
-                              FloatRunIterator<float3, 3>(rt + 3 * n));
-        prepared->rootB.assign(FloatRunIterator<float3, 3>(rb),
-                              FloatRunIterator<float3, 3>(rb + 3 * n));
-        prepared->rootN.assign(FloatRunIterator<float3, 3>(rn),
-                              FloatRunIterator<float3, 3>(rn + 3 * n));
-        prepared->positions.assign(
-            TransposePositionsIterator(roots.px.cdata(), roots.py.cdata(),
-                                       roots.pz.cdata()),
-            TransposePositionsIterator(roots.px.cdata() + n,
-                                       roots.py.cdata() + n,
-                                       roots.pz.cdata() + n));
+        uv = reinterpret_cast<float const*>(roots.rootUV.cdata());
+        rt = reinterpret_cast<float const*>(roots.rootT.cdata());
+        rb = reinterpret_cast<float const*>(roots.rootB.cdata());
+        rn = reinterpret_cast<float const*>(roots.rootN.cdata());
+    }
+    auto* prep = prepared.get();
+    auto copyPlane = [&](size_t i) {
+        switch (i) {
+        case 0:
+            prep->stableIds.assign(roots.curveId.cbegin(), roots.curveId.cend());
+            break;
+        case 1:
+            prep->rootPrim.assign(roots.rootPrim.cbegin(), roots.rootPrim.cend());
+            break;
+        case 2:
+            prep->rootUV.reserve(n);
+            if (n)
+                prep->rootUV.assign(FloatRunIterator<float2, 2>(uv),
+                                    FloatRunIterator<float2, 2>(uv + 2 * n));
+            break;
+        case 3:
+            prep->rootT.reserve(n);
+            if (n)
+                prep->rootT.assign(FloatRunIterator<float3, 3>(rt),
+                                   FloatRunIterator<float3, 3>(rt + 3 * n));
+            break;
+        case 4:
+            prep->rootB.reserve(n);
+            if (n)
+                prep->rootB.assign(FloatRunIterator<float3, 3>(rb),
+                                   FloatRunIterator<float3, 3>(rb + 3 * n));
+            break;
+        case 5:
+            prep->rootN.reserve(n);
+            if (n)
+                prep->rootN.assign(FloatRunIterator<float3, 3>(rn),
+                                   FloatRunIterator<float3, 3>(rn + 3 * n));
+            break;
+        default:
+            prep->positions.reserve(n);
+            if (n)
+                prep->positions.assign(
+                    TransposePositionsIterator(roots.px.cdata(), roots.py.cdata(),
+                                               roots.pz.cdata()),
+                    TransposePositionsIterator(roots.px.cdata() + n,
+                                               roots.py.cdata() + n,
+                                               roots.pz.cdata() + n));
+            break;
+        }
+    };
+    int const convertWorkers = tbb::this_task_arena::max_concurrency();
+    if (n > 32768 && convertWorkers > 1) {
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, 7),
+            [&](tbb::blocked_range<size_t> const& range) {
+                for (size_t i = range.begin(); i != range.end(); ++i)
+                    copyPlane(i);
+            });
+    } else {
+        for (size_t i = 0; i < 7; ++i)
+            copyPlane(i);
     }
     *out = std::move(prepared);
     return CudaScatterInputStatus::Ok;
