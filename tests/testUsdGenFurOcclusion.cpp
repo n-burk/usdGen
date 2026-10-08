@@ -896,6 +896,12 @@ int main() try {
         Require(se.faceVertexCounts==sa.faceVertexCounts,"wide cap counts");
         Require(se.points.size()==sa.points.size(),"wide cap points");
         Require(sa.points.size()==sb.points.size(),"cap points");
+        // The published extent reduces per-chunk emission extrema, so it
+        // must match across chunkings exactly like the cap arrays do.
+        Require(sb.extentMin==sa.extentMin && sb.extentMax==sa.extentMax,
+                "parallel cap extent");
+        Require(se.extentMin==sa.extentMin && se.extentMax==sa.extentMax,
+                "wide cap extent");
         for(size_t i=0;i<sa.points.size();++i) {
             Require(sa.points[i]==sb.points[i],"cap point bits");
             Require(sa.normals[i]==sb.normals[i],"cap normal bits");

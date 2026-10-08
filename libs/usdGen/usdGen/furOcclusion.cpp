@@ -374,12 +374,19 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
     // the refine. One integer multiply per face; the merged topology is a pure
     // function of this key and k, so a match carries counts and indices.
     std::vector<uint64_t> chunkTopo(nChunks, UsdGenDigestOffset);
+    // Per-chunk cap extrema, tracked during emission below and reduced in
+    // chunk order for the published extent, so the extent needs no second
+    // pass over the merged points.
+    float const kInf = std::numeric_limits<float>::max();
+    std::vector<GfVec3f> chunkLo(nChunks, GfVec3f(kInf)),
+        chunkHi(nChunks, GfVec3f(-kInf));
     { TRACE_SCOPE("usdGen scalp: refine");
     ForEach(dispatcher, nChunks, [&](size_t chunk) {
         size_t const first=(chunk*triangles.size())/nChunks;
         size_t const last=((chunk+1)*triangles.size())/nChunks;
         ChunkOut& c=chunks[chunk];
         uint64_t topo = UsdGenDigestOffset;
+        GfVec3f lo(kInf), hi(-kInf);
         // The gather carries same-cell state, so each chunk works on its own
         // copy, carried across its triangles; the merged cap is independent
         // of how the mesh was chunked.
@@ -474,8 +481,11 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
                 int const order[3]={0,2,1};
                 for(int e=0;e<3;++e) {
                     int const s=order[e];
-                    emitPts[nEmitPts+size_t(e)]=
-                        local[size_t(s)]+localN[size_t(s)]*lift;
+                    GfVec3f const pt=local[size_t(s)]+localN[size_t(s)]*lift;
+                    emitPts[nEmitPts+size_t(e)]=pt;
+                    for(int d=0;d<3;++d) {
+                        lo[d]=std::min(lo[d],pt[d]); hi[d]=std::max(hi[d],pt[d]);
+                    }
                     emitNrm[nEmitPts+size_t(e)]=localN[size_t(s)];
                     for(int d=0;d<3;++d) {
                         emitTauP[nEmitTau+size_t(e)*3+size_t(d)]=
@@ -501,7 +511,11 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
                 int const s=slot(i,j);
                 if(remap[size_t(s)]<0) {
                     remap[size_t(s)]=int(c.points.size());
-                    c.points.push_back(local[size_t(s)]+localN[size_t(s)]*lift);
+                    GfVec3f const pt=local[size_t(s)]+localN[size_t(s)]*lift;
+                    c.points.push_back(pt);
+                    for(int d=0;d<3;++d) {
+                        lo[d]=std::min(lo[d],pt[d]); hi[d]=std::max(hi[d],pt[d]);
+                    }
                     c.normals.push_back(localN[size_t(s)]);
                     for(int d=0;d<3;++d) {
                         c.tauP.push_back(depth[size_t(s)*6+d*2]);
@@ -544,6 +558,7 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
             c.indices.resize(nEmitIndices,noInit);
         }
         chunkTopo[chunk] = topo;
+        chunkLo[chunk] = lo; chunkHi[chunk] = hi;
     });
     } /* scalp: refine */
     uint64_t const topoKey = UsdGenDigestBytes(chunkTopo.data(),
@@ -726,28 +741,15 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
             out->extraUniform.push_back(std::move(plane));
         }
         { TRACE_SCOPE("usdGen scalp: extent");
-        // Chunk-local extrema merged in chunk order: min/max are exact, so
-        // the reduction is deterministic and matches the serial scan for
-        // every finite input (ordered merge, no float crosses a chunk
-        // boundary except through the same pairwise min/max).
-        size_t const nExt = dispatcher ?
-            size_t(std::max(1, dispatcher->MaxConcurrency())) : 1;
-        std::vector<GfVec3f> extLo(nExt), extHi(nExt);
-        GfVec3f const* const extPts=points.cdata();
-        size_t const nPts=points.size();
-        ForEach(dispatcher, nExt, [&](size_t i) {
-            size_t const first=(i*nPts)/nExt;
-            size_t const last=((i+1)*nPts)/nExt;
-            GfVec3f lo=extPts[first], hi=extPts[first];
-            for(size_t j=first+1;j<last;++j) for(int d=0;d<3;++d) {
-                lo[d]=std::min(lo[d],extPts[j][d]);
-                hi[d]=std::max(hi[d],extPts[j][d]);
-            }
-            extLo[i]=lo; extHi[i]=hi;
-        });
-        GfVec3f lo=extLo[0], hi=extHi[0];
-        for(size_t i=1;i<nExt;++i) for(int d=0;d<3;++d) {
-            lo[d]=std::min(lo[d],extLo[i][d]); hi[d]=std::max(hi[d],extHi[i][d]);
+        // Per-chunk extrema tracked during emission, merged in chunk order:
+        // min/max are exact over the finite cap points, so the ordered
+        // reduction matches the merged-points scan, with no second pass
+        // over the ~72MB of points. Non-emitting chunks hold +/-max, which
+        // never wins; the guard above guarantees at least one emitted point.
+        GfVec3f lo=chunkLo[0], hi=chunkHi[0];
+        for(size_t i=1;i<chunkLo.size();++i) for(int d=0;d<3;++d) {
+            lo[d]=std::min(lo[d],chunkLo[i][d]);
+            hi[d]=std::max(hi[d],chunkHi[i][d]);
         }
         out->extentMin=GfVec3d(lo); out->extentMax=GfVec3d(hi);
         }
