@@ -166,20 +166,21 @@ inline float HemisphereDepth(float const values[6], GfVec3f const& n)
 }
 
 /// Trilinear gather of the hair-only sweep's six depths at one point, with
-/// same-cell reuse across a triangle's corners: scalp triangles are far
-/// smaller than a voxel, so the corners usually share one cell and the eight
-/// cell x six depth loads happen once per triangle instead of once per
-/// corner. Each corner still runs its own Corners() for its weights, and the
-/// accumulation visits the same cells in the same order, so reused corners
-/// are bit-identical. One instance per chunk (Reset per triangle); never
-/// shared across threads.
+/// same-cell reuse across a triangle's corners and across consecutive
+/// triangles: scalp triangles are far smaller than a voxel, so the corners
+/// usually share one cell and consecutive triangles usually share it too, and
+/// the eight cell x six depth loads happen once per run of same-cell corners
+/// instead of once per corner. Each corner still runs its own Corners() for
+/// its weights, and the accumulation visits the same cells in the same order,
+/// so reused corners are bit-identical. One instance per chunk, carried across
+/// its triangles (the grid and sweep are fixed for the whole build, so a
+/// stale entry is impossible); never shared across threads.
 struct ScalpDepthGather {
     Grid const* grid = nullptr;
     std::array<std::vector<float>,6> const* tau = nullptr;
     int cell[3] = {0, 0, 0};
     float cached[8][6] = {};
     bool have = false;
-    void Reset() { have = false; }
     void operator()(GfVec3f const& at, float values[6]) {
         int c[3]; float w[3];
         grid->Corners(at,c,w);
@@ -284,8 +285,8 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
         size_t const last=((chunk+1)*triangles.size())/nChunks;
         ChunkOut& c=chunks[chunk];
         // The gather carries same-cell state, so each chunk works on its own
-        // copy, reset per triangle; the merged cap is independent of how the
-        // mesh was chunked.
+        // copy, carried across its triangles; the merged cap is independent
+        // of how the mesh was chunked.
         Gather chunkGather=gather;
         // Every chunk output has a tight upper bound: one point and normal
         // per lattice vertex, three tau floats per point, and at most k*k
@@ -309,7 +310,6 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
         int shadedClock = 0;
         for(size_t ti=first;ti<last;++ti) {
             UsdGenFurOccluderTriangle const& tri=triangles[ti];
-            chunkGather.Reset();
             GfVec3f const na=vertexNormals[tri.ia]*outward;
             GfVec3f const nb=vertexNormals[tri.ib]*outward;
             GfVec3f const nc=vertexNormals[tri.ic]*outward;
