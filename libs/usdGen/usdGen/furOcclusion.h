@@ -44,6 +44,11 @@ struct UsdGenFurOccluderBuild
     bool valid = false;
     std::vector<UsdGenFurOccluderTriangle> triangles;
     std::vector<GfVec3f> vertexNormals;
+    // Max edge length per triangle, filled by the same build: the k/n slits
+    // in the edges, vote, and shell loops read this instead of recomputing
+    // three lengths per triangle per cook. Same floats the recomputation
+    // yields (max selects, never rounds); valid whenever the mesh is.
+    std::vector<float> extents;
 };
 
 /// Caller-owned scratch for the scalp-shadow cap build: the per-chunk

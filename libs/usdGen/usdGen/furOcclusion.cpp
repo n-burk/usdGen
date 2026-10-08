@@ -174,7 +174,8 @@ inline float HemisphereDepth(float const values[6], GfVec3f const& n)
 /// has no T-junctions: adaptive per face would crack.
 template <class Gather>
 void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
-                      std::vector<GfVec3f> const& vertexNormals, float inward,
+                      std::vector<GfVec3f> const& vertexNormals,
+                      std::vector<float> const& extents, float inward,
                       Grid const& grid, int maxTriangles, Gather const& gather,
                       UsdGenWorkDispatcher* dispatcher,
                       UsdGenScalpShadowPublication* out,
@@ -186,9 +187,8 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
     { TRACE_SCOPE("usdGen scalp: edges");
     std::vector<float> edges;
     edges.reserve(triangles.size());
-    for(UsdGenFurOccluderTriangle const& t:triangles)
-        edges.push_back(std::max({(t.b-t.a).GetLength(),(t.c-t.b).GetLength(),
-                                  (t.a-t.c).GetLength()}));
+    for(size_t i=0;i<triangles.size();++i)
+        edges.push_back(extents[i]);
     auto at=edges.begin()+std::min(edges.size()-1,size_t(0.9*double(edges.size())));
     std::nth_element(edges.begin(),at,edges.end());
     k=std::max(1,int(std::ceil(*at*grid.invH)));
@@ -921,6 +921,7 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
                              occluderCache->key == occluderKey;
     std::vector<UsdGenFurOccluderTriangle> missTriangles;
     std::vector<GfVec3f> missNormals;
+    std::vector<float> missExtents;
     if (occluderCache && !occluderHit) {
         occluderCache->triangles.clear();
         occluderCache->vertexNormals.clear();
@@ -930,6 +931,8 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
         occluderCache ? occluderCache->triangles : missTriangles;
     std::vector<GfVec3f>& vertexNormals =
         occluderCache ? occluderCache->vertexNormals : missNormals;
+    std::vector<float>& extents =
+        occluderCache ? occluderCache->extents : missExtents;
     std::vector<GfVec3f> vertices;
     float inward = -1.f;
     if(!params.occluders.empty()) {
@@ -985,13 +988,22 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
         }
         // Area-weighted vertex normals: the cross product's length is twice the
         // triangle's area, so accumulating it unnormalised is the weighting.
+        // The max edge length fills in the same pass (see the header): the
+        // triangle is already in hand, so the edges, vote, and shell loops'
+        // per-cook lengths cost one sqrt triple per mesh build, never a
+        // second sweep over the mesh.
         { TRACE_SCOPE("usdGen tris: normals");
         vertexNormals.assign(vertices.size(),GfVec3f(0));
-        for(UsdGenFurOccluderTriangle const& tri:triangles) {
+        extents.resize(triangles.size());
+        for(size_t i=0;i<triangles.size();++i) {
+            UsdGenFurOccluderTriangle const& tri=triangles[i];
             GfVec3f const weighted=GfCross(tri.b-tri.a,tri.c-tri.a);
             vertexNormals[tri.ia]+=weighted;
             vertexNormals[tri.ib]+=weighted;
             vertexNormals[tri.ic]+=weighted;
+            GfVec3f const e1=tri.b-tri.a, e2=tri.c-tri.a;
+            extents[i]=std::max({e1.GetLength(),e2.GetLength(),
+                                 (tri.c-tri.b).GetLength()});
         }
         }
         for(size_t i=0;i<vertexNormals.size();++i) {
@@ -1028,8 +1040,7 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
                 GfVec3f const e1=tri.b-tri.a, e2=tri.c-tri.a;
                 // A lattice, not the centroid: one triangle can be larger than
                 // the whole groom, and then its centroid says nothing.
-                float const extent=std::max({e1.GetLength(),e2.GetLength(),
-                                             (tri.c-tri.b).GetLength()});
+                float const extent=extents[i];
                 int const n=std::clamp(int(std::ceil(extent*grid.invH)),1,4);
                 for(int a=0;a<=n;++a) for(int b=0;a+b<=n;++b) {
                     GfVec3f const on=tri.a+e1*(float(a)/float(n))+e2*(float(b)/float(n));
@@ -1085,7 +1096,7 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
     if(params.scalpShadow && scalpShadow && !triangles.empty()) {
         TRACE_SCOPE("usdGen occlusion: scalp shadow");
         sweep();   // hair only: the head shadowing itself is the skin shader's job
-        BuildScalpShadow(triangles, vertexNormals, inward, grid,
+        BuildScalpShadow(triangles, vertexNormals, extents, inward, grid,
                          params.scalpMaxTriangles, gather, dispatcher,
                          scalpShadow, params.scalpScratch);
     }
@@ -1126,8 +1137,7 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
                 GfVec3f const e1=tri.b-tri.a, e2=tri.c-tri.a;
                 // Barycentric lattice fine enough that adjacent samples'
                 // trilinear stencils overlap, so the shell has no pinholes.
-                float const extent=std::max({e1.GetLength(),e2.GetLength(),
-                                             (tri.c-tri.b).GetLength()});
+                float const extent=extents[ti];
                 int const n=std::clamp(int(std::ceil(1.5f*extent*grid.invH)),1,512);
                 GfVec3f const step=tri.normal*(inward*h);
                 for(int i=0;i<=n;++i) for(int j=0;i+j<=n;++j) {
