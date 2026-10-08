@@ -2296,10 +2296,31 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
     bool const reuseSt = rp &&
         rp->st.size() == expectCurves;
 
-    pub.points.reserve(tv.totalLiveCvs);
+    // Exact emission bound, walked locally: the tile view's counts cannot
+    // size the raw stores below. Interleave fills graph tile views in
+    // place AFTER the sweep streams them, so a streamed tile view carries
+    // zero counts (reserve(0) leaves data() null and the first store
+    // segfaults), and an untouched tile keeps stale counts from an older
+    // cook. The walk mirrors the emission loop's len rule exactly (same
+    // branches, minus the px-size break which only emits fewer), so the
+    // emitted CVs never exceed emitCap; uniform chunks cost O(1) each.
+    size_t emitCap = 0;
+    for (uint32_t i = 0; i < tv.chunkCount; ++i) {
+        UsdGenChunkDesc const& cd = tn.chunks[tv.firstChunk + i];
+        if (cd.cvCount != 0) {
+            emitCap += uint64_t(cd.liveCount) * cd.cvCount;
+        } else {
+            for (uint32_t c = 0; c < cd.liveCount; ++c) {
+                size_t const g = size_t(cd.firstCurve) + c;
+                if (g + 1 >= term.cvOffsets.size()) break;
+                emitCap += size_t(term.cvOffsets[g + 1]) - size_t(term.cvOffsets[g]);
+            }
+        }
+    }
+    pub.points.reserve(emitCap);
     if (!reuseCounts) pub.curveVertexCounts.reserve(tv.totalLiveCurves);
-    if (!reuseWidths) pub.widths.reserve(tv.totalLiveCvs);
-    if (!reuseHairT) pub.hairT.reserve(tv.totalLiveCvs);
+    if (!reuseWidths) pub.widths.reserve(emitCap);
+    if (!reuseHairT) pub.hairT.reserve(emitCap);
     if (!reuseHairId) pub.hairId.reserve(tv.totalLiveCurves);
     // Raw-pointer emission (cf. the k==1 cap path): the per-CV push_backs'
     // capacity checks and size stores cost more than the ~7 stores they
@@ -2565,10 +2586,10 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
                     _GatherPlaneElement(*extra.source, g, &extra.output);
         }
     }
-    // Publish the raw-pointer emission above: capacity was reserved up
-    // front and uniquely owned throughout, so these only set sizes over
-    // the already-written elements (nEmit <= totalLiveCvs: every CV emits
-    // at most once, and the ragged break only emits fewer).
+    // Publish the raw-pointer emission above: emitCap was walked from
+    // the same len rule the loop uses (minus the px-size break, which
+    // only emits fewer), so nEmit <= emitCap always; the resizes only set
+    // sizes over the already-written elements.
     {
         auto noInit = [](auto* b, auto* e) { (void)b; (void)e; };
         pub.points.resize(nEmit, noInit);
