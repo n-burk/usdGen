@@ -202,6 +202,73 @@ struct ScalpDepthGather {
     }
 };
 
+/// Incremental 4-lane word feed: digest.h's UsdGenDigestBytes over bytes
+/// that arrive in pieces (a merged slab concatenated from chunk outputs).
+/// Words group from the slab's first byte exactly as the contiguous call
+/// groups them (a partial word carries into the next piece), lanes assign
+/// from the running word count, and the trailing bytes feed lane-rotated as
+/// the contiguous call's tail does, so one FeedCopy per piece plus Finish
+/// equals UsdGenDigestBytes over the concatenated slab, bit for bit.
+struct _SlabHash {
+    uint64_t h[4];
+    uint64_t nWords = 0;
+    unsigned char carry[8];
+    size_t nCarry = 0;
+    explicit _SlabHash(uint64_t seed) {
+        h[0] = seed;
+        h[1] = seed ^ 0x9E3779B97F4A7C15ull;
+        h[2] = seed ^ 0xBF58476D1CE4E5B9ull;
+        h[3] = seed ^ 0x94D049BB133111EBull;
+    }
+    // Copy n bytes while feeding them (dst null skips the copy: a carried
+    // array hashes from its chunks without touching the shared merged array).
+    void FeedCopy(unsigned char* dst, unsigned char const* src, size_t n) {
+        size_t i = 0;
+        if (nCarry) {
+            while (nCarry < 8 && i < n) {
+                unsigned char const v = src[i];
+                if (dst) dst[i] = v;
+                carry[nCarry++] = v;
+                ++i;
+            }
+            if (nCarry == 8) {
+                uint64_t w;
+                std::memcpy(&w, carry, 8);
+                h[nWords & 3] ^= w;
+                h[nWords & 3] *= UsdGenDigestPrime;
+                ++nWords;
+                nCarry = 0;
+            } else return;
+        }
+        for (; i + 8 <= n; i += 8) {
+            uint64_t w;
+            std::memcpy(&w, src + i, 8);
+            if (dst) std::memcpy(dst + i, &w, 8);
+            h[nWords & 3] ^= w;
+            h[nWords & 3] *= UsdGenDigestPrime;
+            ++nWords;
+        }
+        // Fewer than 8 bytes remain and the carry is empty (the head
+        // flushed a whole word or returned), so the nCarry < 8 bound never
+        // binds: every remaining byte lands in the carry.
+        for (; i < n && nCarry < 8; ++i) {
+            unsigned char const v = src[i];
+            if (dst) dst[i] = v;
+            carry[nCarry++] = v;
+        }
+    }
+    uint64_t Finish() {
+        size_t lane = size_t(nWords & 3);
+        for (size_t i = 0; i < nCarry; ++i) {
+            h[lane] ^= uint64_t(carry[i]);
+            h[lane] *= UsdGenDigestPrime;
+            lane = (lane + 1) & 3;
+        }
+        nCarry = 0;
+        return UsdGenDigestCombine4(h[0], h[1], h[2], h[3]);
+    }
+};
+
 /// The scalp-shadow cap. Each occluder triangle is refined k x k, every
 /// sub-vertex takes the hair-only depth one voxel out along the surface normal
 /// (far enough that the opaque shell two voxels IN cannot reach it), and
@@ -484,6 +551,13 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
     VtVec3fArray points, normals;
     VtFloatArray tauP, tauN;
     VtIntArray counts, indices;
+    // The digest hashes five merged arrays in 16 fixed slabs each; four of
+    // those slabs fill during the merge below (fused copy+hash), the index
+    // slabs fill in the digest scope. The slab count is a constant, never
+    // the worker count, so the same bytes hash identically under any
+    // dispatcher or none.
+    constexpr size_t kSlabsPerArray = 16;
+    std::vector<uint64_t> sub(5*kSlabsPerArray);
     { TRACE_SCOPE("usdGen scalp: merge");
         size_t nPoints=0, nTau=0, nCounts=0, nIndices=0;
         for(ChunkOut const& c:chunks) {
@@ -505,11 +579,11 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
         bool const carryPoints = occSame && lift == prevLift &&
             nPoints == prevPoints.size();
         // Every element of every merged array is overwritten below --
-        // points/normals/tauP/tauN/counts by the tiled chunk memcpys, indices
-        // by the rebase loop -- so value-filling ~320MB first is pure waste.
-        // The no-op fill leaves the storage uninitialized (all six element
-        // types are trivially copyable/destructible); the merged bytes are
-        // bit-identical.
+        // points/normals/tauP/tauN by the fused slab loop, counts by chunk
+        // memcpys, indices by the rebase loop -- so value-filling ~320MB
+        // first is pure waste. The no-op fill leaves the storage
+        // uninitialized (all six element types are trivially
+        // copyable/destructible); the merged bytes are bit-identical.
         auto noInit = [](auto* b, auto* e) { (void)b; (void)e; };
         if (carryPoints) points = prevPoints;
         else points.resize(nPoints, noInit);
@@ -518,48 +592,118 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
         tauP.resize(nTau, noInit); tauN.resize(nTau, noInit);
         if (carryTopo) { counts = prevCounts; indices = prevIndices; }
         else { counts.resize(nCounts, noInit); indices.resize(nIndices, noInit); }
-        // Prefix offsets are serial and cheap; the copies then run per chunk
-        // over the pool. Each chunk writes disjoint ranges with the same
-        // bytes, indices, and rebase arithmetic: bit-identical.
+        // Prefix offsets are serial and cheap; the copies then run over the
+        // pool. Each worker writes disjoint ranges with the same bytes,
+        // indices, and rebase arithmetic: bit-identical.
         size_t const nMerge=chunks.size();
-        std::vector<size_t> mergePoints(nMerge), mergeTau(nMerge),
+        std::vector<size_t> mergePoints(nMerge),
             mergeCounts(nMerge), mergeIndices(nMerge);
-        { size_t oP=0, oT=0, oC=0, oI=0;
+        { size_t oP=0, oC=0, oI=0;
           for(size_t i=0;i<nMerge;++i) {
-              mergePoints[i]=oP; mergeTau[i]=oT;
+              mergePoints[i]=oP;
               mergeCounts[i]=oC; mergeIndices[i]=oI;
-              oP+=chunks[i].points.size(); oT+=chunks[i].tauP.size();
+              oP+=chunks[i].points.size();
               oC+=chunks[i].counts.size(); oI+=chunks[i].indices.size();
           } }
-        GfVec3f* const mergePts=carryPoints ? nullptr : points.data();
-        GfVec3f* const mergeNrm=carryNormals ? nullptr : normals.data();
-        float* const mergeTauP=tauP.data(), * const mergeTauN=tauN.data();
+        // Points, normals, and both depth planes copy from the chunk
+        // outputs AND hash into the digest's slabs in one pass over the
+        // chunk bytes: the digest's ~290MB re-read of the merged arrays
+        // becomes a few ALU ops per loaded word, hidden under the copy's
+        // own DRAM stalls. Slab boundaries, seeds, and the final
+        // combination are exactly the digest's, so the digest value is
+        // unchanged. Carried arrays skip the copy (their merged array is
+        // the shared previous one; writing it would detach the CoW) but
+        // still hash from their chunks, whose bytes are the bytes the
+        // carried merge shares: same lit set, same lift, same chunking.
+        // Counts are not hashed and stay on chunk memcpys; indices keep
+        // the rebase loop plus a hash from the merged array, because a
+        // slab cut can split one index's four bytes across two slabs.
+        struct FusedPiece { size_t chunk, src, n; };  // byte offsets
+        struct FusedSlab {
+            int array; size_t sub; uint64_t seed; size_t dst;
+            std::vector<FusedPiece> pieces;
+        };
+        unsigned char* const fusedDst[4] = {
+            carryPoints ? nullptr : (unsigned char*)points.data(),
+            carryNormals ? nullptr : (unsigned char*)normals.data(),
+            (unsigned char*)tauP.data(), (unsigned char*)tauN.data() };
+        size_t const fusedTotal[4] = {
+            nPoints*sizeof(GfVec3f), nPoints*sizeof(GfVec3f),
+            nTau*sizeof(float), nTau*sizeof(float) };
+        size_t const fusedWhole[4] = { 0, 1, 3, 4 };  // digest ordinals
+        auto chunkSpan = [&](size_t i, int which,
+                             unsigned char const** b, size_t* n) {
+            ChunkOut const& c = chunks[i];
+            if (which == 0) {
+                *b = (unsigned char const*)c.points.cdata();
+                *n = c.points.size()*sizeof(GfVec3f);
+            } else if (which == 1) {
+                *b = (unsigned char const*)c.normals.cdata();
+                *n = c.normals.size()*sizeof(GfVec3f);
+            } else if (which == 2) {
+                *b = (unsigned char const*)c.tauP.cdata();
+                *n = c.tauP.size()*sizeof(float);
+            } else {
+                *b = (unsigned char const*)c.tauN.cdata();
+                *n = c.tauN.size()*sizeof(float);
+            }
+            if (*n == 0) *b = nullptr;
+        };
+        std::vector<std::vector<unsigned char const*>> fusedBytes(
+            4, std::vector<unsigned char const*>(nMerge, nullptr));
+        std::vector<FusedSlab> fusedSlabs;
+        fusedSlabs.reserve(4*kSlabsPerArray);
+        for (int w = 0; w < 4; ++w) {
+            std::vector<size_t> pre(nMerge+1, 0);
+            for (size_t i = 0; i < nMerge; ++i) {
+                unsigned char const* b; size_t n;
+                chunkSpan(i, w, &b, &n);
+                fusedBytes[w][i] = b;
+                pre[i+1] = pre[i] + n;
+            }
+            for (size_t s = 0; s < kSlabsPerArray; ++s) {
+                size_t const a = (s*fusedTotal[w])/kSlabsPerArray;
+                size_t const b = ((s+1)*fusedTotal[w])/kSlabsPerArray;
+                FusedSlab slab;
+                slab.array = w;
+                slab.sub = fusedWhole[w]*kSlabsPerArray + s;
+                slab.seed = UsdGenDigestOffset ^
+                    (uint64_t(slab.sub)*0x9E3779B97F4A7C15ull);
+                slab.dst = a;
+                for (size_t i = 0; i < nMerge && pre[i] < b; ++i) {
+                    size_t const lo = std::max(a, pre[i]);
+                    size_t const hi = std::min(b, pre[i+1]);
+                    if (hi > lo)
+                        slab.pieces.push_back({i, lo-pre[i], hi-lo});
+                }
+                fusedSlabs.push_back(std::move(slab));
+            }
+        }
+        ForEach(dispatcher, fusedSlabs.size(), [&](size_t u) {
+            FusedSlab const& s = fusedSlabs[u];
+            unsigned char* const dstBase = fusedDst[s.array];
+            unsigned char* dst = dstBase ? dstBase + s.dst : nullptr;
+            _SlabHash h(s.seed);
+            for (FusedPiece const& p : s.pieces) {
+                unsigned char const* const src =
+                    fusedBytes[s.array][p.chunk] + p.src;
+                h.FeedCopy(dst, src, p.n);
+                if (dst) dst += p.n;
+            }
+            sub[s.sub] = h.Finish();
+        });
         int* const mergeCnt=carryTopo ? nullptr : counts.data();
         int* const mergeIdx=carryTopo ? nullptr : indices.data();
         ForEach(dispatcher, nMerge, [&](size_t i) {
             ChunkOut& c=chunks[i];
-            size_t const oPoints=mergePoints[i], oTau=mergeTau[i];
-            size_t const oCounts=mergeCounts[i], oIndices=mergeIndices[i];
-            if(!carryPoints && !c.points.empty())
-                std::memcpy(mergePts+oPoints,c.points.cdata(),
-                            c.points.size()*sizeof(GfVec3f));
-            if(!carryNormals && !c.normals.empty())
-                std::memcpy(mergeNrm+oPoints,c.normals.cdata(),
-                            c.normals.size()*sizeof(GfVec3f));
-            if(!c.tauP.empty()) {
-                std::memcpy(mergeTauP+oTau,c.tauP.cdata(),
-                            c.tauP.size()*sizeof(float));
-                std::memcpy(mergeTauN+oTau,c.tauN.cdata(),
-                            c.tauN.size()*sizeof(float));
-            }
-            if(!carryTopo) {
-                if(!c.counts.empty())
-                    std::memcpy(mergeCnt+oCounts,c.counts.cdata(),
-                                c.counts.size()*sizeof(int));
-                int const base=int(oPoints);
-                for(size_t j=0;j<c.indices.size();++j)
-                    mergeIdx[oIndices+j]=c.indices[j]+base;
-            }
+            if (carryTopo) return;
+            if(!c.counts.empty())
+                std::memcpy(mergeCnt+mergeCounts[i],c.counts.cdata(),
+                            c.counts.size()*sizeof(int));
+            int const base=int(mergePoints[i]);
+            size_t const o=mergeIndices[i];
+            for(size_t j=0;j<c.indices.size();++j)
+                mergeIdx[o+j]=c.indices[j]+base;
         });
         // Without scratch the chunk outputs are freed here, before the
         // extent and digest, as historically; with scratch they persist for
@@ -609,41 +753,35 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
         }
     }
     // The cap digest is presentation identity (the scene index dirties the
-    // prim on it alone). The merged cap is hundreds of megabytes and the
-    // serial 4-lane hash costs ~10ms on the cook thread, so the five arrays
-    // are hashed in fixed slabs over the pool instead, combined in slab
-    // order with the same shared mixer. The slab count is a constant, never
-    // the worker count, so the same bytes hash identically under any
-    // dispatcher or none; every input byte still flips its slab's lanes, so
-    // sensitivity is kept. Values change; the digest is in-memory
-    // equality-only (stability/sensitivity tested, never golden).
+    // prim on it alone). Points, normals, and both depth planes hashed
+    // during the merge above, in the same slabs with the same seeds; only
+    // the rebased indices hash here, from the merged array exactly as
+    // before. Every input byte still flips its slab's lanes, so
+    // sensitivity is kept, and the value is unchanged. The digest is
+    // in-memory equality-only (stability/sensitivity tested, never golden).
     uint64_t digest = UsdGenDigestOffset;
     { TRACE_SCOPE("usdGen scalp: digest");
     struct Span { void const* data; size_t bytes; };
-    Span const whole[5] = {
-        {points.cdata(), points.size()*sizeof(GfVec3f)},
-        {normals.cdata(), normals.size()*sizeof(GfVec3f)},
+    Span const whole[1] = {
         {indices.cdata(), indices.size()*sizeof(int)},
-        {tauP.cdata(), tauP.size()*sizeof(float)},
-        {tauN.cdata(), tauN.size()*sizeof(float)},
     };
-    constexpr size_t kSlabsPerArray = 16;
     struct Slab { void const* data; size_t bytes; uint64_t seed; };
     std::vector<Slab> slabs;
-    slabs.reserve(5*kSlabsPerArray);
+    slabs.reserve(kSlabsPerArray);
     for (Span const& a : whole) {
         for (size_t s = 0; s < kSlabsPerArray; ++s) {
             size_t const first = (s*a.bytes)/kSlabsPerArray;
             size_t const last = ((s+1)*a.bytes)/kSlabsPerArray;
             auto const* bytes = static_cast<unsigned char const*>(a.data);
+            size_t const ordinal = 2*kSlabsPerArray + slabs.size();
             slabs.push_back({bytes ? bytes+first : nullptr, last-first,
                 UsdGenDigestOffset ^
-                    (uint64_t(slabs.size())*0x9E3779B97F4A7C15ull)});
+                    (uint64_t(ordinal)*0x9E3779B97F4A7C15ull)});
         }
     }
-    std::vector<uint64_t> sub(slabs.size());
     ForEach(dispatcher, slabs.size(), [&](size_t i) {
-        sub[i] = UsdGenDigestBytes(slabs[i].data, slabs[i].bytes, slabs[i].seed);
+        sub[2*kSlabsPerArray+i] =
+            UsdGenDigestBytes(slabs[i].data, slabs[i].bytes, slabs[i].seed);
     });
     digest = UsdGenDigestBytes(sub.data(), sub.size()*sizeof(uint64_t),
                                UsdGenDigestOffset);

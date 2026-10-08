@@ -883,6 +883,18 @@ int main() try {
             for(size_t i=0;i<g.size();++i) Require(g[i]==w[i],"plane bits");
         }
         Require(sa.digest==sb.digest,"cap digest");
+        // The fused merge hashes each digest slab from its chunk pieces, so
+        // slab bytes routinely span piece (and word) boundaries; a third
+        // dispatcher width re-chunks every slab boundary and must hash the
+        // same digest over the same merged bytes.
+        UsdGenScheduler schedW(7);
+        UsdGenWorkDispatcher dispW=schedW.MakeWorkDispatcher();
+        std::vector<UsdGenTilePublication> e{HairShell(0,200,777u)};
+        UsdGenScalpShadowPublication se;
+        Require(bake(&dispW,&e,&se),"wide parallel bake");
+        Require(se.digest==sa.digest,"cap digest across dispatcher widths");
+        Require(se.faceVertexCounts==sa.faceVertexCounts,"wide cap counts");
+        Require(se.points.size()==sa.points.size(),"wide cap points");
         Require(sa.points.size()==sb.points.size(),"cap points");
         for(size_t i=0;i<sa.points.size();++i) {
             Require(sa.points[i]==sb.points[i],"cap point bits");
