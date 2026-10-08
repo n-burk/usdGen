@@ -1,6 +1,7 @@
 #include "usdGen/furOcclusion.h"
 
 #include "usdGen/debugCodes.h"
+#include "usdGen/digest.h"
 #include "usdGen/scheduler.h"
 
 #include "pxr/base/gf/matrix4f.h"
@@ -303,13 +304,18 @@ void BuildScalpShadow(std::vector<Triangle> const& triangles,
         }
         out->extentMin=GfVec3d(lo); out->extentMax=GfVec3d(hi);
     }
-    Hash hash;
-    hash.Bytes(points.cdata(),points.size()*sizeof(GfVec3f));
-    hash.Bytes(normals.cdata(),normals.size()*sizeof(GfVec3f));
-    hash.Bytes(indices.cdata(),indices.size()*sizeof(int));
-    hash.Bytes(tauP.cdata(),tauP.size()*sizeof(float));
-    hash.Bytes(tauN.cdata(),tauN.size()*sizeof(float));
-    out->digest=hash.h;
+    // The cap digest is presentation identity (the scene index dirties the
+    // prim on it alone): same coverage and feed order as the byte-at-a-time
+    // FNV-1a it replaces, hashed with the shared 4-lane word mixer whose
+    // contract names cook digests explicitly. Values change; the digest is
+    // in-memory equality-only (stability/sensitivity tested, never golden).
+    uint64_t digest = UsdGenDigestOffset;
+    digest = UsdGenDigestBytes(points.cdata(),points.size()*sizeof(GfVec3f),digest);
+    digest = UsdGenDigestBytes(normals.cdata(),normals.size()*sizeof(GfVec3f),digest);
+    digest = UsdGenDigestBytes(indices.cdata(),indices.size()*sizeof(int),digest);
+    digest = UsdGenDigestBytes(tauP.cdata(),tauP.size()*sizeof(float),digest);
+    digest = UsdGenDigestBytes(tauN.cdata(),tauN.size()*sizeof(float),digest);
+    out->digest=digest;
     TF_DEBUG(USDGEN_FUR).Msg(
         "usdGen fur: scalp shadow %d x refinement, %zu points, %zu triangles\n",
         k, points.size(), counts.size());
