@@ -612,9 +612,13 @@ UsdGenDevicePresentationMetadata _BuildDevicePresentation(
 void _GatherPlane(const UsdGenPlane &plane, uint32_t curveIdx, uint32_t cvIdx,
                   bool wantUniform, VtFloatArray *outF)
 {
-    if (plane.type == TfToken("int") || plane.arity == 0) return;
+    // Every TfToken(const char*) construction takes the registry lock; these
+    // spellings are built once for the process, not once per gathered CV.
+    static TfToken const intType("int");
+    static TfToken const vertexInterp("vertex");
+    if (plane.type == intType || plane.arity == 0) return;
     const size_t idx =
-        (wantUniform && plane.interpolation != TfToken("vertex"))
+        (wantUniform && plane.interpolation != vertexInterp)
             ? curveIdx : cvIdx;
     if ((idx + 1) * plane.arity > plane.f.size()) return;
     for (uint8_t k = 0; k < plane.arity; ++k)
@@ -624,15 +628,17 @@ void _GatherPlane(const UsdGenPlane &plane, uint32_t curveIdx, uint32_t cvIdx,
 bool _GatherPlaneElement(UsdGenPlane const& plane, size_t index,
                          UsdGenPlane* out)
 {
+    static TfToken const intType("int");
+    static TfToken const floatType("float");
     if (!out || plane.arity == 0) return false;
     size_t const begin = index * plane.arity;
-    if (plane.type == TfToken("int")) {
+    if (plane.type == intType) {
         if (begin + plane.arity > plane.i.size()) return false;
         for (uint8_t component = 0; component != plane.arity; ++component)
             out->i.push_back(plane.i[begin + component]);
         return true;
     }
-    if (plane.type != TfToken("float") || begin + plane.arity > plane.f.size())
+    if (plane.type != floatType || begin + plane.arity > plane.f.size())
         return false;
     for (uint8_t component = 0; component != plane.arity; ++component)
         out->f.push_back(plane.f[begin + component]);
@@ -2129,10 +2135,24 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
     pub.hairT.reserve(tv.totalLiveCvs);
     pub.hairId.reserve(tv.totalLiveCurves);
 
-    UsdGenPlane const *displayColor = _FindPlane(term.extraCurve, TfToken("displayColor"));
+    // Loop-invariant token spellings: every TfToken(const char*)
+    // construction takes the registry lock, so the per-curve/per-CV loop
+    // below must never build one (1M curves x lock = tens of ms).
+    static TfToken const displayColorName("displayColor");
+    static TfToken const constantInterp("constant");
+    static TfToken const uniformInterp("uniform");
+    static TfToken const vertexInterp("vertex");
+    static TfToken const intType("int");
+    static TfToken const floatType("float");
+    static TfToken const noBake("none");
+    UsdGenPlane const *displayColor = _FindPlane(term.extraCurve, displayColorName);
     struct ExtraPlanePublication {
         UsdGenPlane const* source = nullptr;
         UsdGenPlane output;
+        // Resolved once at setup: the gather loops below test these, never
+        // the spelling, so a many-extras tile pays no token compare per CV.
+        bool isVertex = false;
+        bool isUniform = false;
     };
     std::vector<ExtraPlanePublication> extraPlanes;
     // The forwarded source colour is consumed into the tile's displayColor
@@ -2143,14 +2163,14 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
     if (!sourceColor) sourceColor = _FindPlane(term.extraCv,
                                                UsdGenSourceColorPlane());
     auto addExtraPlane = [&](UsdGenPlane const& plane, TfToken expectedInterpolation) {
-        if (plane.name == TfToken("displayColor") ||
+        if (plane.name == displayColorName ||
             plane.name == UsdGenSourceColorPlane()) return;
-        size_t const elements = expectedInterpolation == TfToken("constant") ? 1 :
-            expectedInterpolation == TfToken("vertex") ? term.totalCvs : term.totalCurves;
+        size_t const elements = expectedInterpolation == constantInterp ? 1 :
+            expectedInterpolation == vertexInterp ? term.totalCvs : term.totalCurves;
         size_t const values = elements * plane.arity;
-        bool const validPayload = plane.type == TfToken("int")
+        bool const validPayload = plane.type == intType
             ? plane.i.size() == values && plane.f.empty()
-            : plane.type == TfToken("float") && plane.f.size() == values && plane.i.empty();
+            : plane.type == floatType && plane.f.size() == values && plane.i.empty();
         if (plane.name.IsEmpty() || plane.arity == 0 ||
             plane.arity > kUsdGenMaxExtraPlaneSlots ||
             plane.interpolation != expectedInterpolation || !validPayload)
@@ -2167,21 +2187,23 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
         entry.output.interpolation = plane.interpolation;
         entry.output.type = plane.type;
         entry.output.arity = plane.arity;
-        if (plane.interpolation == TfToken("constant"))
+        entry.isVertex = plane.interpolation == vertexInterp;
+        entry.isUniform = plane.interpolation == uniformInterp;
+        if (plane.interpolation == constantInterp)
             _GatherPlaneElement(plane, 0, &entry.output);
         extraPlanes.push_back(std::move(entry));
     };
     for (UsdGenPlane const &p : term.extraCurve) {
-        if (p.interpolation == TfToken("constant"))
-            addExtraPlane(p, TfToken("constant"));
-        else if (p.interpolation == TfToken("uniform"))
-            addExtraPlane(p, TfToken("uniform"));
-        else if (p.name != TfToken("displayColor"))
+        if (p.interpolation == constantInterp)
+            addExtraPlane(p, constantInterp);
+        else if (p.interpolation == uniformInterp)
+            addExtraPlane(p, uniformInterp);
+        else if (p.name != displayColorName)
             throw std::runtime_error("invalid per-curve extra-plane interpolation for '" +
                                      p.name.GetString() + "'");
     }
     for (UsdGenPlane const& p : term.extraCv)
-        addExtraPlane(p, TfToken("vertex"));
+        addExtraPlane(p, vertexInterp);
 
     // Precedence (02 §2.14): an AUTHORED look on the description wins;
     // otherwise the source curves' own displayColor, which is what a
@@ -2218,13 +2240,14 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
             return;
         UsdGenPlane plane;
         plane.name = TfToken(name);
-        plane.interpolation = TfToken("constant");
-        plane.type = TfToken("float");
+        plane.interpolation = constantInterp;
+        plane.type = floatType;
         plane.arity = static_cast<decltype(plane.arity)>(v.size());
         plane.f.assign(v.begin(), v.end());
         ExtraPlanePublication entry;
         entry.source = nullptr;   // synthesized; the uniform gather never runs
         entry.output = std::move(plane);
+        // Constant interpolation: both gathers stay off (bools default false).
         extraPlanes.push_back(std::move(entry));
     };
     if (authoredLook) {
@@ -2282,7 +2305,7 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
                 pub.widths.push_back(w);
                 pub.hairT.push_back(p < term.hairT.size() ? term.hairT[p] : 0.0f);
                 for (auto& extra : extraPlanes)
-                    if (extra.output.interpolation == TfToken("vertex"))
+                    if (extra.isVertex)
                         _GatherPlaneElement(*extra.source, p, &extra.output);
             }
             // hairId: UsdGenHash32(curveId, 0) / 2^32 in [0,1) (06, S29).
@@ -2302,7 +2325,7 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
                 }
             } else if (displayColor)
                 _GatherColor(*displayColor, g, p0, &pub.displayColor);
-            else if (_desc.look.bakeTarget != TfToken("none")) {
+            else if (_desc.look.bakeTarget != noBake) {
                 // `authoredLook` above carries the 02 §2.14 precedence rule.
                 if (!authoredLook && sourceColor)
                     _GatherColor(*sourceColor, g, p0, &pub.displayColor);
@@ -2310,7 +2333,7 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
                     pub.displayColor.push_back(_desc.look.rootColor);
             }
             for (auto& extra : extraPlanes)
-                if (extra.output.interpolation == TfToken("uniform"))
+                if (extra.isUniform)
                     _GatherPlaneElement(*extra.source, g, &extra.output);
         }
     }
@@ -2347,8 +2370,9 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
     if (_previewColors.active) {
         // The look's shader blends toward the tip colour; the preview shows
         // exactly the published displayColor, over any authored material.
+        static TfToken const allPurpose("allPurpose");
         pub.materialPath = UsdGenPreviewMaterialPath(_desc.description, _desc.preview.shading);
-        pub.materialPurpose = TfToken("allPurpose");
+        pub.materialPurpose = allPurpose;
     }
     pub.refineLevel = scalars.refineLevel;
     pub.primOrigin = scalars.primOrigin;
