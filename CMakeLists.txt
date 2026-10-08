@@ -2925,7 +2925,7 @@ foreach(_t testUsdGenTileContract testUsdGenStockStormContract testUsdGenInvalid
            testUsdGenSnapshotRace testUsdGenPopulation testUsdGenAdapter testUsdGenScenePublication
            testUsdGenRestAdapter testUsdGenCurveRestAdapter testUsdGenContracts
            testUsdGenExpressionPrimConnection testUsdGenViewportOverlay testUsdGenFurOcclusion
-           testUsdGenSourceColor testUsdGenLookPrimvars
+           testUsdGenSourceColor testUsdGenLookPrimvars testUsdGenTileReuse
            testUsdGenInstance testUsdGenReferenceSource testUsdGenPaintLengthRecook
            testUsdGenDormantGroom testUsdGenTauPrimvars)
     add_executable(${_t} tests/${_t}.cpp)
@@ -2941,6 +2941,7 @@ set_tests_properties(testUsdGenFurOcclusion PROPERTIES LABELS "T1;fur;shadows")
 set_tests_properties(testUsdGenSourceColor PROPERTIES LABELS "T1;look;sources")
 set_tests_properties(testUsdGenReferenceSource PROPERTIES LABELS "T1;sources;reference")
 set_tests_properties(testUsdGenLookPrimvars PROPERTIES LABELS "T1;look;primvars")
+set_tests_properties(testUsdGenTileReuse PROPERTIES LABELS "T1;scheduling;tiles")
 set_tests_properties(testUsdGenPaintLengthRecook PROPERTIES
     LABELS "T1;imaging;paint;brush" TIMEOUT 120)
 set_tests_properties(testUsdGenScenePublication PROPERTIES

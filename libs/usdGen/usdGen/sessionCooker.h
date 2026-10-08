@@ -216,8 +216,18 @@ private:
     // become the publication baseline, its state must not suppress a later
     // cook relative to that baseline.
     uint64_t _lastCookedEpoch = 0;
+    // Per-array tile reuse: when every node that ran this cook is a
+    // points-only deform and the partition did not move, each rebuilt tile
+    // carries its previous non-point arrays (widths, hairT, counts, extra
+    // planes) instead of re-gathering them, and its displayColor too when
+    // the color inputs are unchanged. Points are always re-gathered.
+    struct TileReuse {
+        UsdGenTilePublication const* prevTile = nullptr;
+        bool arraysStable = false;
+        bool colorsStable = false;
+    };
     UsdGenTilePublication _BuildTilePublication(UsdGenTileView const&, UsdGenRunResult const&,
-                                                UsdGenGenerationConstPtr const&);
+                                                UsdGenGenerationConstPtr const&, TileReuse);
     // Step-6 tile-build fan-out: the worker pool takes a plain function
     // pointer, so the per-tile work travels in this payload. Each body call
     // builds exactly one tile publication from the immutable run result; the
@@ -228,6 +238,7 @@ private:
         UsdGenGenerationConstPtr const* prev = nullptr;
         size_t const* tileIndex = nullptr;      // result->tiles subscript per slot
         UsdGenTilePublication* built = nullptr; // one slot per ParallelFor index
+        TileReuse const* reuse = nullptr;       // one entry per result tile
     };
     static void _BuildTileWork(size_t slot, void* payload);
 };
