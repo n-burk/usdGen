@@ -448,17 +448,44 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
         }
     }
     // The cap digest is presentation identity (the scene index dirties the
-    // prim on it alone): same coverage and feed order as the byte-at-a-time
-    // FNV-1a it replaces, hashed with the shared 4-lane word mixer whose
-    // contract names cook digests explicitly. Values change; the digest is
-    // in-memory equality-only (stability/sensitivity tested, never golden).
+    // prim on it alone). The merged cap is hundreds of megabytes and the
+    // serial 4-lane hash costs ~10ms on the cook thread, so the five arrays
+    // are hashed in fixed slabs over the pool instead, combined in slab
+    // order with the same shared mixer. The slab count is a constant, never
+    // the worker count, so the same bytes hash identically under any
+    // dispatcher or none; every input byte still flips its slab's lanes, so
+    // sensitivity is kept. Values change; the digest is in-memory
+    // equality-only (stability/sensitivity tested, never golden).
     uint64_t digest = UsdGenDigestOffset;
     { TRACE_SCOPE("usdGen scalp: digest");
-    digest = UsdGenDigestBytes(points.cdata(),points.size()*sizeof(GfVec3f),digest);
-    digest = UsdGenDigestBytes(normals.cdata(),normals.size()*sizeof(GfVec3f),digest);
-    digest = UsdGenDigestBytes(indices.cdata(),indices.size()*sizeof(int),digest);
-    digest = UsdGenDigestBytes(tauP.cdata(),tauP.size()*sizeof(float),digest);
-    digest = UsdGenDigestBytes(tauN.cdata(),tauN.size()*sizeof(float),digest);
+    struct Span { void const* data; size_t bytes; };
+    Span const whole[5] = {
+        {points.cdata(), points.size()*sizeof(GfVec3f)},
+        {normals.cdata(), normals.size()*sizeof(GfVec3f)},
+        {indices.cdata(), indices.size()*sizeof(int)},
+        {tauP.cdata(), tauP.size()*sizeof(float)},
+        {tauN.cdata(), tauN.size()*sizeof(float)},
+    };
+    constexpr size_t kSlabsPerArray = 16;
+    struct Slab { void const* data; size_t bytes; uint64_t seed; };
+    std::vector<Slab> slabs;
+    slabs.reserve(5*kSlabsPerArray);
+    for (Span const& a : whole) {
+        for (size_t s = 0; s < kSlabsPerArray; ++s) {
+            size_t const first = (s*a.bytes)/kSlabsPerArray;
+            size_t const last = ((s+1)*a.bytes)/kSlabsPerArray;
+            auto const* bytes = static_cast<unsigned char const*>(a.data);
+            slabs.push_back({bytes ? bytes+first : nullptr, last-first,
+                UsdGenDigestOffset ^
+                    (uint64_t(slabs.size())*0x9E3779B97F4A7C15ull)});
+        }
+    }
+    std::vector<uint64_t> sub(slabs.size());
+    ForEach(dispatcher, slabs.size(), [&](size_t i) {
+        sub[i] = UsdGenDigestBytes(slabs[i].data, slabs[i].bytes, slabs[i].seed);
+    });
+    digest = UsdGenDigestBytes(sub.data(), sub.size()*sizeof(uint64_t),
+                               UsdGenDigestOffset);
     }
     out->digest=digest;
     TF_DEBUG(USDGEN_FUR).Msg(
