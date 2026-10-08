@@ -767,6 +767,129 @@ const UsdGenPlane *_FindPlane(const std::vector<UsdGenPlane> &planes,
     return nullptr;
 }
 
+// Bulk tile path (bit-identical): when the tile's chunks are all uniform,
+// the terminal planes cover every emitted element, no extra plane needs a
+// per-element gather, and the color mode is a per-tile constant (Root) or
+// empty (NoColor), the serial push_back loop becomes per-chunk bulk copies
+// (points interleave, widths/hairT/st memcpy, counts fill, displayColor
+// assign) plus a branch-free per-curve hairId loop, with the extent
+// reduction fused into the interleave. Coverage is verified up front (any
+// gap returns false with `pub` untouched and the serial loop runs); sizes
+// are proven against the tile view, so every no-init element is
+// overwritten and no garbage is observed. wantColor selects Root (NoColor
+// passes false); every other color mode stays on the serial loop.
+bool _BuildTilePublicationBulk(
+    UsdGenTileView const &tv, UsdGenCurveBuffer const &term,
+    UsdGenCompiledNode const &tn, bool wantColor, GfVec3f const &rootColor,
+    UsdGenTilePublication *pub, uint32_t *depSurface, bool *hasDep)
+{
+    // Pre-scan: uniform chunks, plane coverage, view-size agreement. The
+    // serial loop breaks the CV loop on px overrun and falls back per
+    // element for short width/hairT/curveId/rootUV; any of that needs the
+    // serial loop, so coverage must be total here.
+    uint64_t scanCurves = 0, scanCvs = 0;
+    bool const needWidth = !term.width.empty();
+    bool const needHairT = !term.hairT.empty();
+    bool const needSt = !term.rootUV.empty();
+    for (uint32_t i = 0; i < tv.chunkCount; ++i) {
+        UsdGenChunkDesc const &cd = tn.chunks[tv.firstChunk + i];
+        if (cd.cvCount == 0)
+            return false;
+        uint64_t const n = uint64_t(cd.liveCount) * cd.cvCount;
+        uint64_t const cvEnd = uint64_t(cd.firstCv) + n;
+        if (cvEnd > term.px.size() || cvEnd > term.py.size() ||
+            cvEnd > term.pz.size())
+            return false;
+        if (needWidth && cvEnd > term.width.size())
+            return false;
+        if (needHairT && cvEnd > term.hairT.size())
+            return false;
+        uint64_t const gEnd = uint64_t(cd.firstCurve) + cd.liveCount;
+        if (gEnd > term.curveId.size())
+            return false;
+        if (needSt && gEnd > term.rootUV.size())
+            return false;
+        scanCurves += cd.liveCount;
+        scanCvs += n;
+    }
+    if (scanCurves != tv.totalLiveCurves || scanCvs != tv.totalLiveCvs)
+        return false;
+    size_t const nCurves = tv.totalLiveCurves, nCvs = tv.totalLiveCvs;
+    auto noInit = [](auto *b, auto *e) {
+        (void)b;
+        (void)e;
+    };
+    pub->curveVertexCounts.resize(nCurves, noInit);
+    pub->points.resize(nCvs, noInit);
+    pub->widths.resize(nCvs, noInit);
+    pub->hairT.resize(nCvs, noInit);
+    pub->hairId.resize(nCurves, noInit);
+    if (needSt)
+        pub->st.resize(nCurves, noInit);
+    if (wantColor)
+        pub->displayColor.assign(nCurves, rootColor);
+    int *counts = pub->curveVertexCounts.data();
+    GfVec3f *points = nCvs ? pub->points.data() : nullptr;
+    float *widths = nCvs ? pub->widths.data() : nullptr;
+    float *hairT = nCvs ? pub->hairT.data() : nullptr;
+    float *hairIds = nCurves ? pub->hairId.data() : nullptr;
+    GfVec2f *st = (needSt && nCurves) ? pub->st.data() : nullptr;
+    float const *px = term.px.cdata(), *py = term.py.cdata(),
+                *pz = term.pz.cdata();
+    // Fused extent: same init (SetEmpty) and per-point compares as the
+    // serial GfRange3f pass over the identical emission order, including
+    // the empty-range tail below (NaN points stay ignored, as there).
+    float const inf = std::numeric_limits<float>::max();
+    float minX = inf, minY = inf, minZ = inf;
+    float maxX = -inf, maxY = -inf, maxZ = -inf;
+    size_t curOff = 0, cvOff = 0;
+    for (uint32_t i = 0; i < tv.chunkCount; ++i) {
+        UsdGenChunkDesc const &cd = tn.chunks[tv.firstChunk + i];
+        uint32_t const L = cd.liveCount;
+        if (L == 0)
+            continue;
+        size_t const n = size_t(L) * cd.cvCount;
+        uint32_t const G = cd.firstCurve, P = cd.firstCv;
+        std::fill(counts + curOff, counts + curOff + L, int(cd.cvCount));
+        for (uint32_t c = 0; c < L; ++c)
+            hairIds[curOff + c] = UsdGenHairId(term.curveId[G + c]);
+        if (needSt)
+            std::memcpy(st + curOff, term.rootUV.cdata() + G,
+                        L * sizeof(GfVec2f));
+        if (needWidth)
+            std::memcpy(widths + cvOff, term.width.cdata() + P,
+                        n * sizeof(float));
+        else
+            std::fill(widths + cvOff, widths + cvOff + n, 0.01f);
+        if (needHairT)
+            std::memcpy(hairT + cvOff, term.hairT.cdata() + P,
+                        n * sizeof(float));
+        else
+            std::fill(hairT + cvOff, hairT + cvOff + n, 0.0f);
+        for (size_t k = 0; k < n; ++k) {
+            float const x = px[P + k], y = py[P + k], z = pz[P + k];
+            points[cvOff + k] = GfVec3f(x, y, z);
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+            if (z < minZ) minZ = z;
+            if (z > maxZ) maxZ = z;
+        }
+        curOff += L;
+        cvOff += n;
+    }
+    GfRange3f e(GfVec3f(minX, minY, minZ), GfVec3f(maxX, maxY, maxZ));
+    if (e.IsEmpty()) e = GfRange3f(GfVec3f(0.f), GfVec3f(0.f));
+    pub->extentMin = GfVec3d(e.GetMin()[0], e.GetMin()[1], e.GetMin()[2]);
+    pub->extentMax = GfVec3d(e.GetMax()[0], e.GetMax()[1], e.GetMax()[2]);
+    if (tv.chunkCount != 0) {
+        *depSurface = tn.chunks[tv.firstChunk].surface;
+        *hasDep = true;
+    }
+    return true;
+}
+
 }  // namespace
 
 UsdGenSessionCooker::UsdGenSessionCooker(
@@ -2473,64 +2596,77 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
             extra->output.f.reserve(n);
     }
 
-    for (uint32_t i = 0; i < tv.chunkCount; ++i) {
-        UsdGenChunkDesc const &cd = tn.chunks[tv.firstChunk + i];
-        // id 0 is a legitimate surface (compiler.cpp assigns dense indices
-        // from 0): the first chunk of the tile always establishes the
-        // dependency, never a `!= 0` sentinel.
-        if (firstChunk) { depSurface = cd.surface; hasDep = true; firstChunk = false; }
-        for (uint32_t c = 0; c < cd.liveCount; ++c) {
-            const uint32_t g = cd.firstCurve + c;
-            uint32_t p0 = 0, len = 0;
-            if (cd.cvCount != 0) {
-                len = cd.cvCount;
-                p0 = cd.firstCv + c * cd.cvCount;
-            } else if (g + 1 < term.cvOffsets.size()) {   // ragged chunk
-                p0 = static_cast<uint32_t>(term.cvOffsets[g]);
-                len = static_cast<uint32_t>(term.cvOffsets[g + 1]) - p0;
-            }
-            pub.curveVertexCounts.push_back(static_cast<int>(len));
-            for (uint32_t v = 0; v < len; ++v) {
-                const uint32_t p = p0 + v;
-                if (p >= term.px.size()) break;
-                pub.points.emplace_back(term.px[p], term.py[p], term.pz[p]);
-                // C2 (06 §4.1): widths/hairT are vertex channels on every
-                // tile. A chain whose terminal never wrote them (grow-only:
-                // kPlanePoints|kPlaneHairT) still publishes FULL-SIZE planes
-                // from desc defaults (02 §2.6/§2.14: width 0.01, look bake),
-                // never a wrong-size array — SI-1 sizes every non-empty
-                // vertex plane against points.
-                float w = 0.01f;
-                if (p < term.width.size()) w = term.width[p];
-                else if (!term.width.empty()) w = term.width.back();
-                pub.widths.push_back(w);
-                pub.hairT.push_back(p < term.hairT.size() ? term.hairT[p] : 0.0f);
-                for (ExtraPlanePublication *extra : vertexPlanes)
-                    _GatherPlaneElement(*extra->source, p, &extra->output);
-            }
-            // hairId: UsdGenHash32(curveId, 0) / 2^32 in [0,1) (06, S29).
-            pub.hairId.push_back(g < term.curveId.size()
-                ? UsdGenHairId(term.curveId[g]) : 0.0f);
-            if (!term.rootUV.empty() && g < term.rootUV.size())
-                pub.st.push_back(term.rootUV[g]);
-            if (colorMode == Preview) {
-                std::vector<GfVec3f> const &colors = _previewColors.colors;
-                if (_previewColors.perCv) {
-                    for (uint32_t v = 0; v < len; ++v)
-                        pub.displayColor.push_back(size_t(p0) + v < colors.size()
-                            ? colors[size_t(p0) + v] : UsdGenPreviewMissingColor());
-                } else {
-                    pub.displayColor.push_back(g < colors.size()
-                        ? colors[g] : UsdGenPreviewMissingColor());
+    // Bulk uniform path (bit-identical, see _BuildTilePublicationBulk):
+    // per-chunk bulk copies instead of the push_back loop below, with the
+    // extent fused in. Any uncovered element falls back to the serial loop
+    // (ragged chunks, short planes, per-element color or extra gathers).
+    bool useBulk = vertexPlanes.empty() && uniformPlanes.empty() &&
+        (colorMode == Root || colorMode == NoColor);
+    if (useBulk)
+        useBulk = _BuildTilePublicationBulk(tv, term, tn,
+                                            colorMode == Root,
+                                            _desc.look.rootColor, &pub,
+                                            &depSurface, &hasDep);
+    if (!useBulk) {
+        for (uint32_t i = 0; i < tv.chunkCount; ++i) {
+            UsdGenChunkDesc const &cd = tn.chunks[tv.firstChunk + i];
+            // id 0 is a legitimate surface (compiler.cpp assigns dense indices
+            // from 0): the first chunk of the tile always establishes the
+            // dependency, never a `!= 0` sentinel.
+            if (firstChunk) { depSurface = cd.surface; hasDep = true; firstChunk = false; }
+            for (uint32_t c = 0; c < cd.liveCount; ++c) {
+                const uint32_t g = cd.firstCurve + c;
+                uint32_t p0 = 0, len = 0;
+                if (cd.cvCount != 0) {
+                    len = cd.cvCount;
+                    p0 = cd.firstCv + c * cd.cvCount;
+                } else if (g + 1 < term.cvOffsets.size()) {   // ragged chunk
+                    p0 = static_cast<uint32_t>(term.cvOffsets[g]);
+                    len = static_cast<uint32_t>(term.cvOffsets[g + 1]) - p0;
                 }
-            } else if (colorMode == Plane)
-                _GatherColor(*displayColor, g, p0, &pub.displayColor);
-            else if (colorMode == SourcePlane)
-                _GatherColor(*sourceColor, g, p0, &pub.displayColor);
-            else if (colorMode == Root)
-                pub.displayColor.push_back(_desc.look.rootColor);
-            for (ExtraPlanePublication *extra : uniformPlanes)
-                _GatherPlaneElement(*extra->source, g, &extra->output);
+                pub.curveVertexCounts.push_back(static_cast<int>(len));
+                for (uint32_t v = 0; v < len; ++v) {
+                    const uint32_t p = p0 + v;
+                    if (p >= term.px.size()) break;
+                    pub.points.emplace_back(term.px[p], term.py[p], term.pz[p]);
+                    // C2 (06 §4.1): widths/hairT are vertex channels on every
+                    // tile. A chain whose terminal never wrote them (grow-only:
+                    // kPlanePoints|kPlaneHairT) still publishes FULL-SIZE planes
+                    // from desc defaults (02 §2.6/§2.14: width 0.01, look bake),
+                    // never a wrong-size array — SI-1 sizes every non-empty
+                    // vertex plane against points.
+                    float w = 0.01f;
+                    if (p < term.width.size()) w = term.width[p];
+                    else if (!term.width.empty()) w = term.width.back();
+                    pub.widths.push_back(w);
+                    pub.hairT.push_back(p < term.hairT.size() ? term.hairT[p] : 0.0f);
+                    for (ExtraPlanePublication *extra : vertexPlanes)
+                        _GatherPlaneElement(*extra->source, p, &extra->output);
+                }
+                // hairId: UsdGenHash32(curveId, 0) / 2^32 in [0,1) (06, S29).
+                pub.hairId.push_back(g < term.curveId.size()
+                    ? UsdGenHairId(term.curveId[g]) : 0.0f);
+                if (!term.rootUV.empty() && g < term.rootUV.size())
+                    pub.st.push_back(term.rootUV[g]);
+                if (colorMode == Preview) {
+                    std::vector<GfVec3f> const &colors = _previewColors.colors;
+                    if (_previewColors.perCv) {
+                        for (uint32_t v = 0; v < len; ++v)
+                            pub.displayColor.push_back(size_t(p0) + v < colors.size()
+                                ? colors[size_t(p0) + v] : UsdGenPreviewMissingColor());
+                    } else {
+                        pub.displayColor.push_back(g < colors.size()
+                            ? colors[g] : UsdGenPreviewMissingColor());
+                    }
+                } else if (colorMode == Plane)
+                    _GatherColor(*displayColor, g, p0, &pub.displayColor);
+                else if (colorMode == SourcePlane)
+                    _GatherColor(*sourceColor, g, p0, &pub.displayColor);
+                else if (colorMode == Root)
+                    pub.displayColor.push_back(_desc.look.rootColor);
+                for (ExtraPlanePublication *extra : uniformPlanes)
+                    _GatherPlaneElement(*extra->source, g, &extra->output);
+            }
         }
     }
     for (auto& extra : extraPlanes)
@@ -2540,16 +2676,18 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
                   return left.name < right.name;
               });
 
-    // Extent is a pure function of the published points (03 §6.3: min/max
-    // fused into the interleave loop — but InterleaveTile skips untouched
-    // tiles, so tv.extent is empty on any tile this commit did not evaluate
-    // while its points are real). Reduce over pub.points in memory: same
-    // (g,p0,len) ragged walk already emitted them above, one cheap pass.
-    GfRange3f e;
-    for (GfVec3f const &pt : pub.points) e.ExtendBy(pt);
-    if (e.IsEmpty()) e = GfRange3f(GfVec3f(0.f), GfVec3f(0.f));
-    pub.extentMin = GfVec3d(e.GetMin()[0], e.GetMin()[1], e.GetMin()[2]);
-    pub.extentMax = GfVec3d(e.GetMax()[0], e.GetMax()[1], e.GetMax()[2]);
+        if (!useBulk) {
+        // Extent is a pure function of the published points (03 §6.3: min/max
+        // fused into the interleave loop — but InterleaveTile skips untouched
+        // tiles, so tv.extent is empty on any tile this commit did not evaluate
+        // while its points are real). Reduce over pub.points in memory: same
+        // (g,p0,len) ragged walk already emitted them above, one cheap pass.
+        GfRange3f e;
+        for (GfVec3f const &pt : pub.points) e.ExtendBy(pt);
+        if (e.IsEmpty()) e = GfRange3f(GfVec3f(0.f), GfVec3f(0.f));
+        pub.extentMin = GfVec3d(e.GetMin()[0], e.GetMin()[1], e.GetMin()[2]);
+        pub.extentMax = GfVec3d(e.GetMax()[0], e.GetMax()[1], e.GetMax()[2]);
+    }
 
     SdfPath dependencySurface;
     if (hasDep) {
