@@ -1593,18 +1593,44 @@ bool UsdGenSessionCooker::CommitCacheCandidate(
             deviceIdentity.backend != UsdGenDeviceBackend::Vulkan ||
             deviceIdentity.deviceIndex != identity.deviceIndex) return reject();
     }
+    size_t exactBytes = 0;
+    if (!_GenerationBytes(*candidate.generation, &exactBytes) ||
+        exactBytes != candidate.bytes) return rejectBecause("size changed");
+    // An entry larger than the whole domain budget can never be admitted:
+    // the store refuses without eviction. Prove that first, before the full
+    // key re-hash below re-streams every input array (~50 ms at 1M).
+    bool const settleCoalesced = _coalescedRegistration &&
+        _coalescedRegistration->leader &&
+        _coalescedDomain == _executionCacheDomain &&
+        _coalescedRegistration->key == candidate.key;
+    auto const &targetDomain = settleCoalesced
+        ? _coalescedDomain : _executionCacheDomain;
+    if (!targetDomain) return rejectBecause("store refused");
+    if (targetDomain->MaxBytes() == 0 ||
+        candidate.bytes > targetDomain->MaxBytes()) {
+        // Same terminal state a refused ResolveCoalesced would deliver:
+        // the flight settles Failed, waiters get nullopt, the debug reason
+        // matches the store's own budget message (stale epochs still report
+        // stale, exactly as the resolve path would).
+        std::string budgetReason =
+            "execution cache entry exceeds its byte budget";
+        if (settleCoalesced) {
+            _coalescedDomain->RejectCoalesced(*_coalescedRegistration,
+                UsdGenExecutionCacheDomain::CoalescedStatus::Failed,
+                &budgetReason);
+            _coalescedRegistration.reset();
+            _coalescedDomain.reset();
+            _coalescedRole = CoalescedRole::None;
+        }
+        return rejectBecause(budgetReason.c_str());
+    }
     UsdGenExecutionCacheKey current = _MakeExecutionCacheKey(
         _graph, _desc, context, frame);
     if (current != candidate.key)
         return rejectBecause("the key moved between cook and publication");
-    size_t exactBytes = 0;
-    if (!_GenerationBytes(*candidate.generation, &exactBytes) ||
-        exactBytes != candidate.bytes) return rejectBecause("size changed");
     std::string reason;
     bool admitted = false;
-    if (_coalescedRegistration && _coalescedRegistration->leader &&
-        _coalescedDomain == _executionCacheDomain &&
-        _coalescedRegistration->key == candidate.key) {
+    if (settleCoalesced) {
         admitted = _coalescedDomain->ResolveCoalesced(
             *_coalescedRegistration, candidate.generation, candidate.bytes,
             &reason);

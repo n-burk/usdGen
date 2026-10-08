@@ -799,6 +799,64 @@ int main()
     Check(paintChangedResult && cooker.TakeCacheCandidate(),
           "paint-map repaint misses exact cache identity (no stale groom)");
 
+    // An entry larger than the whole domain budget can never be admitted,
+    // so the cooker refuses it up front instead of re-hashing the key — and
+    // a coalesced leader flight still settles (followers woken Failed with
+    // no payload) rather than leaking an open flight.
+    auto tinyDomain = std::make_shared<Domain>(
+        UsdGenExecutionCacheDomainKey{
+            UsdGenDeviceBackend::CpuReference, -1, 0x54494e59ull},
+        1);
+    UsdGenSessionCooker tinyLeader(2, 1, tinyDomain);
+    UsdGenSessionCooker tinyFollower(2, 1, tinyDomain);
+    Domain::CoalescedStatus tinyFollowerStatus =
+        Domain::CoalescedStatus::Success;
+    bool tinyFollowerLease = true;
+    int tinyFollowerCallbacks = 0;
+    UsdGenSessionCooker::CoalescedHooks tinyFollowerHooks;
+    tinyFollowerHooks.callback = [&](
+        Domain::CoalescedStatus status,
+        std::optional<UsdGenSessionCooker::CoalescedLease> lease,
+        UsdGenSessionCooker::ExecutionPublicationFence) {
+        tinyFollowerStatus = status;
+        tinyFollowerLease = bool(lease);
+        ++tinyFollowerCallbacks;
+    };
+    UsdGenSessionCooker::CoalescedHooks tinyLeaderHooks;
+    tinyLeaderHooks.callback = [](
+        Domain::CoalescedStatus,
+        std::optional<UsdGenSessionCooker::CoalescedLease>,
+        UsdGenSessionCooker::ExecutionPublicationFence) {};
+    auto tinyOutput = tinyLeader.Cook(
+        cookedDesc, UsdGenContext::Interactive, false, {}, 9.0,
+        UsdGenCommitReason::NoticeBatchEnd, {}, {}, false, 0, 1, -1,
+        tinyLeaderHooks);
+    tinyFollower.Cook(
+        cookedDesc, UsdGenContext::Interactive, false, {}, 9.0,
+        UsdGenCommitReason::NoticeBatchEnd, {}, {}, false, 0, 1, -1,
+        tinyFollowerHooks);
+    auto tinyCandidate = tinyLeader.TakeCacheCandidate();
+    Check(tinyOutput && tinyCandidate && tinyCandidate->bytes > 1,
+          "tiny-budget leader still cooks and defers an over-budget candidate");
+    uint64_t tinyFailuresBefore =
+        tinyLeader.Stats().executionCacheAdmissionFailures;
+    bool const tinyCommitted = tinyCandidate &&
+        tinyLeader.CommitCacheCandidate(*tinyCandidate);
+    Check(!tinyCommitted && tinyDomain->Size() == 0 &&
+              tinyLeader.Stats().executionCacheAdmissionFailures ==
+                  tinyFailuresBefore + 1,
+          "over-budget candidate is refused without seeding the cache");
+    Check(tinyFollowerCallbacks == 1 &&
+              tinyFollowerStatus == Domain::CoalescedStatus::Failed &&
+              !tinyFollowerLease,
+          "over-budget leader flight settles followers Failed with no payload");
+    auto tinyAgain = tinyLeader.Cook(
+        cookedDesc, UsdGenContext::Interactive, false, {}, 9.0,
+        UsdGenCommitReason::NoticeBatchEnd, tinyOutput,
+        tinyLeader.Stats(), false, 1, 2, -1, tinyLeaderHooks);
+    Check(tinyAgain && tinyLeader.TakeCacheCandidate(),
+          "settled over-budget flight leaves no zombie for the next cook");
+
     if (failures) return 1;
     std::puts("ok");
     return 0;
