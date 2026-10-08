@@ -2312,6 +2312,17 @@ void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
                         usdGen::UsdGenExecutionBackend::Cuda;
                     captured.cache = std::move(result.cache);
                     captured.dependencies = recorder.Dependencies(*captured.desc);
+                    if (!result.reusedInputs.empty()) {
+                        // Reused inputs bypass Hydra reads, so the recorder
+                        // never saw them; without this their next dirty
+                        // would not recapture the groom.
+                        auto merged = std::make_shared<SdfPathVector>(
+                            *captured.dependencies);
+                        merged->insert(merged->end(),
+                                       result.reusedInputs.begin(),
+                                       result.reusedInputs.end());
+                        captured.dependencies = std::move(merged);
+                    }
                     packet.inputs.push_back(std::move(captured));
                     continue; // never adopt nested roots under a groom
                 }

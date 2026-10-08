@@ -53,6 +53,10 @@ struct UsdGenGraphDescCapture
 {
     usdGen::UsdGenGraphDesc desc;
     std::shared_ptr<const UsdGenGraphDescCaptureCache> cache;
+    /// Prim paths whose pooled descs were reused without an upstream read:
+    /// the recording caller unions these into the groom's dependencies, or
+    /// their next dirty would not recapture it.
+    SdfPathVector reusedInputs;
 };
 
 /// Capture a pure descriptor and its immutable read cache.  The cache

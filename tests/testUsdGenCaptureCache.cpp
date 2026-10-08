@@ -281,6 +281,8 @@ int main() {
               geoReused.desc.validationErrors ==
                   geoBase.desc.validationErrors,
           "reused desc equals the fresh capture: values, generations, errors");
+    Check(geoReused.reusedInputs.size() == 2,
+          "reused capture reports its unread inputs for dependencies");
 
     geo->data->AddPrims({{geoMesh, TfToken("mesh"), geoMeshData(triPointsMoved)}});
     gopts.previousCache = geoReused.cache;
@@ -293,7 +295,8 @@ int main() {
               geoMoved.desc.surfaces[0].surfaceGeneration !=
                   geoBase.desc.surfaces[0].surfaceGeneration &&
               geoMoved.desc.curveSets[0].curveGeneration ==
-                  geoBase.desc.curveSets[0].curveGeneration,
+                  geoBase.desc.curveSets[0].curveGeneration &&
+              geoMoved.reusedInputs == SdfPathVector{geoCurves},
           "dirtied surface refreshes its values and generation; curves keep theirs");
 
     gopts.previousCache = geoMoved.cache;

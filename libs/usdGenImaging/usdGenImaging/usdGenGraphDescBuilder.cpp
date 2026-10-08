@@ -79,6 +79,9 @@ public:
         SdfPath path;
         usdGen::UsdGenMapDesc map;
         std::vector<std::string> validationErrors;
+        // Paint maps snapshot a surface primvar outside the map prim; a
+        // repaint dirties that surface, so it gates reuse with the map.
+        SdfPathVector paintSources;
     };
     struct GeometryCapture {
         SdfPath path;
@@ -1256,7 +1259,8 @@ void
 _HCapturePaintMap(HdSceneIndexBase &input,
                  HdContainerDataSourceHandle const &primDs, _HdTime t,
                  usdGen::UsdGenMapDesc *map,
-                 std::vector<std::string> *errors)
+                 std::vector<std::string> *errors,
+                 SdfPathVector *readPrims)
 {
     auto fail = [&](std::string const &what) {
         if (errors) {
@@ -1270,10 +1274,15 @@ _HCapturePaintMap(HdSceneIndexBase &input,
         fail("usdGen:paint:surface requires exactly one target");
         return;
     }
+    // The snapshot reads through to the paint surface, outside the map
+    // prim: report every prim touched so the capture cache can gate reuse
+    // on them and keep them in the groom's dependencies.
+    if (readPrims) readPrims->push_back(targets.front());
     // A face geomSubset target (R15) paints its parent mesh: the primvar is
     // read there and the corners outside the subset read usdGen:map:default.
     SdfPath const meshPath = _HSurfaceMesh(input, targets.front());
     HdContainerDataSourceHandle surfaceDs;
+    if (!meshPath.IsEmpty() && readPrims) readPrims->push_back(meshPath);
     if (meshPath.IsEmpty() || !_HPrim(input, meshPath, &surfaceDs, nullptr)) {
         fail("usdGen:paint:surface must target a UsdGeomMesh or a face "
              "GeomSubset of one");
@@ -1633,6 +1642,12 @@ CaptureGraphDescFromHydra(
                         prev->second.validationErrors.begin(),
                         prev->second.validationErrors.end());
                     cache->surfaces.emplace(p.GetString(), prev->second);
+                    result.reusedInputs.push_back(p);
+                    if (prev->second.surface.isSubset) {
+                        result.reusedInputs.push_back(p.GetParentPath());
+                        for (SdfPath const &m : prev->second.unionMembers)
+                            result.reusedInputs.push_back(m);
+                    }
                     return;
                 }
             }
@@ -1685,6 +1700,7 @@ CaptureGraphDescFromHydra(
                                             desc.curveSets.size()).first;
                     desc.curveSets.push_back(prev->second.curves);
                     cache->curves.emplace(p.GetString(), prev->second);
+                    result.reusedInputs.push_back(p);
                     return;
                 }
             }
@@ -1721,8 +1737,13 @@ CaptureGraphDescFromHydra(
         if (reuseGeometry) {
             auto const prev = previousCache->maps.find(p.GetString());
             // A missing map builds a silent default either way, so every
-            // cached entry is reusable; a repaint dirties the prim.
-            if (prev != previousCache->maps.end() &&
+            // cached entry is reusable while its prim and any paint
+            // surface stay clean.
+            bool paintClean = true;
+            if (prev != previousCache->maps.end())
+                for (SdfPath const &s : prev->second.paintSources)
+                    if (_HNodeDirty(s, options.dirtyPrimPaths)) paintClean = false;
+            if (prev != previousCache->maps.end() && paintClean &&
                 !_HNodeDirty(p, options.dirtyPrimPaths)) {
                 mapIndex.emplace(p.GetString(), desc.maps.size());
                 desc.maps.push_back(prev->second.map);
@@ -1730,6 +1751,9 @@ CaptureGraphDescFromHydra(
                     prev->second.validationErrors.begin(),
                     prev->second.validationErrors.end());
                 cache->maps.emplace(p.GetString(), prev->second);
+                result.reusedInputs.push_back(p);
+                for (SdfPath const &s : prev->second.paintSources)
+                    result.reusedInputs.push_back(s);
                 return;
             }
         }
@@ -1738,6 +1762,7 @@ CaptureGraphDescFromHydra(
         HdContainerDataSourceHandle primDs;
         TfToken primType;
         std::vector<std::string> mapErrors;
+        SdfPathVector paintSources;
         if (_HPrim(input, p, &primDs, &primType)) {
             HdContainerDataSourceHandle const ug = _HUsdGen(primDs);
             TfToken type;
@@ -1756,7 +1781,8 @@ CaptureGraphDescFromHydra(
             }
             _HPullUsdGen(ug, t, nullptr, &map.params, "usdGen");
             if (map.type == TfToken("UsdGenPaintMap")) {
-                _HCapturePaintMap(input, primDs, t, &map, &mapErrors);
+                _HCapturePaintMap(input, primDs, t, &map, &mapErrors,
+                                  &paintSources);
             }
         }
         mapIndex.emplace(p.GetString(), desc.maps.size());
@@ -1767,6 +1793,7 @@ CaptureGraphDescFromHydra(
         captured.path = p;
         captured.map = map;
         captured.validationErrors = std::move(mapErrors);
+        captured.paintSources = std::move(paintSources);
         cache->maps.emplace(p.GetString(), std::move(captured));
     };
 
@@ -1806,6 +1833,9 @@ CaptureGraphDescFromHydra(
                             prev->second.validationErrors.begin(),
                             prev->second.validationErrors.end());
                         cache->geometries.emplace(g.GetString(), prev->second);
+                        result.reusedInputs.push_back(g);
+                        if (prev->second.geometry.isSubset)
+                            result.reusedInputs.push_back(g.GetParentPath());
                         continue;
                     }
                 }
