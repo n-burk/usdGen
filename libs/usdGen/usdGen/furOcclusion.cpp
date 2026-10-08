@@ -700,7 +700,18 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
     size_t const tileCount = tiles->size();
 
     // --- world-space positions and bounds, per tile ---------------------------
-    std::vector<std::vector<GfVec3f>> positions(tileCount);
+    // Identity tiles (every benchmark tile) alias the published points
+    // instead of copying them: the splat and gather only read, the tile
+    // outlives the bake, and nothing below mutates points, so the view is
+    // the same floats with no 96MB copy, alloc, or page faults. The
+    // validation and bounds scan still read every point exactly as before
+    // (same order, same throws); only transformed tiles fill `owned`.
+    struct TilePositions {
+        GfVec3f const* data = nullptr;
+        size_t count = 0;
+        std::vector<GfVec3f> owned;
+    };
+    std::vector<TilePositions> positions(tileCount);
     std::vector<GfVec3f> tileLo(tileCount, GfVec3f(std::numeric_limits<float>::max()));
     std::vector<GfVec3f> tileHi(tileCount, GfVec3f(-std::numeric_limits<float>::max()));
     std::vector<char const*> invalid(tileCount, nullptr);
@@ -720,15 +731,22 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
             }
             GfMatrix4f const m(tile.xformMatrix);
             bool const identity = tile.xformMatrix == GfMatrix4d(1.0);
-            auto& p=positions[t]; p.resize(count);
+            auto& p=positions[t]; p.count=count;
+            if(identity) {
+                p.data=tile.points.cdata();
+            } else {
+                p.owned.resize(count);
+                p.data=p.owned.data();
+            }
+            GfVec3f const* const src=tile.points.cdata();
             GfVec3f lo=tileLo[t], hi=tileHi[t];
             for(size_t i=0;i<count;++i) {
-                GfVec3f const w = identity ? tile.points[i] : m.Transform(tile.points[i]);
+                GfVec3f const w = identity ? src[i] : m.Transform(src[i]);
                 for(int k=0;k<3;++k) {
                     if(!std::isfinite(w[k])) { invalid[t]="non-finite fur point"; return; }
                     lo[k]=std::min(lo[k],w[k]); hi[k]=std::max(hi[k],w[k]);
                 }
-                p[i]=w;
+                if(!identity) p.owned[i]=w;
             }
             tileLo[t]=lo; tileHi[t]=hi;
         });
@@ -737,8 +755,8 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
     size_t pointCount=0;
     for(size_t t=0;t<tileCount;++t) {
         if(invalid[t]) throw std::invalid_argument(invalid[t]);
-        pointCount+=positions[t].size();
-        if(positions[t].empty()) continue;
+        pointCount+=positions[t].count;
+        if(positions[t].count==0) continue;
         for(int k=0;k<3;++k) { lo[k]=std::min(lo[k],tileLo[t][k]); hi[k]=std::max(hi[k],tileHi[t][k]); }
     }
     if(!pointCount) return true;
@@ -837,7 +855,7 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
         std::vector<JobDensity> local(jobs.size());
         ForEach(dispatcher, jobs.size(), [&](size_t index) {
             Job const& job=jobs[index];
-            auto const& tile=(*tiles)[job.tile]; auto const& p=positions[job.tile];
+            auto const& tile=(*tiles)[job.tile]; GfVec3f const* const p=positions[job.tile].data;
             if(!job.cvCount) return;
             GfVec3f jobLo(std::numeric_limits<float>::max()), jobHi(-jobLo[0]);
             for(size_t i=job.firstCv;i<job.firstCv+job.cvCount;++i)
@@ -1424,7 +1442,7 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
             // names[0] (P) holds the even directions, names[1] (N) the odd.
             float* const p0=planes[job.tile][0];
             float* const p1=planes[job.tile][1];
-            auto const& p=positions[job.tile];
+            GfVec3f const* const p=positions[job.tile].data;
             // Consecutive CVs of a hair are usually sub-voxel apart (a
             // single-substep splat segment is shorter than a voxel), so they
             // usually share one cell: the eight cell x six depth loads happen
