@@ -2342,6 +2342,34 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
         else if (extra.output.interpolation == TfToken("uniform"))
             uniformPlanes.push_back(&extra);
     }
+    // Pre-size the remaining per-curve/per-CV arrays (bit-identical: same
+    // pushed values, no geometric-growth copies): st takes one root UV per
+    // curve when the terminal carries rootUV; displayColor takes one color
+    // per curve except under per-CV preview (one per CV), and nothing at
+    // all when the mode is NoColor; extra planes take their live element
+    // count times arity on the matching payload. Over-reserve is
+    // capacity-only: short gathers (failed bounds checks, multi-push
+    // color arities resuming past their share) just push less.
+    if (!term.rootUV.empty())
+        pub.st.reserve(tv.totalLiveCurves);
+    if (colorMode == Preview && _previewColors.perCv)
+        pub.displayColor.reserve(tv.totalLiveCvs);
+    else if (colorMode != NoColor)
+        pub.displayColor.reserve(tv.totalLiveCurves);
+    for (ExtraPlanePublication *extra : vertexPlanes) {
+        size_t const n = size_t(tv.totalLiveCvs) * extra->output.arity;
+        if (extra->output.type == TfToken("int"))
+            extra->output.i.reserve(n);
+        else
+            extra->output.f.reserve(n);
+    }
+    for (ExtraPlanePublication *extra : uniformPlanes) {
+        size_t const n = size_t(tv.totalLiveCurves) * extra->output.arity;
+        if (extra->output.type == TfToken("int"))
+            extra->output.i.reserve(n);
+        else
+            extra->output.f.reserve(n);
+    }
 
     for (uint32_t i = 0; i < tv.chunkCount; ++i) {
         UsdGenChunkDesc const &cd = tn.chunks[tv.firstChunk + i];
