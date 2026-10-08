@@ -344,6 +344,15 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
             _CacheMix(&h1, static_cast<uint64_t>(param.animated));
         }
     }
+    // A finalized input carries its content hash as its generation
+    // (UsdGenFinalizeInputGenerations, never zero), so the key reads the
+    // bulk arrays through it instead of re-hashing tens of megabytes the
+    // capture just hashed: same coverage (every content byte feeds the
+    // generation), one word per input. The key's input-versions tuple
+    // already trusts generations for equality, so this adds no new
+    // trust; key values change, groom outputs do not. A zero generation
+    // means a hand-built, unfinalized desc, which keeps raw feeds below
+    // (same coverage; feed order is the new function's own).
     for (UsdGenCurveSetDesc const &curve : desc.curveSets) {
         _CacheMixText(&h0, curve.path.GetString());
         _CacheMix(&h1, static_cast<uint64_t>(curve.role));
@@ -353,55 +362,67 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
         _CacheMixText(&h1, curve.wrap.GetString());
         _CacheMixText(&h0, curve.widthsInterpolation.GetString());
         _CacheMix(&h1, static_cast<uint64_t>(curve.restFromCurrentPoints));
-        _CacheMixArray(&h0, curve.curveVertexCounts);
-        _CacheMixArray(&h1, curve.points);
-        _CacheMixArray(&h0, curve.rest);
         _CacheMixMatrix(&h1, curve.worldMatrix);
-        _CacheMixArray(&h0, curve.widths);
-        _CacheMixArray(&h1, curve.skinPrim);
-        _CacheMixArray(&h0, curve.curveId);
-        _CacheMixArray(&h1, curve.skinPrimUv);
-        _CacheMixArray(&h0, curve.rootFrame);
         _CacheMixText(&h0, curve.frozenEpoch);
-        _CacheMix(&h1, curve.curveGeneration);
         _CacheMix(&h1, static_cast<uint64_t>(curve.authoredPlanes.size()));
         for (UsdGenAuthoredPlaneDesc const& plane : curve.authoredPlanes) {
             _CacheMixText(&h0, plane.name.GetString());
             _CacheMix(&h1, static_cast<uint64_t>(plane.type));
             _CacheMix(&h0, static_cast<uint64_t>(plane.domain));
             _CacheMix(&h1, plane.arity);
+            if (curve.curveGeneration) continue;
             _CacheMixArray(&h0, plane.floatValues);
             _CacheMixArray(&h1, plane.intValues);
         }
+        if (curve.curveGeneration) {
+            _CacheMix(&h0, curve.curveGeneration);
+            continue;
+        }
+        _CacheMixArray(&h0, curve.curveVertexCounts);
+        _CacheMixArray(&h1, curve.points);
+        _CacheMixArray(&h0, curve.rest);
+        _CacheMixArray(&h0, curve.widths);
+        _CacheMixArray(&h1, curve.skinPrim);
+        _CacheMixArray(&h0, curve.curveId);
+        _CacheMixArray(&h1, curve.skinPrimUv);
+        _CacheMixArray(&h0, curve.rootFrame);
+        _CacheMix(&h1, curve.curveGeneration);
     }
     for (UsdGenSurfaceDesc const &surface : desc.surfaces) {
         // Tags-only subdivision cover: faceVertexCounts/faceVertexIndices
-        // mix into this key directly below. Coverage is unchanged.
+        // reach this key through the generation (raw below when
+        // unfinalized). Coverage is unchanged.
         _CacheMix(&h0, UsdGenSubdivisionTagsDigest(surface));
         _CacheMixText(&h0, surface.path.GetString());
         _CacheMix(&h1, surface.id);
         _CacheMix(&h0, static_cast<uint64_t>(surface.restNormalDomain));
         _CacheMix(&h1, static_cast<uint64_t>(surface.restFromCurrentPoints));
-        _CacheMixArray(&h0, surface.faceVertexCounts);
-        _CacheMixArray(&h1, surface.faceVertexIndices);
-        _CacheMixArray(&h0, surface.restPoints);
-        _CacheMixArray(&h1, surface.restNormals);
-        _CacheMixArray(&h0, surface.points);
         _CacheMix(&h1, static_cast<uint64_t>(surface.samples.size()));
         for (UsdGenSurfaceSample const& sample : surface.samples) {
             uint64_t sampleTimeBits = 0;
             std::memcpy(&sampleTimeBits, &sample.time, sizeof(sampleTimeBits));
             _CacheMix(&h0, sampleTimeBits);
+            if (surface.surfaceGeneration) continue;
             _CacheMixArray(&h1, sample.points);
         }
-        _CacheMixArray(&h0, surface.velocities);
-        _CacheMixArray(&h1, surface.uv);
-        _CacheMixArray(&h0, surface.subsetFaces);
         _CacheMix(&h1, surface.isSubset ? 1u : 0u);
         // Paint density the brush bakes: a repaint must miss the cache,
         // or the stale pre-stroke roots publish and the groom freezes.
+        // The generation does not cover it, so it still mixes raw.
         _CacheMixArray(&h1, surface.densityMultiplier);
         _CacheMixMatrix(&h0, surface.worldMatrix);
+        if (surface.surfaceGeneration) {
+            _CacheMix(&h0, surface.surfaceGeneration);
+            continue;
+        }
+        _CacheMixArray(&h0, surface.faceVertexCounts);
+        _CacheMixArray(&h1, surface.faceVertexIndices);
+        _CacheMixArray(&h0, surface.restPoints);
+        _CacheMixArray(&h1, surface.restNormals);
+        _CacheMixArray(&h0, surface.points);
+        _CacheMixArray(&h0, surface.velocities);
+        _CacheMixArray(&h1, surface.uv);
+        _CacheMixArray(&h0, surface.subsetFaces);
         _CacheMix(&h1, surface.surfaceGeneration);
     }
     return {h0, h1};
