@@ -42,16 +42,6 @@ bool Reserved(TfToken const& name) {
     return false;
 }
 
-// FNV-1a over raw bytes: the volume key only has to change when the inputs do.
-struct Hash {
-    uint64_t h = 1469598103934665603ull;
-    void Bytes(void const* p, size_t n) {
-        auto b = static_cast<unsigned char const*>(p);
-        for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
-    }
-    template <class T> void Value(T const& v) { Bytes(&v, sizeof(T)); }
-};
-
 struct Grid {
     int n[3] = {0, 0, 0};
     GfVec3f origin;
@@ -331,25 +321,30 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
     if (!tiles) return false;
 
     // --- volume identity: everything `previous` cannot show ------------------
-    uint64_t key;
+    // Same coverage and feed order as the byte-at-a-time FNV-1a this
+    // replaces, hashed with the shared 4-lane word mixer whose contract
+    // names cook digests explicitly. Values change; the key is in-memory
+    // equality-only (stability/sensitivity tested, never golden).
+    uint64_t key = UsdGenDigestOffset;
     {
-        Hash hash;
-        hash.Value(params.voxelSize);
-        hash.Value(params.maxDimension);
-        hash.Value(params.resolution);
-        hash.Value(params.opaqueBiasVoxels);
-        hash.Value(params.opaqueMarkVoxels);
-        hash.Value(params.scalpShadow);
-        hash.Value(params.scalpMaxTriangles);
+        auto word = [&](void const* p, size_t n) {
+            key = UsdGenDigestBytes(p, n, key);
+        };
+        word(&params.voxelSize, sizeof(params.voxelSize));
+        word(&params.maxDimension, sizeof(params.maxDimension));
+        word(&params.resolution, sizeof(params.resolution));
+        word(&params.opaqueBiasVoxels, sizeof(params.opaqueBiasVoxels));
+        word(&params.opaqueMarkVoxels, sizeof(params.opaqueMarkVoxels));
+        word(&params.scalpShadow, sizeof(params.scalpShadow));
+        word(&params.scalpMaxTriangles, sizeof(params.scalpMaxTriangles));
         for (UsdGenFurOccluder const& occluder : params.occluders) {
-            hash.Value(occluder.worldMatrix);
-            hash.Bytes(occluder.points.cdata(), occluder.points.size()*sizeof(GfVec3f));
-            hash.Bytes(occluder.faceVertexCounts.cdata(),
-                       occluder.faceVertexCounts.size()*sizeof(int));
-            hash.Bytes(occluder.faceVertexIndices.cdata(),
-                       occluder.faceVertexIndices.size()*sizeof(int));
+            word(&occluder.worldMatrix, sizeof(occluder.worldMatrix));
+            word(occluder.points.cdata(), occluder.points.size()*sizeof(GfVec3f));
+            word(occluder.faceVertexCounts.cdata(),
+                 occluder.faceVertexCounts.size()*sizeof(int));
+            word(occluder.faceVertexIndices.cdata(),
+                 occluder.faceVertexIndices.size()*sizeof(int));
         }
-        key = hash.h;
     }
     bool same = previous && previous->size()==tiles->size() &&
                 (!volumeKey || *volumeKey == key);
