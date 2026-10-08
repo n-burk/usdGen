@@ -1809,8 +1809,10 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                         }
                     }
                 };
+                { TRACE_SCOPE("usdGen drain: collect");
                 collect(before, beforeNames, beforeSynthetic);
                 collect(target, targetNames, targetSynthetic);
+                }
                 std::set<SdfPath> removedPaths;
                 for (auto const& old : beforeNames) {
                     auto now = targetNames.find(old.first);
@@ -1842,6 +1844,8 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                     HdDataSourceBaseHandle before, after;
                 };
                 std::vector<_PendingDiff> pendingDiffs;
+                std::vector<HdDataSourceLocatorSet> pendingResults;
+                { TRACE_SCOPE("usdGen drain: content diffs");
                 for (auto const& now : targetNames) {
                     if (now.first == SdfPath::AbsoluteRootPath()) continue;
                     auto old = beforeNames.find(now.first);
@@ -1880,8 +1884,8 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                         }
                     }
                 }
-                std::vector<HdDataSourceLocatorSet> pendingResults(
-                    pendingDiffs.size());
+                pendingResults.resize(pendingDiffs.size());
+                { TRACE_SCOPE("usdGen drain: content compare");
                 if (pendingDiffs.size() > 1) {
                     tbb::parallel_for(
                         tbb::blocked_range<size_t>(0, pendingDiffs.size()),
@@ -1899,6 +1903,9 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                                         HdDataSourceLocator(),
                                         &pendingResults[0]);
                 }
+                } /* drain: content compare */
+                } /* drain: content diffs */
+                { TRACE_SCOPE("usdGen drain: merge");
                 std::map<SdfPath, HdDataSourceLocatorSet> precomputedDiffs;
                 for (size_t i = 0; i < pendingDiffs.size(); ++i)
                     precomputedDiffs.emplace(pendingDiffs[i].path,
@@ -2053,6 +2060,7 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                     return a.primPath.GetPathElementCount() < b.primPath.GetPathElementCount();
                 });
                 std::atomic_store(&_state->visible, target);
+                } /* drain: merge */
                 }
                 {
                 TRACE_SCOPE("usdGen drain: notify Hydra");
