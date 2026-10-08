@@ -236,17 +236,24 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
     VtIntArray const prevIndices = out->faceVertexIndices;
     // The 90th-percentile edge decides the level, so one oversized face cannot
     // refine the whole mesh; the triangle ceiling then bounds it outright.
+    // The ceiling forces k==1 outright whenever the mesh alone exceeds it
+    // (every benchmark groom: millions of triangles against a 200k ceiling),
+    // whatever the edge distribution says, so the percentile pass is dead
+    // there: skip the copy and the nth_element. Small meshes run it as
+    // before. Either way k is exactly what the old code computed.
     int k = 1;
-    { TRACE_SCOPE("usdGen scalp: edges");
-    std::vector<float> edges;
-    edges.reserve(triangles.size());
-    for(size_t i=0;i<triangles.size();++i)
-        edges.push_back(extents[i]);
-    auto at=edges.begin()+std::min(edges.size()-1,size_t(0.9*double(edges.size())));
-    std::nth_element(edges.begin(),at,edges.end());
-    k=std::max(1,int(std::ceil(*at*grid.invH)));
     int const ceiling=std::max(1,maxTriangles);
-    while(k>1 && triangles.size()*size_t(k)*size_t(k) > size_t(ceiling)) --k;
+    { TRACE_SCOPE("usdGen scalp: edges");
+    if(triangles.size() <= size_t(ceiling)) {
+        std::vector<float> edges;
+        edges.reserve(triangles.size());
+        for(size_t i=0;i<triangles.size();++i)
+            edges.push_back(extents[i]);
+        auto at=edges.begin()+std::min(edges.size()-1,size_t(0.9*double(edges.size())));
+        std::nth_element(edges.begin(),at,edges.end());
+        k=std::max(1,int(std::ceil(*at*grid.invH)));
+        while(k>1 && triangles.size()*size_t(k)*size_t(k) > size_t(ceiling)) --k;
+    }
     }
 
     float const outward=-inward;

@@ -438,6 +438,27 @@ int main() try {
         Require(first.tessLevel==1,"the micro-quad refines exactly 1x1");
         Require(first.topologyKey!=0 && first.occluderKey!=0,
                 "the bake publishes its carry keys");
+        // The ceiling-skip path: the same micro-quad against a ceiling of 1
+        // takes the percentile skip (2 triangles > 1) and must bake the
+        // identical k==1 cap the percentile path above computed.
+        {
+            std::vector<UsdGenTilePublication> fresh{
+                Comb(0,-0.3f,1200,0.3f),
+                Probe(1,probeAt,probeAt+GfVec3f(0,0.01f,0))};
+            UsdGenFurOcclusionParams skipped;
+            skipped.occluders.push_back(Quad(0.f,0.01f,false));
+            skipped.scalpShadow=true;
+            skipped.scalpMaxTriangles=1;
+            uint64_t skipKey=0;
+            UsdGenScalpShadowPublication skippedCap;
+            Require(UsdGenBuildFurOcclusion(&fresh,nullptr,skipped,&skipKey,
+                                           &skippedCap),
+                    "ceiling-skipped cap bake");
+            Require(skippedCap.tessLevel==1,
+                    "the skipped bake refines exactly 1x1");
+            capSame(skippedCap,first,
+                    "the ceiling skip matches the percentile cap");
+        }
         // Move the hair within its margin and the probe far: the span
         // (hence the grid and the lift) drifts, but the occluder and the
         // lit set hold.
