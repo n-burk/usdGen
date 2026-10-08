@@ -7,6 +7,7 @@
 #ifndef USDGEN_IMAGING_GRAPH_DESC_SHARED_H
 #define USDGEN_IMAGING_GRAPH_DESC_SHARED_H
 
+#include "usdGen/digest.h"
 #include "usdGen/graphDesc.h"
 
 #include "pxr/base/tf/token.h"
@@ -49,42 +50,29 @@ UsdGenGeometryContentHash(usdGen::UsdGenGeometryDesc const &g)
     return h;
 }
 
-/// Word-at-a-time FNV-style content hash for the generation counters below;
-/// large meshes are hashed on every capture, so bytes go eight at a time.
-class UsdGenContentHasher
+/// Generation feeds. Same coverage and feed order as the word-at-a-time
+/// hasher they replace, mixed with the shared 4-lane word mixer whose
+/// contract names capture digests explicitly. Values change; the
+/// generations are in-memory equality-only (cross-builder parity tested,
+/// never golden).
+inline void _GenMixWord(uint64_t &h, uint64_t word)
 {
-public:
-    void Bytes(void const *data, size_t count)
-    {
-        auto const *p = static_cast<unsigned char const *>(data);
-        size_t i = 0;
-        for (; i + 8 <= count; i += 8) {
-            uint64_t word;
-            std::memcpy(&word, p + i, 8);
-            Word(word);
-        }
-        uint64_t tail = 0;
-        if (i < count) {
-            std::memcpy(&tail, p + i, count - i);
-            Word(tail ^ (uint64_t(count - i) << 56));
-        }
-    }
-    void Word(uint64_t word)
-    {
-        _h = (_h ^ word) * 0x100000001b3ULL;
-        _h ^= _h >> 29;
-    }
-    template <class A> void Array(A const &a)
-    {
-        Word(uint64_t(a.size()));
-        if (!a.empty()) Bytes(a.cdata(), a.size() * sizeof(a[0]));
-    }
-    void Token(TfToken const &t) { Bytes(t.GetText(), t.size()); Word(t.size()); }
-    uint64_t Value() const { return _h ? _h : 1; }
-
-private:
-    uint64_t _h = 1469598103934665603ULL;
-};
+    usdGen::UsdGenDigestMixWord(h, word);
+}
+inline void _GenMixBytes(uint64_t &h, void const *data, size_t n)
+{
+    if (n) h = usdGen::UsdGenDigestBytes(data, n, h);
+}
+template <class A> void _GenMixArray(uint64_t &h, A const &a)
+{
+    _GenMixWord(h, uint64_t(a.size()));
+    if (!a.empty()) _GenMixBytes(h, a.cdata(), a.size() * sizeof(a[0]));
+}
+inline void _GenMixToken(uint64_t &h, TfToken const &t)
+{
+    _GenMixBytes(h, t.GetText(), t.size());
+    _GenMixWord(h, uint64_t(t.size()));
+}
 
 /// Sets UsdGenCurveSetDesc::curveGeneration and
 /// UsdGenSurfaceDesc::surfaceGeneration from the content each carries, so a
@@ -96,66 +84,66 @@ inline void
 UsdGenFinalizeInputGenerations(usdGen::UsdGenGraphDesc *desc)
 {
     for (usdGen::UsdGenCurveSetDesc &curves : desc->curveSets) {
-        UsdGenContentHasher h;
-        h.Word(uint64_t(curves.role));
-        h.Token(curves.curveRole);
-        h.Array(curves.curveVertexCounts);
-        h.Array(curves.points);
-        h.Array(curves.rest);
-        h.Array(curves.widths);
-        h.Token(curves.type);
-        h.Token(curves.basis);
-        h.Token(curves.wrap);
-        h.Token(curves.widthsInterpolation);
-        h.Array(curves.skinPrim);
-        h.Array(curves.curveId);
-        h.Array(curves.skinPrimUv);
-        h.Array(curves.rootFrame);
-        h.Bytes(curves.frozenEpoch.data(), curves.frozenEpoch.size());
+        uint64_t h = usdGen::UsdGenDigestOffset;
+        _GenMixWord(h, uint64_t(curves.role));
+        _GenMixToken(h, curves.curveRole);
+        _GenMixArray(h, curves.curveVertexCounts);
+        _GenMixArray(h, curves.points);
+        _GenMixArray(h, curves.rest);
+        _GenMixArray(h, curves.widths);
+        _GenMixToken(h, curves.type);
+        _GenMixToken(h, curves.basis);
+        _GenMixToken(h, curves.wrap);
+        _GenMixToken(h, curves.widthsInterpolation);
+        _GenMixArray(h, curves.skinPrim);
+        _GenMixArray(h, curves.curveId);
+        _GenMixArray(h, curves.skinPrimUv);
+        _GenMixArray(h, curves.rootFrame);
+        _GenMixBytes(h, curves.frozenEpoch.data(), curves.frozenEpoch.size());
         for (auto const &plane : curves.authoredPlanes) {
-            h.Token(plane.name);
-            h.Word((uint64_t(plane.type) << 16) | (uint64_t(plane.domain) << 8) | plane.arity);
-            h.Array(plane.floatValues);
-            h.Array(plane.intValues);
+            _GenMixToken(h, plane.name);
+            _GenMixWord(h, (uint64_t(plane.type) << 16) | (uint64_t(plane.domain) << 8) | plane.arity);
+            _GenMixArray(h, plane.floatValues);
+            _GenMixArray(h, plane.intValues);
         }
-        h.Word(curves.surfaceCage ? 1u : 0u);
+        _GenMixWord(h, curves.surfaceCage ? 1u : 0u);
         if (curves.surfaceCage) {
             usdGen::UsdGenSurfaceCagePayload const &cage =
                 *curves.surfaceCage;
-            h.Array(cage.ownerIds);
-            h.Array(cage.ownerDensities);
-            h.Array(cage.ownerSeeds);
-            h.Array(cage.ownerCvCounts);
-            h.Array(cage.ownerEdgeBias);
-            h.Array(cage.ownerLengthProfileOffsets);
-            h.Array(cage.ownerLengthProfile);
-            h.Array(cage.normalizedT);
-            h.Array(cage.triangles);
-            h.Array(cage.triangleOwnerIndices);
-            h.Array(cage.triangleRootCharts);
-            h.Array(cage.ownerChartCentroids);
-            h.Array(cage.ownerChartMeanRadii);
+            _GenMixArray(h, cage.ownerIds);
+            _GenMixArray(h, cage.ownerDensities);
+            _GenMixArray(h, cage.ownerSeeds);
+            _GenMixArray(h, cage.ownerCvCounts);
+            _GenMixArray(h, cage.ownerEdgeBias);
+            _GenMixArray(h, cage.ownerLengthProfileOffsets);
+            _GenMixArray(h, cage.ownerLengthProfile);
+            _GenMixArray(h, cage.normalizedT);
+            _GenMixArray(h, cage.triangles);
+            _GenMixArray(h, cage.triangleOwnerIndices);
+            _GenMixArray(h, cage.triangleRootCharts);
+            _GenMixArray(h, cage.ownerChartCentroids);
+            _GenMixArray(h, cage.ownerChartMeanRadii);
         }
-        curves.curveGeneration = h.Value();
+        curves.curveGeneration = h ? h : 1;
     }
     for (usdGen::UsdGenSurfaceDesc &surface : desc->surfaces) {
-        UsdGenContentHasher h;
-        h.Array(surface.faceVertexCounts);
-        h.Array(surface.faceVertexIndices);
-        h.Array(surface.restPoints);
-        h.Array(surface.restNormals);
-        h.Word(uint64_t(surface.restNormalDomain));
-        h.Array(surface.points);
+        uint64_t h = usdGen::UsdGenDigestOffset;
+        _GenMixArray(h, surface.faceVertexCounts);
+        _GenMixArray(h, surface.faceVertexIndices);
+        _GenMixArray(h, surface.restPoints);
+        _GenMixArray(h, surface.restNormals);
+        _GenMixWord(h, uint64_t(surface.restNormalDomain));
+        _GenMixArray(h, surface.points);
         for (auto const &sample : surface.samples) {
-            h.Bytes(&sample.time, sizeof(sample.time));
-            h.Array(sample.points);
+            _GenMixBytes(h, &sample.time, sizeof(sample.time));
+            _GenMixArray(h, sample.points);
         }
-        h.Array(surface.velocities);
-        h.Array(surface.uv);
-        h.Array(surface.subsetFaces);
-        h.Word(surface.isSubset ? 1u : 0u);
-        h.Bytes(surface.worldMatrix.GetArray(), 16 * sizeof(double));
-        surface.surfaceGeneration = h.Value();
+        _GenMixArray(h, surface.velocities);
+        _GenMixArray(h, surface.uv);
+        _GenMixArray(h, surface.subsetFaces);
+        _GenMixWord(h, surface.isSubset ? 1u : 0u);
+        _GenMixBytes(h, surface.worldMatrix.GetArray(), 16 * sizeof(double));
+        surface.surfaceGeneration = h ? h : 1;
     }
 }
 
