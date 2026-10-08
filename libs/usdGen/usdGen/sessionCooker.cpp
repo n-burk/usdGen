@@ -5,6 +5,7 @@
 #include "usdGen/sessionCooker.h"
 #include "usdGen/limitSurface.h"
 #include "usdGen/debugCodes.h"
+#include "usdGen/digest.h"
 #include "usdGen/furOcclusion.h"
 #include "usdGen/cudaExecution.h"
 #include "usdGen/executionBackend.h"
@@ -122,30 +123,26 @@ bool _TerminalTopologyRevision(UsdGenExecutionPlanMetadata const& metadata,
     return false;
 }
 
+// Cook-digest feeds. Keys are internal equality-only cache identity (the
+// digest.h contract names cook digests explicitly), so the bulk feeds use
+// the shared 4-lane word-wise mixer instead of byte-at-a-time FNV-1a:
+// same coverage, same lanes, ~8x fewer multiplies with 4-way chain
+// overlap. Key values change; groom outputs do not.
 void _CacheMix(uint64_t *hash, uint64_t value)
 {
-    for (unsigned shift = 0; shift != 64; shift += 8) {
-        *hash ^= (value >> shift) & 0xffu;
-        *hash *= 0x100000001b3ULL;
-    }
+    UsdGenDigestMixWord(*hash, value);
 }
 
 void _CacheMixText(uint64_t *hash, std::string const &text)
 {
     _CacheMix(hash, static_cast<uint64_t>(text.size()));
-    for (unsigned char byte : text) {
-        *hash ^= byte;
-        *hash *= 0x100000001b3ULL;
-    }
+    if (!text.empty())
+        *hash = UsdGenDigestBytes(text.data(), text.size(), *hash);
 }
 
 void _CacheMixBytes(uint64_t *hash, void const *data, size_t bytes)
 {
-    auto const *raw = static_cast<unsigned char const *>(data);
-    for (size_t i = 0; i != bytes; ++i) {
-        *hash ^= raw[i];
-        *hash *= 0x100000001b3ULL;
-    }
+    *hash = UsdGenDigestBytes(data, bytes, *hash);
 }
 
 template<class Array>
