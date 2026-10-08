@@ -1968,7 +1968,7 @@ UsdGenStats publishedStats, bool invalidateValues,
     const bool recolour = prev && prev->colorDigest != gen.colorDigest;
     phases.Phase("preview");
 
-    TRACE_SCOPE("usdGen build tile publications");
+    { TRACE_SCOPE("usdGen build tile publications");
     // Tile builds are independent: each gathers its own publication from the
     // immutable terminal output (the progress path already builds them on
     // sweep workers), so fan them out over the scheduler pool — idle since
@@ -2045,6 +2045,7 @@ UsdGenStats publishedStats, bool invalidateValues,
                   return a.tile < b.tile;
               });
     phases.Phase("tiles", rebuiltTiles, gen.tiles.size());
+    }
 
     // Whole-groom optical depth includes neighboring tiles. Unchanged
     // geometry reuses the immutable planes, including on look-only edits.
