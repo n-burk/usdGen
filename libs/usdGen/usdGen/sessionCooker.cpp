@@ -144,23 +144,120 @@ void _CacheMixText(uint64_t *hash, std::string const &text)
     }
 }
 
-void _CacheMixBytes(uint64_t *hash, void const *data, size_t bytes)
+// Deferred array term: the serial plan-digest walk records every hashed
+// array (lane, bytes) instead of hashing bytes inline, so the ~40MB bench
+// surface digests in parallel below. Sizes still mix serially in walk
+// order; term digests join their lane in recorded order afterwards, so the
+// key stays deterministic, input-sensitive and order-sensitive (digest.h
+// contract: values are equality-only internal keys, never persisted).
+struct _CacheArrayTerm
 {
-    // 4-lane word-wise FNV (digest.h UsdGenDigestBytes): the byte loop ran
-    // at multiply latency (~3 cycles/byte, 31ms over the bench surface);
-    // whole words over four overlapped lanes run ~10x faster. Cache keys
-    // are equality-only internal keys (digest.h contract: deterministic,
-    // input-sensitive, never persisted or golden-tested), so the new
-    // values are fine. Only _CacheMixArray calls this, guarded non-empty.
-    *hash = UsdGenDigestBytes(data, bytes, *hash);
-}
+    uint64_t *lane;
+    void const *data;
+    size_t bytes;
+};
+
+struct _CacheArrayTerms
+{
+    std::vector<_CacheArrayTerm> terms;
+    size_t totalBytes = 0;
+};
 
 template<class Array>
-void _CacheMixArray(uint64_t *hash, Array const &array)
+void _CacheMixArray(uint64_t *hash, Array const &array,
+                    _CacheArrayTerms *terms)
 {
     _CacheMix(hash, static_cast<uint64_t>(array.size()));
-    if (!array.empty())
-        _CacheMixBytes(hash, array.cdata(), array.size() * sizeof(array[0]));
+    if (!array.empty() && terms) {
+        size_t const bytes = array.size() * sizeof(array[0]);
+        terms->terms.push_back(_CacheArrayTerm{hash, array.cdata(), bytes});
+        terms->totalBytes += bytes;
+    }
+}
+
+struct _CacheDigestJob
+{
+    void const *data;
+    size_t bytes;
+    uint64_t seed;
+    uint64_t *out;
+};
+
+// 4MB segments: the bench key spreads its 4/16/12/8MB arrays over 10 jobs.
+size_t constexpr _CacheDigestSegmentBytes = size_t(4) << 20;
+
+void _CacheDigestTerms(_CacheArrayTerms const &terms)
+{
+    if (terms.terms.empty())
+        return;
+    // Flatten terms into segment jobs (segmentation is a deterministic
+    // function of each term's bytes); the ordered folds below restore term
+    // order, and per-segment seeds domain-separate segment positions.
+    std::vector<_CacheDigestJob> jobs;
+    size_t jobCount = 0;
+    for (_CacheArrayTerm const &term : terms.terms)
+        jobCount += (term.bytes + _CacheDigestSegmentBytes - 1) /
+            _CacheDigestSegmentBytes;
+    jobs.reserve(jobCount);
+    std::vector<uint64_t> digests(jobCount);
+    size_t job = 0;
+    for (_CacheArrayTerm const &term : terms.terms) {
+        unsigned char const *base =
+            static_cast<unsigned char const *>(term.data);
+        size_t remaining = term.bytes, seg = 0;
+        while (remaining != 0) {
+            size_t const len =
+                std::min(remaining, _CacheDigestSegmentBytes);
+            jobs.push_back(_CacheDigestJob{
+                base, len,
+                UsdGenDigestOffset ^ (seg * 0x9E3779B97F4A7C15ULL),
+                &digests[job]});
+            base += len;
+            remaining -= len;
+            ++seg;
+            ++job;
+        }
+    }
+    // Threaded over jobs for big keys (plain TBB like tile publication:
+    // Cook owns no scheduler context here); chunks cap at 8. Small keys
+    // keep the serial driver, computing the identical function.
+    int const keyWorkers = tbb::this_task_arena::max_concurrency();
+    size_t const keyChunks =
+        (keyWorkers > 1 && terms.totalBytes > 1048576)
+            ? std::min({size_t(keyWorkers), size_t(8), jobs.size()})
+            : 1;
+    if (keyChunks > 1) {
+        size_t const n = jobs.size();
+        _CacheDigestJob const *jobData = jobs.data();
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, keyChunks),
+            [&](tbb::blocked_range<size_t> const &range) {
+                for (size_t c = range.begin(); c != range.end(); ++c) {
+                    size_t const i0 = (c * n) / keyChunks;
+                    size_t const i1 = ((c + 1) * n) / keyChunks;
+                    for (size_t i = i0; i < i1; ++i)
+                        *jobData[i].out = UsdGenDigestBytes(
+                            jobData[i].data, jobData[i].bytes,
+                            jobData[i].seed);
+                }
+            });
+    } else {
+        for (_CacheDigestJob const &j : jobs)
+            *j.out = UsdGenDigestBytes(j.data, j.bytes, j.seed);
+    }
+    // Ordered fold: each term's segment digests chain, then terms join
+    // their lane in recorded walk order.
+    size_t k = 0;
+    for (_CacheArrayTerm const &term : terms.terms) {
+        uint64_t acc = UsdGenDigestOffset;
+        size_t remaining = term.bytes;
+        while (remaining != 0) {
+            size_t const len =
+                std::min(remaining, _CacheDigestSegmentBytes);
+            UsdGenDigestMixWord(acc, digests[k++]);
+            remaining -= len;
+        }
+        _CacheMix(term.lane, acc);
+    }
 }
 
 void _CacheMixVec3(uint64_t *hash, GfVec3f const &value)
@@ -204,6 +301,7 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
 {
     uint64_t h0 = 1469598103934665603ULL;
     uint64_t h1 = 1099511628211ULL;
+    _CacheArrayTerms terms;
     _CacheMix(&h0, static_cast<uint64_t>(graph.NodeCount()));
     _CacheMix(&h1, static_cast<uint64_t>(graph.TerminalNodeId()));
     for (UsdGenNodeId id = 0; id != static_cast<UsdGenNodeId>(graph.NodeCount()); ++id) {
@@ -240,9 +338,9 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
             }
             _CacheMix(&h1, static_cast<uint64_t>(nd.ramps.size()));
             for (UsdGenRampDesc const &ramp : nd.ramps) {
-                _CacheMixArray(&h0, ramp.knots);
-                _CacheMixArray(&h1, ramp.positions);
-                _CacheMixArray(&h0, ramp.colors);
+                _CacheMixArray(&h0, ramp.knots, &terms);
+                _CacheMixArray(&h1, ramp.positions, &terms);
+                _CacheMixArray(&h0, ramp.colors, &terms);
                 _CacheMixText(&h1, ramp.interpolation.GetString());
             }
         }
@@ -257,8 +355,8 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
     _CacheMixText(&h0, desc.look.bakeMode.GetString());
     _CacheMixText(&h1, desc.look.bakeTarget.GetString());
     _CacheMixText(&h0, desc.look.bakePrimvar.GetString());
-    _CacheMixArray(&h1, desc.look.rampColors);
-    _CacheMixArray(&h0, desc.look.rampPositions);
+    _CacheMixArray(&h1, desc.look.rampColors, &terms);
+    _CacheMixArray(&h0, desc.look.rampPositions, &terms);
     _CacheMixVec3(&h1, desc.look.rootColor);
     _CacheMixVec3(&h0, desc.look.tipColor);
     _CacheMixText(&h1, desc.look.rampInterpolation.GetString());
@@ -312,13 +410,13 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
     for (UsdGenGeometryDesc const &geometry : desc.geometries) {
         _CacheMixText(&h0, geometry.path.GetString());
         _CacheMix(&h1, static_cast<uint64_t>(geometry.kind));
-        _CacheMixArray(&h0, geometry.counts);
-        _CacheMixArray(&h1, geometry.indices);
-        _CacheMixArray(&h0, geometry.points);
-        _CacheMixArray(&h1, geometry.rest);
-        _CacheMixArray(&h0, geometry.normals);
-        _CacheMixArray(&h1, geometry.ids);
-        _CacheMixArray(&h0, geometry.subsetFaces);
+        _CacheMixArray(&h0, geometry.counts, &terms);
+        _CacheMixArray(&h1, geometry.indices, &terms);
+        _CacheMixArray(&h0, geometry.points, &terms);
+        _CacheMixArray(&h1, geometry.rest, &terms);
+        _CacheMixArray(&h0, geometry.normals, &terms);
+        _CacheMixArray(&h1, geometry.ids, &terms);
+        _CacheMixArray(&h0, geometry.subsetFaces, &terms);
         _CacheMix(&h1, geometry.isSubset ? 1u : 0u);
         _CacheMixMatrix(&h0, geometry.worldMatrix);
         _CacheMix(&h1, geometry.generation);
@@ -346,7 +444,7 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
         // pre-stroke cache entry and the groom would freeze (the density
         // multiplier's row below is the same contract).
         if (map.type == TfToken("UsdGenPaintMap"))
-            _CacheMixArray(&h0, map.paintValues);
+            _CacheMixArray(&h0, map.paintValues, &terms);
         _CacheMix(&h0, static_cast<uint64_t>(map.params.size()));
         for (UsdGenParamValue const &param : map.params) {
             _CacheMixText(&h1, param.name.GetString());
@@ -363,15 +461,15 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
         _CacheMixText(&h1, curve.wrap.GetString());
         _CacheMixText(&h0, curve.widthsInterpolation.GetString());
         _CacheMix(&h1, static_cast<uint64_t>(curve.restFromCurrentPoints));
-        _CacheMixArray(&h0, curve.curveVertexCounts);
-        _CacheMixArray(&h1, curve.points);
-        _CacheMixArray(&h0, curve.rest);
+        _CacheMixArray(&h0, curve.curveVertexCounts, &terms);
+        _CacheMixArray(&h1, curve.points, &terms);
+        _CacheMixArray(&h0, curve.rest, &terms);
         _CacheMixMatrix(&h1, curve.worldMatrix);
-        _CacheMixArray(&h0, curve.widths);
-        _CacheMixArray(&h1, curve.skinPrim);
-        _CacheMixArray(&h0, curve.curveId);
-        _CacheMixArray(&h1, curve.skinPrimUv);
-        _CacheMixArray(&h0, curve.rootFrame);
+        _CacheMixArray(&h0, curve.widths, &terms);
+        _CacheMixArray(&h1, curve.skinPrim, &terms);
+        _CacheMixArray(&h0, curve.curveId, &terms);
+        _CacheMixArray(&h1, curve.skinPrimUv, &terms);
+        _CacheMixArray(&h0, curve.rootFrame, &terms);
         _CacheMixText(&h0, curve.frozenEpoch);
         _CacheMix(&h1, curve.curveGeneration);
         _CacheMix(&h1, static_cast<uint64_t>(curve.authoredPlanes.size()));
@@ -380,8 +478,8 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
             _CacheMix(&h1, static_cast<uint64_t>(plane.type));
             _CacheMix(&h0, static_cast<uint64_t>(plane.domain));
             _CacheMix(&h1, plane.arity);
-            _CacheMixArray(&h0, plane.floatValues);
-            _CacheMixArray(&h1, plane.intValues);
+            _CacheMixArray(&h0, plane.floatValues, &terms);
+            _CacheMixArray(&h1, plane.intValues, &terms);
         }
     }
     for (UsdGenSurfaceDesc const &surface : desc.surfaces) {
@@ -392,28 +490,29 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
         _CacheMix(&h1, surface.id);
         _CacheMix(&h0, static_cast<uint64_t>(surface.restNormalDomain));
         _CacheMix(&h1, static_cast<uint64_t>(surface.restFromCurrentPoints));
-        _CacheMixArray(&h0, surface.faceVertexCounts);
-        _CacheMixArray(&h1, surface.faceVertexIndices);
-        _CacheMixArray(&h0, surface.restPoints);
-        _CacheMixArray(&h1, surface.restNormals);
-        _CacheMixArray(&h0, surface.points);
+        _CacheMixArray(&h0, surface.faceVertexCounts, &terms);
+        _CacheMixArray(&h1, surface.faceVertexIndices, &terms);
+        _CacheMixArray(&h0, surface.restPoints, &terms);
+        _CacheMixArray(&h1, surface.restNormals, &terms);
+        _CacheMixArray(&h0, surface.points, &terms);
         _CacheMix(&h1, static_cast<uint64_t>(surface.samples.size()));
         for (UsdGenSurfaceSample const& sample : surface.samples) {
             uint64_t sampleTimeBits = 0;
             std::memcpy(&sampleTimeBits, &sample.time, sizeof(sampleTimeBits));
             _CacheMix(&h0, sampleTimeBits);
-            _CacheMixArray(&h1, sample.points);
+            _CacheMixArray(&h1, sample.points, &terms);
         }
-        _CacheMixArray(&h0, surface.velocities);
-        _CacheMixArray(&h1, surface.uv);
-        _CacheMixArray(&h0, surface.subsetFaces);
+        _CacheMixArray(&h0, surface.velocities, &terms);
+        _CacheMixArray(&h1, surface.uv, &terms);
+        _CacheMixArray(&h0, surface.subsetFaces, &terms);
         _CacheMix(&h1, surface.isSubset ? 1u : 0u);
         // Paint density the brush bakes: a repaint must miss the cache,
         // or the stale pre-stroke roots publish and the groom freezes.
-        _CacheMixArray(&h1, surface.densityMultiplier);
+        _CacheMixArray(&h1, surface.densityMultiplier, &terms);
         _CacheMixMatrix(&h0, surface.worldMatrix);
         _CacheMix(&h1, surface.surfaceGeneration);
     }
+    _CacheDigestTerms(terms);
     return {h0, h1};
 }
 
