@@ -2082,6 +2082,7 @@ UsdGenStats publishedStats, bool invalidateValues,
         // geometry shares the previous immutable arrays.
         if (prev) gen.scalpShadow = prev->scalpShadow;
         occlusion.occluderCache = &_furOccluderBuild;
+        occlusion.scalpScratch = &_furScalpScratch;
         UsdGenBuildFurOcclusion(&gen.tiles, prev ? &prev->tiles : nullptr,
                                 occlusion, &_furVolumeKey, &gen.scalpShadow);
         if (!gen.scalpShadow.IsEmpty()) {

@@ -46,6 +46,21 @@ struct UsdGenFurOccluderBuild
     std::vector<GfVec3f> vertexNormals;
 };
 
+/// Caller-owned scratch for the scalp-shadow cap build: the per-chunk
+/// outputs, carried across cooks so a deform timeline reuses their capacity
+/// instead of re-faulting hundreds of megabytes of fresh pages every frame.
+/// Never published (the merged cap arrays are still built fresh every bake),
+/// and live in exactly one cook at a time like `volumeKey`.
+struct UsdGenScalpShadowScratch
+{
+    struct Chunk {
+        VtVec3fArray points, normals;
+        VtFloatArray tauP, tauN;
+        VtIntArray counts, indices;
+    };
+    std::vector<Chunk> chunks;
+};
+
 struct UsdGenFurOcclusionParams
 {
     /// Opaque blockers, normally the groom's emitting surfaces. Only the part
@@ -92,6 +107,11 @@ struct UsdGenFurOcclusionParams
     /// Caller-owned occluder-mesh reuse (see UsdGenFurOccluderBuild). The
     /// bake reads and writes it; the caller must not touch it mid-cook.
     UsdGenFurOccluderBuild* occluderCache = nullptr;
+
+    /// Caller-owned cap-build scratch (see UsdGenScalpShadowScratch). Null
+    /// keeps the historical behaviour of allocating the chunk outputs fresh
+    /// every bake.
+    UsdGenScalpShadowScratch* scalpScratch = nullptr;
 };
 
 /// Bakes geometry-derived directional optical depth for a whole groom.

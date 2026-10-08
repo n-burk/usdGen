@@ -177,7 +177,8 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
                       std::vector<GfVec3f> const& vertexNormals, float inward,
                       Grid const& grid, int maxTriangles, Gather const& gather,
                       UsdGenWorkDispatcher* dispatcher,
-                      UsdGenScalpShadowPublication* out)
+                      UsdGenScalpShadowPublication* out,
+                      UsdGenScalpShadowScratch* scratch = nullptr)
 {
     // The 90th-percentile edge decides the level, so one oversized face cannot
     // refine the whole mesh; the triangle ceiling then bounds it outright.
@@ -220,15 +221,27 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
     // order. The merged arrays match the serial emission order exactly, and
     // no floating-point value crosses a chunk boundary, so the cap, extent,
     // and digest are bit-identical to the serial build.
-    struct ChunkOut {
-        VtVec3fArray points, normals;
-        VtFloatArray tauP, tauN;
-        VtIntArray counts, indices;
-    };
+    //
+    // With caller-owned scratch the chunk outputs persist across cooks: the
+    // same capacities are refilled every frame instead of re-faulted, and
+    // the emission below is unchanged so the merged cap is bit-identical.
+    // Without scratch the outputs are function-local, as historically.
+    using ChunkOut = UsdGenScalpShadowScratch::Chunk;
     size_t const nChunks = triangles.empty() ? 1 : std::max<size_t>(1,
         std::min<size_t>(triangles.size(), size_t(dispatcher ?
             std::max(1, dispatcher->MaxConcurrency()) : 1)));
-    std::vector<ChunkOut> chunks(nChunks);
+    std::vector<ChunkOut> localChunks;
+    if (scratch) {
+        scratch->chunks.resize(nChunks);
+        for (ChunkOut& c : scratch->chunks) {
+            c.points.clear(); c.normals.clear();
+            c.tauP.clear(); c.tauN.clear();
+            c.counts.clear(); c.indices.clear();
+        }
+    } else {
+        localChunks.resize(nChunks);
+    }
+    std::vector<ChunkOut>& chunks = scratch ? scratch->chunks : localChunks;
     { TRACE_SCOPE("usdGen scalp: refine");
     ForEach(dispatcher, nChunks, [&](size_t chunk) {
         size_t const first=(chunk*triangles.size())/nChunks;
@@ -361,7 +374,10 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
             for(size_t j=0;j<c.indices.size();++j)
                 mergeIdx[oIndices+j]=c.indices[j]+base;
         });
-        for(ChunkOut& c:chunks) c=ChunkOut();
+        // Without scratch the chunk outputs are freed here, before the
+        // extent and digest, as historically; with scratch they persist for
+        // the next cook (cleared on entry above).
+        if (!scratch) for(ChunkOut& c:chunks) c=ChunkOut();
     }
     out->points=points; out->normals=normals;
     out->faceVertexCounts=counts; out->faceVertexIndices=indices;
@@ -949,7 +965,7 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
         sweep();   // hair only: the head shadowing itself is the skin shader's job
         BuildScalpShadow(triangles, vertexNormals, inward, grid,
                          params.scalpMaxTriangles, gather, dispatcher,
-                         scalpShadow);
+                         scalpShadow, params.scalpScratch);
     }
 
     // --- opaque occluders: a saturated shell just under the surface -----------

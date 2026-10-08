@@ -185,6 +185,9 @@ private:
     // The world-space occluder mesh, carried across cooks while the emitting
     // surfaces sit still (see UsdGenFurOcclusionParams::occluderCache).
     UsdGenFurOccluderBuild _furOccluderBuild;
+    // The cap-build chunk outputs, carried across cooks for their capacity
+    // (see UsdGenFurOcclusionParams::scalpScratch).
+    UsdGenScalpShadowScratch _furScalpScratch;
     // The published baseline is not this graph's last run: rebuild every tile.
     bool _rebuildAllTiles = false;
     UsdGenGenerationStore _store;

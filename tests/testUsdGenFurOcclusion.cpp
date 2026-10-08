@@ -341,6 +341,10 @@ int main() try {
         params.scalpShadow=true;
         UsdGenFurOccluderBuild cache;
         params.occluderCache=&cache;
+        // The same bakes also reuse the cap-build scratch below: every
+        // comparison after the first runs on retained chunk capacity.
+        UsdGenScalpShadowScratch scratch;
+        params.scalpScratch=&scratch;
         std::vector<UsdGenTilePublication> live{
             Make(0,-0.1f,400), Probe(1,GfVec3f(0,-0.3f,0),GfVec3f(0,-0.25f,0))};
         UsdGenScalpShadowPublication first;
@@ -353,6 +357,7 @@ int main() try {
         moved[0].xformMatrix.SetTranslate(GfVec3d(0.05,0,0));
         UsdGenFurOcclusionParams bare=params;
         bare.occluderCache=nullptr;
+        bare.scalpScratch=nullptr;
         auto expect=moved;
         UsdGenScalpShadowPublication expectShadow;
         Require(UsdGenBuildFurOcclusion(&expect,nullptr,bare,nullptr,&expectShadow),
