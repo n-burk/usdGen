@@ -862,34 +862,23 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
         float const perVoxel=2.f*UsdGenFurTauClamp/float(mark);
 
         // A shell taken with max(), so it does not depend on how densely the
-        // triangles happen to be sampled. Slabs own disjoint cells, and each
-        // slab only walks the triangles whose shell can reach it.
-        std::vector<float> mask(cells,0.f);
-        std::vector<std::vector<int>> buckets(slabs);
-        for(size_t i=0;i<triangles.size();++i) {
-            Triangle const& tri=triangles[i];
-            GfVec3f const step=tri.normal*(inward*h);
-            float low=std::numeric_limits<float>::max(), high=-low;
-            for(GfVec3f const& corner:{tri.a,tri.b,tri.c})
-                for(int layer=0;layer<mark;++layer) {
-                    float const z=(corner+step*(float(bias+layer)+0.5f))[2];
-                    low=std::min(low,z); high=std::max(high,z);
-                }
-            int const first=int(std::floor((low-grid.origin[2])*grid.invH))-1;
-            int const last=int(std::floor((high-grid.origin[2])*grid.invH))+1;
-            if(last<0 || first>=grid.n[2]) continue;
-            for(size_t slab=0;slab<slabs;++slab) {
-                int const z0=int((slab*size_t(grid.n[2]))/slabs);
-                int const z1=int(((slab+1)*size_t(grid.n[2]))/slabs);
-                if(last>=z0 && first<z1) buckets[slab].push_back(int(i));
-            }
-        }
-        ForEach(dispatcher,slabs,[&](size_t slab) {
-            int const z0=int((slab*size_t(grid.n[2]))/slabs);
-            int const z1=int(((slab+1)*size_t(grid.n[2]))/slabs);
-            if(z0>=z1) return;
-            for(int index:buckets[slab]) {
-                Triangle const& tri=triangles[size_t(index)];
+        // triangles happen to be sampled. Each triangle is rasterized once,
+        // into its chunk's own mask; the chunk masks then merge with max(),
+        // which over non-negative trilinear weights is order-independent
+        // bit-for-bit, so the merged shell matches the old walk exactly.
+        // (The slab-bucketed walk this replaces visited every triangle once
+        // per overlapping slab and re-iterated the full lattice per visit.)
+        size_t const nShellChunks = std::max<size_t>(1, std::min<size_t>(
+            triangles.size(), size_t(dispatcher ?
+                std::max(1, dispatcher->MaxConcurrency()) : 1)));
+        std::vector<std::vector<float>> chunkMasks(nShellChunks);
+        ForEach(dispatcher,nShellChunks,[&](size_t chunk) {
+            size_t const first=(chunk*triangles.size())/nShellChunks;
+            size_t const last=((chunk+1)*triangles.size())/nShellChunks;
+            std::vector<float>& mask=chunkMasks[chunk];
+            mask.assign(cells,0.f);
+            for(size_t ti=first;ti<last;++ti) {
+                Triangle const& tri=triangles[ti];
                 GfVec3f const e1=tri.b-tri.a, e2=tri.c-tri.a;
                 // Barycentric lattice fine enough that adjacent samples'
                 // trilinear stencils overlap, so the shell has no pinholes.
@@ -905,7 +894,6 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
                         int c[3]; float w[3];
                         grid.Corners(at,c,w);
                         for(int z=0;z<2;++z) {
-                            if(c[2]+z<z0 || c[2]+z>=z1) continue;
                             for(int y=0;y<2;++y) for(int x=0;x<2;++x) {
                                 float const weight=(x?w[0]:1-w[0])*(y?w[1]:1-w[1])*(z?w[2]:1-w[2]);
                                 float& cell=mask[grid.Index(c[0]+x,c[1]+y,c[2]+z)];
@@ -916,6 +904,16 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
                 }
             }
         });
+        std::vector<float> mask(cells,0.f);
+        ForEach(dispatcher,slabs,[&](size_t slab) {
+            size_t const first=(slab*cells)/slabs, last=((slab+1)*cells)/slabs;
+            for(size_t i=first;i<last;++i) {
+                float m=0.f;
+                for(auto const& cm:chunkMasks) m=std::max(m,cm[i]);
+                mask[i]=m;
+            }
+        });
+        chunkMasks.clear(); chunkMasks.shrink_to_fit();
         ForEach(dispatcher,slabs,[&](size_t slab) {
             size_t const first=(slab*cells)/slabs, last=((slab+1)*cells)/slabs;
             for(size_t i=first;i<last;++i)
