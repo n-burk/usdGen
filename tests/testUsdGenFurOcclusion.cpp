@@ -305,6 +305,80 @@ int main() try {
         Require(Tau(live[1],"furTauP",0)[1]>0.75f*UsdGenFurTauClamp,"rebuild used the occluder");
     }
 
+    // ---- occluder-mesh reuse across cooks -----------------------------------
+    // The world-space mesh is keyed on the occluder bytes alone: moving the
+    // hair reuses it bit-for-bit (including the scalp cap, which reads the
+    // cached normals), while editing the occluder rebuilds it.
+    {
+        auto checkSame = [&](std::vector<UsdGenTilePublication> const& got,
+                             std::vector<UsdGenTilePublication> const& want,
+                             UsdGenScalpShadowPublication const& gotShadow,
+                             UsdGenScalpShadowPublication const& wantShadow,
+                             char const* msg) {
+            Require(got.size()==want.size(),msg);
+            for(size_t t=0;t<got.size();++t) for(auto name:{"furTauP","furTauN"}) {
+                auto const& g=Plane(got[t],name).f, &w=Plane(want[t],name).f;
+                Require(g.size()==w.size(),msg);
+                for(size_t i=0;i<g.size();++i) Require(g[i]==w[i],msg);
+            }
+            Require(gotShadow.digest==wantShadow.digest,msg);
+            Require(gotShadow.points.size()==wantShadow.points.size(),msg);
+            for(size_t i=0;i<gotShadow.points.size();++i) {
+                Require(gotShadow.points[i]==wantShadow.points[i],msg);
+                Require(gotShadow.normals[i]==wantShadow.normals[i],msg);
+            }
+            Require(gotShadow.faceVertexCounts==wantShadow.faceVertexCounts,msg);
+            Require(gotShadow.faceVertexIndices==wantShadow.faceVertexIndices,msg);
+            for(auto name:{"furTauP","furTauN"}) {
+                auto const& g=Plane(gotShadow.extraUniform,name).f;
+                auto const& w=Plane(wantShadow.extraUniform,name).f;
+                Require(g.size()==w.size(),msg);
+                for(size_t i=0;i<g.size();++i) Require(g[i]==w[i],msg);
+            }
+        };
+        UsdGenFurOcclusionParams params;
+        params.occluders.push_back(Quad(0.f,0.2f,false));
+        params.scalpShadow=true;
+        UsdGenFurOccluderBuild cache;
+        params.occluderCache=&cache;
+        std::vector<UsdGenTilePublication> live{
+            Make(0,-0.1f,400), Probe(1,GfVec3f(0,-0.3f,0),GfVec3f(0,-0.25f,0))};
+        UsdGenScalpShadowPublication first;
+        Require(UsdGenBuildFurOcclusion(&live,nullptr,params,nullptr,&first),
+                "first cached bake");
+        Require(cache.valid,"a miss publishes the mesh");
+        Require(!cache.triangles.empty(),"the cache holds the triangulation");
+        // Move the hair: the volume rebakes, the mesh reuses.
+        auto moved=live;
+        moved[0].xformMatrix.SetTranslate(GfVec3d(0.05,0,0));
+        UsdGenFurOcclusionParams bare=params;
+        bare.occluderCache=nullptr;
+        auto expect=moved;
+        UsdGenScalpShadowPublication expectShadow;
+        Require(UsdGenBuildFurOcclusion(&expect,nullptr,bare,nullptr,&expectShadow),
+                "uncached reference bake");
+        UsdGenScalpShadowPublication hit;
+        Require(UsdGenBuildFurOcclusion(&moved,nullptr,params,nullptr,&hit),
+                "moved hair rebakes through the cache");
+        checkSame(moved,expect,hit,expectShadow,"cache hit is bit-identical");
+        // Edit the occluder: the mesh rebuilds and still matches no-cache.
+        uint64_t const before=cache.key;
+        params.occluders[0].points[0][1]+=0.01f;
+        bare.occluders=params.occluders;
+        auto edited=moved;
+        UsdGenScalpShadowPublication editedShadow;
+        Require(UsdGenBuildFurOcclusion(&edited,nullptr,params,nullptr,&editedShadow),
+                "occluder edit rebakes through the cache");
+        Require(cache.key!=before,"an occluder edit re-keys the mesh");
+        auto expectEdited=moved;
+        UsdGenScalpShadowPublication expectEditedShadow;
+        Require(UsdGenBuildFurOcclusion(&expectEdited,nullptr,bare,nullptr,
+                                       &expectEditedShadow),
+                "edited uncached reference bake");
+        checkSame(edited,expectEdited,editedShadow,expectEditedShadow,
+                  "occluder edit rebuilds bit-identically");
+    }
+
     // ---- angular reconstruction ---------------------------------------------
     // Ground truth for direction d: rotate the groom so d maps to +Y and bake.
     // The axis sweeps are exact along the axes, and a ball of fibres keeps its

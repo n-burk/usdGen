@@ -113,11 +113,8 @@ struct JobDensity {
     std::vector<GfVec3f> density;
 };
 
-// One world-space occluder triangle. The direction that points into the solid
-// is resolved once for the whole mesh set. The corner ids index a per-bake
-// vertex array, which is what lets the scalp cap carry smooth normals: a face
-// normal would band the shadow along every edge of the scalp mesh.
-struct Triangle { GfVec3f a, b, c, normal; uint32_t ia, ib, ic; };
+// The world-space mesh lives in UsdGenFurOccluderTriangle (furOcclusion.h)
+// so a caller-owned build cache can carry it across cooks.
 
 // Triangles with less hair than this over them are dropped, so bare skin is
 // untouched and the translucent pass stays small. It has to be small: dropping
@@ -176,7 +173,7 @@ inline float HemisphereDepth(float const values[6], GfVec3f const& n)
 /// One k for the whole mesh, so shared edges are split identically and the cap
 /// has no T-junctions: adaptive per face would crack.
 template <class Gather>
-void BuildScalpShadow(std::vector<Triangle> const& triangles,
+void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
                       std::vector<GfVec3f> const& vertexNormals, float inward,
                       Grid const& grid, int maxTriangles, Gather const& gather,
                       UsdGenWorkDispatcher* dispatcher,
@@ -188,7 +185,7 @@ void BuildScalpShadow(std::vector<Triangle> const& triangles,
     { TRACE_SCOPE("usdGen scalp: edges");
     std::vector<float> edges;
     edges.reserve(triangles.size());
-    for(Triangle const& t:triangles)
+    for(UsdGenFurOccluderTriangle const& t:triangles)
         edges.push_back(std::max({(t.b-t.a).GetLength(),(t.c-t.b).GetLength(),
                                   (t.a-t.c).GetLength()}));
     auto at=edges.begin()+std::min(edges.size()-1,size_t(0.9*double(edges.size())));
@@ -254,7 +251,7 @@ void BuildScalpShadow(std::vector<Triangle> const& triangles,
         std::vector<float> depth(perTriangle*6), shaded(perTriangle);
         std::vector<int> remap(perTriangle);
         for(size_t ti=first;ti<last;++ti) {
-            Triangle const& tri=triangles[ti];
+            UsdGenFurOccluderTriangle const& tri=triangles[ti];
             GfVec3f const na=vertexNormals[tri.ia]*outward;
             GfVec3f const nb=vertexNormals[tri.ib]*outward;
             GfVec3f const nc=vertexNormals[tri.ic]*outward;
@@ -440,9 +437,13 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
     // names cook digests explicitly. Values change; the key is in-memory
     // equality-only (stability/sensitivity tested, never golden).
     uint64_t key = UsdGenDigestOffset;
+    uint64_t occluderKey = UsdGenDigestOffset;
     {
         auto word = [&](void const* p, size_t n) {
             key = UsdGenDigestBytes(p, n, key);
+        };
+        auto oword = [&](void const* p, size_t n) {
+            occluderKey = UsdGenDigestBytes(p, n, occluderKey);
         };
         word(&params.voxelSize, sizeof(params.voxelSize));
         word(&params.maxDimension, sizeof(params.maxDimension));
@@ -451,14 +452,19 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
         word(&params.opaqueMarkVoxels, sizeof(params.opaqueMarkVoxels));
         word(&params.scalpShadow, sizeof(params.scalpShadow));
         word(&params.scalpMaxTriangles, sizeof(params.scalpMaxTriangles));
+        // The occluder bytes feed their own digest first, which the build
+        // cache below keys on; folding that digest into the volume key keeps
+        // one pass over the mesh while covering the same inputs. Key values
+        // change; the key is in-memory equality-only (never golden).
         for (UsdGenFurOccluder const& occluder : params.occluders) {
-            word(&occluder.worldMatrix, sizeof(occluder.worldMatrix));
-            word(occluder.points.cdata(), occluder.points.size()*sizeof(GfVec3f));
-            word(occluder.faceVertexCounts.cdata(),
-                 occluder.faceVertexCounts.size()*sizeof(int));
-            word(occluder.faceVertexIndices.cdata(),
-                 occluder.faceVertexIndices.size()*sizeof(int));
+            oword(&occluder.worldMatrix, sizeof(occluder.worldMatrix));
+            oword(occluder.points.cdata(), occluder.points.size()*sizeof(GfVec3f));
+            oword(occluder.faceVertexCounts.cdata(),
+                  occluder.faceVertexCounts.size()*sizeof(int));
+            oword(occluder.faceVertexIndices.cdata(),
+                  occluder.faceVertexIndices.size()*sizeof(int));
         }
+        key = UsdGenDigestBytes(&occluderKey, sizeof(occluderKey), key);
     }
     bool same = previous && previous->size()==tiles->size() &&
                 (!volumeKey || *volumeKey == key);
@@ -762,11 +768,37 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
     // --- occluder triangles, and which side of them the solid is on ----------
     // Built before the shell is injected, because the scalp-shadow cap needs
     // hair-only depth and the side vote needs hair-only density.
-    std::vector<Triangle> triangles;
-    std::vector<GfVec3f> vertices, vertexNormals;
+    //
+    // The mesh is a pure function of the occluder bytes, so a caller-owned
+    // cache carries it across cooks: a deform timeline re-cooks every frame
+    // while its emitting surfaces sit still. On a miss the build lands
+    // directly in the cache's vectors (cleared first, the key published only
+    // after the whole mesh built without throwing); on a hit the cached mesh
+    // is used as-is. The side vote below always re-runs: it reads the fresh
+    // hair density, so `inward` is identical to a from-scratch build either
+    // way. The world-space vertices are build-only temporaries (every later
+    // stage reads the triangles), so they stay local and uncached.
+    UsdGenFurOccluderBuild* const occluderCache = params.occluderCache;
+    bool const occluderHit = occluderCache && occluderCache->valid &&
+                             occluderCache->key == occluderKey;
+    std::vector<UsdGenFurOccluderTriangle> missTriangles;
+    std::vector<GfVec3f> missNormals;
+    if (occluderCache && !occluderHit) {
+        occluderCache->triangles.clear();
+        occluderCache->vertexNormals.clear();
+        occluderCache->valid = false;
+    }
+    std::vector<UsdGenFurOccluderTriangle>& triangles =
+        occluderCache ? occluderCache->triangles : missTriangles;
+    std::vector<GfVec3f>& vertexNormals =
+        occluderCache ? occluderCache->vertexNormals : missNormals;
+    std::vector<GfVec3f> vertices;
     float inward = -1.f;
     if(!params.occluders.empty()) {
         TRACE_SCOPE("usdGen occlusion: occluder triangles");
+        TF_DEBUG(USDGEN_FUR).Msg("usdGen fur: occluder mesh %s\n",
+                                 occluderHit ? "reused" : "rebuilt");
+        if (!occluderHit) {
         for(UsdGenFurOccluder const& occluder:params.occluders) {
             GfMatrix4f const m(occluder.worldMatrix);
             bool const identity = occluder.worldMatrix == GfMatrix4d(1.0);
@@ -801,7 +833,7 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
                 uint32_t const first=vertex(0);
                 for(size_t k=1;k+1<size_t(face);++k) {
                     uint32_t const ib=vertex(k), ic=vertex(k+1);
-                    Triangle tri{vertices[first],vertices[ib],vertices[ic],
+                    UsdGenFurOccluderTriangle tri{vertices[first],vertices[ib],vertices[ic],
                                  GfVec3f(0),first,ib,ic};
                     GfVec3f const n=GfCross(tri.b-tri.a,tri.c-tri.a);
                     float const length=n.GetLength();
@@ -817,7 +849,7 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
         // triangle's area, so accumulating it unnormalised is the weighting.
         { TRACE_SCOPE("usdGen tris: normals");
         vertexNormals.assign(vertices.size(),GfVec3f(0));
-        for(Triangle const& tri:triangles) {
+        for(UsdGenFurOccluderTriangle const& tri:triangles) {
             GfVec3f const weighted=GfCross(tri.b-tri.a,tri.c-tri.a);
             vertexNormals[tri.ia]+=weighted;
             vertexNormals[tri.ib]+=weighted;
@@ -828,6 +860,11 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
             float const length=vertexNormals[i].GetLength();
             if(length>1e-12f) vertexNormals[i]/=length;
         }
+        if (occluderCache) {
+            occluderCache->key = occluderKey;
+            occluderCache->valid = true;
+        }
+        } /* if (!occluderHit): the vote below re-runs on the fresh density */
         // Which side of the winding the solid is on: the hair grows out of the
         // surface, so the side carrying less fur density is the inside. Voting
         // over the triangles keeps this right for either winding order and for
@@ -849,7 +886,7 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
                 return sum;
             };
             for(size_t i=0;i<triangles.size();i+=stride) {
-                Triangle const& tri=triangles[i];
+                UsdGenFurOccluderTriangle const& tri=triangles[i];
                 GfVec3f const e1=tri.b-tri.a, e2=tri.c-tri.a;
                 // A lattice, not the centroid: one triangle can be larger than
                 // the whole groom, and then its centroid says nothing.
@@ -947,7 +984,7 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
             std::vector<float>& mask=chunkMasks[chunk];
             mask.assign(cells,0.f);
             for(size_t ti=first;ti<last;++ti) {
-                Triangle const& tri=triangles[ti];
+                UsdGenFurOccluderTriangle const& tri=triangles[ti];
                 GfVec3f const e1=tri.b-tri.a, e2=tri.c-tri.a;
                 // Barycentric lattice fine enough that adjacent samples'
                 // trilinear stencils overlap, so the shell has no pinholes.

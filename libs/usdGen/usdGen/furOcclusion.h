@@ -21,6 +21,31 @@ struct UsdGenFurOccluder
     GfMatrix4d   worldMatrix{1.0};
 };
 
+/// One world-space occluder triangle. The direction that points into the
+/// solid is resolved once for the whole mesh set. The corner ids index a
+/// per-bake vertex array, which is what lets the scalp cap carry smooth
+/// normals: a face normal would band the shadow along every edge of the
+/// scalp mesh.
+struct UsdGenFurOccluderTriangle
+{
+    GfVec3f a, b, c, normal;
+    uint32_t ia, ib, ic;
+};
+
+/// Caller-owned reuse for the world-space occluder mesh (the fan
+/// triangulation plus area-weighted vertex normals). A deform timeline
+/// re-cooks every frame while its emitting surfaces sit still, so the mesh
+/// is identical cook to cook; the bake keys it on the occluder bytes alone
+/// and skips the rebuild on a match. Like `volumeKey`, this is live in
+/// exactly one cook at a time and is never shared between sessions.
+struct UsdGenFurOccluderBuild
+{
+    uint64_t key = 0;
+    bool valid = false;
+    std::vector<UsdGenFurOccluderTriangle> triangles;
+    std::vector<GfVec3f> vertexNormals;
+};
+
 struct UsdGenFurOcclusionParams
 {
     /// Opaque blockers, normally the groom's emitting surfaces. Only the part
@@ -28,6 +53,9 @@ struct UsdGenFurOcclusionParams
     /// never grown to fit an occluder, so a ground plane cannot destroy the
     /// resolution of a head.
     std::vector<UsdGenFurOccluder> occluders;
+
+    /// Optional reuse for the world-space occluder mesh (see above). Null
+    /// keeps the historical behaviour of rebuilding it every bake.
 
     /// Target voxel edge in world units when `resolution` is 0. A host renderer uses
     /// 0.3 cm (`Voxelization.Virtual.VoxelWorldSize`) and this scene
@@ -60,6 +88,10 @@ struct UsdGenFurOcclusionParams
     /// With a dispatcher, tiles are splatted and gathered in parallel on its
     /// arena and the occluder shell is marked in parallel slabs.
     UsdGenWorkDispatcher* dispatcher = nullptr;
+
+    /// Caller-owned occluder-mesh reuse (see UsdGenFurOccluderBuild). The
+    /// bake reads and writes it; the caller must not touch it mid-cook.
+    UsdGenFurOccluderBuild* occluderCache = nullptr;
 };
 
 /// Bakes geometry-derived directional optical depth for a whole groom.

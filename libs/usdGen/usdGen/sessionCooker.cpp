@@ -2081,6 +2081,7 @@ UsdGenStats publishedStats, bool invalidateValues,
         // The reuse path leaves the cap untouched, so seed it: unchanged
         // geometry shares the previous immutable arrays.
         if (prev) gen.scalpShadow = prev->scalpShadow;
+        occlusion.occluderCache = &_furOccluderBuild;
         UsdGenBuildFurOcclusion(&gen.tiles, prev ? &prev->tiles : nullptr,
                                 occlusion, &_furVolumeKey, &gen.scalpShadow);
         if (!gen.scalpShadow.IsEmpty()) {

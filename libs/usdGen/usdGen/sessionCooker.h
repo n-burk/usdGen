@@ -4,6 +4,7 @@
 #include "usdGen/session.h"
 #include "usdGen/compiler.h"
 #include "usdGen/executionCache.h"
+#include "usdGen/furOcclusion.h"
 #include "usdGen/sessionDeviceProvider.h"
 #include "usdGen/scheduler.h"
 #include "usdGen/valuePreview.h"
@@ -181,6 +182,9 @@ private:
     // Identity of the fur density volume's non-tile inputs (occluder meshes,
     // grid parameters): the tile COW check alone cannot see them change.
     uint64_t _furVolumeKey = 0;
+    // The world-space occluder mesh, carried across cooks while the emitting
+    // surfaces sit still (see UsdGenFurOcclusionParams::occluderCache).
+    UsdGenFurOccluderBuild _furOccluderBuild;
     // The published baseline is not this graph's last run: rebuild every tile.
     bool _rebuildAllTiles = false;
     UsdGenGenerationStore _store;
