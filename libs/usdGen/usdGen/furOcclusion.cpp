@@ -216,8 +216,24 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
                       Grid const& grid, int maxTriangles, Gather const& gather,
                       UsdGenWorkDispatcher* dispatcher,
                       UsdGenScalpShadowPublication* out,
+                      uint64_t occluderKey,
                       UsdGenScalpShadowScratch* scratch = nullptr)
 {
+    // The caller seeds `out` with the previous generation's cap, so a rebuild
+    // whose lit set and occluder match can share the previous merged arrays
+    // (VtArray CoW) instead of merging fresh ones: the drain and the renderer
+    // then see IsIdentical instead of a ~320MB memcmp and re-upload. Snapshot
+    // the seed now; every carry below is size-checked and fails closed.
+    bool const havePrev = !out->IsEmpty();
+    uint64_t const prevTopo = out->topologyKey;
+    uint64_t const prevOcc = out->occluderKey;
+    float const prevLift = out->lift;
+    float const prevInward = out->inward;
+    int const prevLevel = out->tessLevel;
+    VtVec3fArray const prevPoints = out->points;
+    VtVec3fArray const prevNormals = out->normals;
+    VtIntArray const prevCounts = out->faceVertexCounts;
+    VtIntArray const prevIndices = out->faceVertexIndices;
     // The 90th-percentile edge decides the level, so one oversized face cannot
     // refine the whole mesh; the triangle ceiling then bounds it outright.
     int k = 1;
@@ -279,11 +295,17 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
         localChunks.resize(nChunks);
     }
     std::vector<ChunkOut>& chunks = scratch ? scratch->chunks : localChunks;
+    // The lit-set key: every emitted face mixes its triangle (and, past k=1,
+    // its candidate ordinal) in emission order, combined in chunk order after
+    // the refine. One integer multiply per face; the merged topology is a pure
+    // function of this key and k, so a match carries counts and indices.
+    std::vector<uint64_t> chunkTopo(nChunks, UsdGenDigestOffset);
     { TRACE_SCOPE("usdGen scalp: refine");
     ForEach(dispatcher, nChunks, [&](size_t chunk) {
         size_t const first=(chunk*triangles.size())/nChunks;
         size_t const last=((chunk+1)*triangles.size())/nChunks;
         ChunkOut& c=chunks[chunk];
+        uint64_t topo = UsdGenDigestOffset;
         // The gather carries same-cell state, so each chunk works on its own
         // copy, carried across its triangles; the merged cap is independent
         // of how the mesh was chunked.
@@ -382,6 +404,7 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
                     c.indices[ib+size_t(e)]=int(vb+size_t(e));
                 }
                 c.counts[cb]=3;
+                UsdGenDigestMixWord(topo, uint64_t(ti));
                 continue;
             }
             // (i, j) -> the lattice slot, walking i in rows of decreasing length.
@@ -404,12 +427,17 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
                 }
                 return remap[size_t(s)];
             };
+            // The candidate ordinal, not the emitted one: two different lit
+            // sets can emit the same number of faces per triangle.
+            int faceCand = 0;
             auto face=[&](int i0,int j0,int i1,int j1,int i2,int j2) {
+                int const cand = faceCand++;
                 int const t0=slot(i0,j0), t1=slot(i1,j1), t2=slot(i2,j2);
                 bool lit=false;
                 for(int s:{t0,t1,t2})
                     if(coverage(s)>kScalpShadowFloor) { lit=true; break; }
                 if(!lit) return;
+                UsdGenDigestMixWord(topo, (uint64_t(ti) << 32) | uint64_t(cand));
                 c.counts.push_back(3);
                 c.indices.push_back(emit(i0,j0));
                 c.indices.push_back(emit(i1,j1));
@@ -420,8 +448,11 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
                 if(i+j+2<=k) face(i+1,j, i+1,j+1, i,j+1);
             }
         }
+        chunkTopo[chunk] = topo;
     });
     } /* scalp: refine */
+    uint64_t const topoKey = UsdGenDigestBytes(chunkTopo.data(),
+        chunkTopo.size()*sizeof(uint64_t), UsdGenDigestOffset);
     VtVec3fArray points, normals;
     VtFloatArray tauP, tauN;
     VtIntArray counts, indices;
@@ -431,6 +462,20 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
             nPoints+=c.points.size(); nTau+=c.tauP.size();
             nCounts+=c.counts.size(); nIndices+=c.indices.size();
         }
+        // The merged topology is a pure function of the lit set and k; the
+        // normals add the occluder mesh and the solid side, and the points
+        // add the lift (which drifts with the hair bounds even when the
+        // scalp holds still). Matching keys share the seeded arrays; the
+        // depths always merge fresh. Every carry is size-checked: a key
+        // collision (or any gate skew) falls back to the fresh merge.
+        bool const topoSame = havePrev && topoKey == prevTopo && k == prevLevel;
+        bool const occSame = topoSame && occluderKey == prevOcc &&
+            inward == prevInward;
+        bool const carryTopo = topoSame &&
+            nCounts == prevCounts.size() && nIndices == prevIndices.size();
+        bool const carryNormals = occSame && nPoints == prevNormals.size();
+        bool const carryPoints = occSame && lift == prevLift &&
+            nPoints == prevPoints.size();
         // Every element of every merged array is overwritten below --
         // points/normals/tauP/tauN/counts by the tiled chunk memcpys, indices
         // by the rebase loop -- so value-filling ~320MB first is pure waste.
@@ -438,9 +483,13 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
         // types are trivially copyable/destructible); the merged bytes are
         // bit-identical.
         auto noInit = [](auto* b, auto* e) { (void)b; (void)e; };
-        points.resize(nPoints, noInit); normals.resize(nPoints, noInit);
+        if (carryPoints) points = prevPoints;
+        else points.resize(nPoints, noInit);
+        if (carryNormals) normals = prevNormals;
+        else normals.resize(nPoints, noInit);
         tauP.resize(nTau, noInit); tauN.resize(nTau, noInit);
-        counts.resize(nCounts, noInit); indices.resize(nIndices, noInit);
+        if (carryTopo) { counts = prevCounts; indices = prevIndices; }
+        else { counts.resize(nCounts, noInit); indices.resize(nIndices, noInit); }
         // Prefix offsets are serial and cheap; the copies then run per chunk
         // over the pool. Each chunk writes disjoint ranges with the same
         // bytes, indices, and rebase arithmetic: bit-identical.
@@ -454,32 +503,35 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
               oP+=chunks[i].points.size(); oT+=chunks[i].tauP.size();
               oC+=chunks[i].counts.size(); oI+=chunks[i].indices.size();
           } }
-        GfVec3f* const mergePts=points.data();
-        GfVec3f* const mergeNrm=normals.data();
+        GfVec3f* const mergePts=carryPoints ? nullptr : points.data();
+        GfVec3f* const mergeNrm=carryNormals ? nullptr : normals.data();
         float* const mergeTauP=tauP.data(), * const mergeTauN=tauN.data();
-        int* const mergeCnt=counts.data(), * const mergeIdx=indices.data();
+        int* const mergeCnt=carryTopo ? nullptr : counts.data();
+        int* const mergeIdx=carryTopo ? nullptr : indices.data();
         ForEach(dispatcher, nMerge, [&](size_t i) {
             ChunkOut& c=chunks[i];
             size_t const oPoints=mergePoints[i], oTau=mergeTau[i];
             size_t const oCounts=mergeCounts[i], oIndices=mergeIndices[i];
-            if(!c.points.empty()) {
+            if(!carryPoints && !c.points.empty())
                 std::memcpy(mergePts+oPoints,c.points.cdata(),
                             c.points.size()*sizeof(GfVec3f));
+            if(!carryNormals && !c.normals.empty())
                 std::memcpy(mergeNrm+oPoints,c.normals.cdata(),
                             c.normals.size()*sizeof(GfVec3f));
-            }
             if(!c.tauP.empty()) {
                 std::memcpy(mergeTauP+oTau,c.tauP.cdata(),
                             c.tauP.size()*sizeof(float));
                 std::memcpy(mergeTauN+oTau,c.tauN.cdata(),
                             c.tauN.size()*sizeof(float));
             }
-            if(!c.counts.empty())
-                std::memcpy(mergeCnt+oCounts,c.counts.cdata(),
-                            c.counts.size()*sizeof(int));
-            int const base=int(oPoints);
-            for(size_t j=0;j<c.indices.size();++j)
-                mergeIdx[oIndices+j]=c.indices[j]+base;
+            if(!carryTopo) {
+                if(!c.counts.empty())
+                    std::memcpy(mergeCnt+oCounts,c.counts.cdata(),
+                                c.counts.size()*sizeof(int));
+                int const base=int(oPoints);
+                for(size_t j=0;j<c.indices.size();++j)
+                    mergeIdx[oIndices+j]=c.indices[j]+base;
+            }
         });
         // Without scratch the chunk outputs are freed here, before the
         // extent and digest, as historically; with scratch they persist for
@@ -488,6 +540,8 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
     }
     out->points=points; out->normals=normals;
     out->faceVertexCounts=counts; out->faceVertexIndices=indices;
+    out->topologyKey=topoKey; out->occluderKey=occluderKey;
+    out->lift=lift; out->inward=inward; out->tessLevel=k;
     out->extraUniform.clear();
     if(!points.empty()) {
         for(int which=0;which<2;++which) {
@@ -1210,7 +1264,7 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
         sweep();   // hair only: the head shadowing itself is the skin shader's job
         BuildScalpShadow(triangles, vertexNormals, extents, inward, grid,
                          params.scalpMaxTriangles, gather, dispatcher,
-                         scalpShadow, params.scalpScratch);
+                         scalpShadow, occluderKey, params.scalpScratch);
     }
 
     // --- opaque occluders: a saturated shell just under the surface -----------

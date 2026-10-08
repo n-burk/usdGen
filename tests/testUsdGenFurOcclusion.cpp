@@ -385,6 +385,208 @@ int main() try {
                   "occluder edit rebuilds bit-identically");
     }
 
+    // ---- scalp-cap array carry across deform frames -------------------------
+    // A rebuild with the same lit set and occluder shares the seeded cap's
+    // topology (and the normals/points when their own inputs match) instead
+    // of merging them fresh; the depths always rebake. Every carry below is
+    // also checked bit-for-bit against an unseeded reference bake.
+    {
+        auto capSame = [&](UsdGenScalpShadowPublication const& got,
+                           UsdGenScalpShadowPublication const& want,
+                           char const* msg) {
+            Require(got.IsEmpty()==want.IsEmpty(),msg);
+            Require(got.digest==want.digest,msg);
+            Require(got.points==want.points,msg);
+            Require(got.normals==want.normals,msg);
+            Require(got.faceVertexCounts==want.faceVertexCounts,msg);
+            Require(got.faceVertexIndices==want.faceVertexIndices,msg);
+            Require(got.topologyKey==want.topologyKey,msg);
+            Require(got.occluderKey==want.occluderKey,msg);
+            Require(got.lift==want.lift && got.inward==want.inward,msg);
+            Require(got.tessLevel==want.tessLevel,msg);
+            // An emptied cap publishes no prim, so the bake leaves the
+            // seeded extent and depth planes as they were; only compare
+            // them when the cap is non-empty.
+            if (!got.points.empty()) {
+                Require(got.extentMin==want.extentMin &&
+                        got.extentMax==want.extentMax,msg);
+                for(auto name:{"furTauP","furTauN"})
+                    Require(Plane(got.extraUniform,name).f==
+                            Plane(want.extraUniform,name).f,msg);
+            }
+        };
+        // A micro-quad buried in dense hair, like a benchmark scalp patch:
+        // every triangle is deeply lit, so small moves hold the full set.
+        // The far zero-width probe stretches the span without adding
+        // density; moving it drifts the grid (and the lift) while the
+        // coverage over the quad stays far above the floor.
+        GfVec3f const probeAt(1.5f,0.f,0.f);
+        std::vector<UsdGenTilePublication> live{
+            Comb(0,-0.3f,1200,0.3f), Probe(1,probeAt,probeAt+GfVec3f(0,0.01f,0))};
+        UsdGenFurOcclusionParams params;
+        params.occluders.push_back(Quad(0.f,0.01f,false));
+        params.scalpShadow=true;
+        UsdGenFurOccluderBuild cache;
+        params.occluderCache=&cache;
+        UsdGenScalpShadowScratch scratch;
+        params.scalpScratch=&scratch;
+        uint64_t volumeKey=0;
+        UsdGenScalpShadowPublication first;
+        Require(UsdGenBuildFurOcclusion(&live,nullptr,params,&volumeKey,&first),
+                "first cap bake");
+        Require(!first.IsEmpty(),"the cap is non-empty");
+        Require(first.tessLevel==1,"the micro-quad refines exactly 1x1");
+        Require(first.topologyKey!=0 && first.occluderKey!=0,
+                "the bake publishes its carry keys");
+        // Move the hair within its margin and the probe far: the span
+        // (hence the grid and the lift) drifts, but the occluder and the
+        // lit set hold.
+        auto moved=live;
+        moved[0].xformMatrix.SetTranslate(GfVec3d(0.02,0,0));
+        moved[1].xformMatrix.SetTranslate(GfVec3d(0.3,0,0));
+        UsdGenScalpShadowPublication carry=first;
+        Require(UsdGenBuildFurOcclusion(&moved,&live,params,&volumeKey,&carry),
+                "moved hair rebuilds");
+        Require(carry.topologyKey==first.topologyKey,"the lit set holds");
+        Require(carry.occluderKey==first.occluderKey,"the occluder holds");
+        Require(carry.tessLevel==first.tessLevel,"the level holds");
+        Require(carry.inward==first.inward,"the solid side holds");
+        Require(carry.lift!=first.lift,"the span drift moves the lift");
+        Require(carry.faceVertexCounts.IsIdentical(first.faceVertexCounts),
+                "counts carry across the move");
+        Require(carry.faceVertexIndices.IsIdentical(first.faceVertexIndices),
+                "indices carry across the move");
+        Require(carry.normals.IsIdentical(first.normals),
+                "normals carry across the move");
+        Require(!carry.points.IsIdentical(first.points),
+                "points go fresh when the lift drifts");
+        Require(carry.digest!=first.digest,"fresh depths re-key the digest");
+        auto expect=moved;
+        UsdGenScalpShadowPublication want;
+        {
+            UsdGenFurOcclusionParams bare=params;
+            bare.occluderCache=nullptr; bare.scalpScratch=nullptr;
+            uint64_t freshKey=0;
+            Require(UsdGenBuildFurOcclusion(&expect,nullptr,bare,&freshKey,
+                                           &want),
+                    "unseeded reference bake");
+        }
+        capSame(carry,want,"the carried cap matches the fresh build");
+        // Edit the occluder a hair's breadth: the lit set (the hair's, not
+        // the mesh's) still carries while points and normals go fresh.
+        float const savedY=params.occluders[0].points[0][1];
+        params.occluders[0].points[0][1]+=1e-5f;
+        auto edited=moved;
+        UsdGenScalpShadowPublication editedCap=carry;
+        Require(UsdGenBuildFurOcclusion(&edited,&moved,params,&volumeKey,
+                                       &editedCap),
+                "occluder edit rebuilds");
+        Require(editedCap.occluderKey!=carry.occluderKey,
+                "the edit re-keys the occluder");
+        Require(editedCap.topologyKey==carry.topologyKey,
+                "the lit set holds across the edit");
+        Require(editedCap.faceVertexCounts.IsIdentical(carry.faceVertexCounts),
+                "counts carry across the edit");
+        Require(editedCap.faceVertexIndices.IsIdentical(carry.faceVertexIndices),
+                "indices carry across the edit");
+        Require(!editedCap.normals.IsIdentical(carry.normals),
+                "normals go fresh on an occluder edit");
+        Require(!editedCap.points.IsIdentical(carry.points),
+                "points go fresh on an occluder edit");
+        auto expectEdited=edited;
+        UsdGenScalpShadowPublication wantEdited;
+        {
+            UsdGenFurOcclusionParams bare=params;
+            bare.occluderCache=nullptr; bare.scalpScratch=nullptr;
+            uint64_t freshKey=0;
+            Require(UsdGenBuildFurOcclusion(&expectEdited,nullptr,bare,&freshKey,
+                                           &wantEdited),
+                    "edited unseeded reference bake");
+        }
+        capSame(editedCap,wantEdited,"the edited carry matches the fresh build");
+        // A move that parks the hair far to the side empties the lit set:
+        // the vote only flips the cap's facing, so dropping the hair below
+        // would re-orient onto it and stay lit, and sliding along one axis
+        // would keep it on that axis' ray. Nothing carries, and the cap
+        // still matches the fresh build. The occluder is restored
+        // bit-for-bit so only the lit set differs.
+        params.occluders[0].points[0][1]=savedY;
+        auto uncovered=live;
+        uncovered[0].xformMatrix.SetTranslate(GfVec3d(5,0,5));
+        UsdGenScalpShadowPublication uncoveredCap=first;
+        Require(UsdGenBuildFurOcclusion(&uncovered,&live,params,&volumeKey,
+                                       &uncoveredCap),
+                "uncovering move rebuilds");
+        Require(uncoveredCap.IsEmpty(),"the uncovered cap is empty");
+        Require(uncoveredCap.topologyKey!=first.topologyKey,
+                "the lit set moves with the hair");
+        Require(!uncoveredCap.faceVertexCounts.IsIdentical(first.faceVertexCounts),
+                "counts go fresh when the lit set changes");
+        Require(!uncoveredCap.faceVertexIndices.IsIdentical(first.faceVertexIndices),
+                "indices go fresh when the lit set changes");
+        Require(!uncoveredCap.normals.IsIdentical(first.normals),
+                "normals go fresh when the lit set changes");
+        Require(!uncoveredCap.points.IsIdentical(first.points),
+                "points go fresh when the lit set changes");
+        auto expectUncovered=uncovered;
+        UsdGenScalpShadowPublication wantUncovered;
+        {
+            UsdGenFurOcclusionParams bare=params;
+            bare.occluderCache=nullptr; bare.scalpScratch=nullptr;
+            uint64_t freshKey=0;
+            Require(UsdGenBuildFurOcclusion(&expectUncovered,nullptr,bare,
+                                           &freshKey,&wantUncovered),
+                    "uncovered unseeded reference bake");
+        }
+        capSame(uncoveredCap,wantUncovered,
+                "the uncovered cap matches the fresh build");
+        // A refined level exercises the general sub-face path's share of the
+        // lit-set key: two triangles at ceiling 8 refine exactly 2x2.
+        {
+            std::vector<UsdGenTilePublication> scene{
+                Comb(0,-0.55f,400,0.3f),
+                Probe(1,probeAt,probeAt+GfVec3f(0,0.01f,0))};
+            UsdGenFurOcclusionParams fine;
+            fine.occluders.push_back(Quad(0.f,4.f,false));
+            fine.scalpShadow=true;
+            fine.scalpMaxTriangles=8;
+            uint64_t fineKey=0;
+            UsdGenScalpShadowPublication coarse;
+            Require(UsdGenBuildFurOcclusion(&scene,nullptr,fine,&fineKey,
+                                           &coarse),
+                    "refined first bake");
+            Require(coarse.tessLevel==2,"the ceiling refines exactly 2x2");
+            Require(!coarse.IsEmpty(),"the refined cap is non-empty");
+            auto shifted=scene;
+            shifted[0].xformMatrix.SetTranslate(GfVec3d(0.05,0,0));
+            UsdGenScalpShadowPublication refined=coarse;
+            Require(UsdGenBuildFurOcclusion(&shifted,&scene,fine,&fineKey,
+                                           &refined),
+                    "shifted hair rebuilds refined");
+            Require(refined.topologyKey==coarse.topologyKey,
+                    "the refined lit set holds");
+            Require(refined.faceVertexCounts.IsIdentical(coarse.faceVertexCounts),
+                    "refined counts carry");
+            Require(refined.faceVertexIndices.IsIdentical(coarse.faceVertexIndices),
+                    "refined indices carry");
+            Require(refined.normals.IsIdentical(coarse.normals),
+                    "refined normals carry");
+            Require(refined.points.IsIdentical(coarse.points)==
+                    (refined.lift==coarse.lift),
+                    "refined points carry exactly when the lift holds");
+            Require(refined.digest!=coarse.digest,
+                    "refined fresh depths re-key the digest");
+            auto expectShifted=shifted;
+            UsdGenScalpShadowPublication wantShifted;
+            uint64_t shiftedKey=0;
+            Require(UsdGenBuildFurOcclusion(&expectShifted,nullptr,fine,
+                                           &shiftedKey,&wantShifted),
+                    "refined unseeded reference bake");
+            capSame(refined,wantShifted,
+                    "the refined carry matches the fresh build");
+        }
+    }
+
     // ---- angular reconstruction ---------------------------------------------
     // Ground truth for direction d: rotate the groom so d maps to +Y and bake.
     // The axis sweeps are exact along the axes, and a ball of fibres keeps its
