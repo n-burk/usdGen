@@ -1296,21 +1296,45 @@ ScatterGrowStatus CudaScatterGrow::BeginFresh(
         if (ce == cudaSuccess) ce=Copy(pendingInput_.points,rootsOwner_->positions.data(),rootsOwner_->positions.size(),stream); if(ce==cudaSuccess)ce=Copy(pending_.stableIds,rootsOwner_->stableIds.data(),rootsOwner_->stableIds.size(),stream); if(ce==cudaSuccess)ce=Copy(pending_.rootPrim,rootsOwner_->rootPrim.data(),rootsOwner_->rootPrim.size(),stream); if(ce==cudaSuccess)ce=Copy(pending_.rootUV,rootsOwner_->rootUV.data(),rootsOwner_->rootUV.size(),stream); if(ce==cudaSuccess)ce=Copy(pending_.rootT,rootsOwner_->rootT.data(),rootsOwner_->rootT.size(),stream); if(ce==cudaSuccess)ce=Copy(pending_.rootB,rootsOwner_->rootB.data(),rootsOwner_->rootB.size(),stream); if(ce==cudaSuccess)ce=Copy(pending_.rootN,rootsOwner_->rootN.data(),rootsOwner_->rootN.size(),stream);
         return ce;
     };
+    // One spelling for the grow launch: the overlap worker fires it right
+    // after the copies while the validation scans still run (below); the
+    // small path fires it after the scans as today. Same stream order,
+    // same arguments, same error reporting either way.
+    auto launchGrow = [&]() -> cudaError_t {
+        GrowKernel<<<(unsigned(pendingCurves_)+127)/128,128,0,stream>>>(pendingInput_.points.data(),pending_.stableIds.data(),pending_.rootT.data(),pending_.rootB.data(),pending_.rootN.data(),uint32_t(pendingCurves_),controls.cvCount,controls.seed,controls.length,controls.randomLo,controls.randomHi,controls.lift,controls.azimuth,controls.azimuthRandom,controls.fallbackWidth,controls.direction,controls.literalDirection,pending_.points.data(),pending_.widths.data(),pending_.hairT.data(),pending_.offsets.data(),error_.data());
+        return cudaGetLastError();
+    };
     if (overlapCopies) {
-        // The worker issues the synchronous staging copies while this
-        // thread runs the validation scans; the join proves both done.
-        // Both threads read rootsOwner_ without mutating it, and the
+        // The worker issues the synchronous staging copies and fires the
+        // grow kernel while this thread runs the validation scans; the
+        // join proves both done. The kernel launch is speculative but
+        // sound: stream order (memset, copies, kernel) and kernel
+        // arguments match today's serial spelling exactly, so the
+        // success path is bit-identical and the device-side error flag
+        // reads the same in CommitFreshFinish. A failed validation
+        // verdict still returns before anything is published: the sync
+        // below proves the whole stream (copies and kernel) idle and
+        // the object discards clean and reusable, exactly like today's
+        // pre-alloc validation failure. The API stays synchronous:
+        // BeginFresh returns only after the validation verdict. Both
+        // threads read rootsOwner_ without mutating it, and the
         // buffers are untouched on this thread until the join, so no
-        // lock is needed. Copy errors keep today's unproven discipline
-        // (a double fault reports the copy error, not the scan verdict).
+        // lock is needed. Device errors keep today's unproven
+        // discipline (a double fault reports the copy error, then the
+        // launch error, not the scan verdict). The overlap path always
+        // has curves (peekN > 65536), so the worker always launches.
         cudaError_t copyError = cudaSuccess;
+        cudaError_t launchError = cudaSuccess;
         std::thread copyThread;
         try {
-            copyThread = std::thread([this, &issueCopies, &copyError]() {
+            copyThread = std::thread(
+                [this, &issueCopies, &launchGrow, &copyError, &launchError]() {
                 cudaError_t ce = cudaSetDevice(deviceIndex_);
                 if (ce == cudaSuccess)
                     ce = issueCopies();
                 copyError = ce;
+                if (ce == cudaSuccess)
+                    launchError = launchGrow();
             });
         } catch (...) {
             // Nothing issued yet: discard like the pre-issue failures.
@@ -1323,8 +1347,9 @@ ScatterGrowStatus CudaScatterGrow::BeginFresh(
             // Join first (a joinable thread must never unwind past),
             // then leave the object as clean as today's pre-alloc
             // validation throw: the join proves the synchronous copies
-            // complete and the sync proves the memset, so discarding is
-            // safe. The throw itself propagates unchanged.
+            // complete and the sync proves the memset and the kernel,
+            // so discarding is safe. The throw itself propagates
+            // unchanged.
             copyThread.join();
             if (cudaStreamSynchronize(stream) == cudaSuccess) {
                 unprovenWork_ = false;
@@ -1334,11 +1359,13 @@ ScatterGrowStatus CudaScatterGrow::BeginFresh(
         }
         copyThread.join();
         if (copyError != cudaSuccess) return Status(copyError);
+        if (launchError != cudaSuccess) return Status(launchError);
         if (s != ScatterGrowStatus::Ok) {
             // The join proves the synchronous copies complete, but the
-            // memset may still be in flight: prove the stream idle before
-            // discarding, so the object stays clean and reusable exactly
-            // like today's pre-alloc validation failure. Failure path only.
+            // memset and the kernel may still be in flight: prove the
+            // stream idle before discarding, so the object stays clean
+            // and reusable exactly like today's pre-alloc validation
+            // failure. Failure path only.
             cudaError_t const syncE = cudaStreamSynchronize(stream);
             if (syncE != cudaSuccess) return Status(syncE);
             unprovenWork_ = false;
@@ -1364,8 +1391,12 @@ ScatterGrowStatus CudaScatterGrow::BeginFresh(
         if (e != cudaSuccess) return Status(e);
         return ScatterGrowStatus::Ok;
     }
-    GrowKernel<<<(unsigned(pendingCurves_)+127)/128,128,0,stream>>>(pendingInput_.points.data(),pending_.stableIds.data(),pending_.rootT.data(),pending_.rootB.data(),pending_.rootN.data(),uint32_t(pendingCurves_),controls.cvCount,controls.seed,controls.length,controls.randomLo,controls.randomHi,controls.lift,controls.azimuth,controls.azimuthRandom,controls.fallbackWidth,controls.direction,controls.literalDirection,pending_.points.data(),pending_.widths.data(),pending_.hairT.data(),pending_.offsets.data(),error_.data());
-    e=cudaGetLastError(); if(e!=cudaSuccess)return Status(e);
+    if (!overlapCopies) {
+        // Small path: launch after the scans as today (the overlap
+        // worker already launched above).
+        e = launchGrow();
+        if (e != cudaSuccess) return Status(e);
+    }
     // rest == points elementwise (the kernel writes every point), and the
     // published generation is immutable, so view() aliases the points
     // buffer under the rest slot: no D2D rest copy, no second allocation.
