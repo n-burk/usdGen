@@ -331,9 +331,16 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
             nPoints+=c.points.size(); nTau+=c.tauP.size();
             nCounts+=c.counts.size(); nIndices+=c.indices.size();
         }
-        points.resize(nPoints); normals.resize(nPoints);
-        tauP.resize(nTau); tauN.resize(nTau);
-        counts.resize(nCounts); indices.resize(nIndices);
+        // Every element of every merged array is overwritten below --
+        // points/normals/tauP/tauN/counts by the tiled chunk memcpys, indices
+        // by the rebase loop -- so value-filling ~320MB first is pure waste.
+        // The no-op fill leaves the storage uninitialized (all six element
+        // types are trivially copyable/destructible); the merged bytes are
+        // bit-identical.
+        auto noInit = [](auto* b, auto* e) { (void)b; (void)e; };
+        points.resize(nPoints, noInit); normals.resize(nPoints, noInit);
+        tauP.resize(nTau, noInit); tauN.resize(nTau, noInit);
+        counts.resize(nCounts, noInit); indices.resize(nIndices, noInit);
         // Prefix offsets are serial and cheap; the copies then run per chunk
         // over the pool. Each chunk writes disjoint ranges with the same
         // bytes, indices, and rebase arithmetic: bit-identical.
