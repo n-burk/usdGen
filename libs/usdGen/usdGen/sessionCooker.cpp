@@ -2301,6 +2301,20 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
     if (!reuseWidths) pub.widths.reserve(tv.totalLiveCvs);
     if (!reuseHairT) pub.hairT.reserve(tv.totalLiveCvs);
     if (!reuseHairId) pub.hairId.reserve(tv.totalLiveCurves);
+    // Raw-pointer emission (cf. the k==1 cap path): the per-CV push_backs'
+    // capacity checks and size stores cost more than the ~7 stores they
+    // frame. reserve() owns the capacity; data() detaches when shared, so
+    // the pointers are uniquely owned; nothing between here and the
+    // closing resizes can reallocate. Same values in the same order:
+    // bit-identical.
+    GfVec3f* emitPts = pub.points.data();
+    float* emitW = !reuseWidths ? pub.widths.data() : nullptr;
+    float* emitH = !reuseHairT ? pub.hairT.data() : nullptr;
+    size_t nEmit = 0;
+    // The published extent reduces during emission (same ExtendBy calls in
+    // the same order as the retired scan over pub.points), so no second
+    // pass over the points is needed below.
+    GfRange3f extent;
 
     // Loop-invariant token spellings: every TfToken(const char*)
     // construction takes the registry lock, so the per-curve/per-CV loop
@@ -2498,7 +2512,8 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
             for (uint32_t v = 0; v < len; ++v) {
                 const uint32_t p = p0 + v;
                 if (p >= term.px.size()) break;
-                pub.points.emplace_back(term.px[p], term.py[p], term.pz[p]);
+                emitPts[nEmit] = GfVec3f(term.px[p], term.py[p], term.pz[p]);
+                extent.ExtendBy(emitPts[nEmit]);
                 // C2 (06 §4.1): widths/hairT are vertex channels on every
                 // tile. A chain whose terminal never wrote them (grow-only:
                 // kPlanePoints|kPlaneHairT) still publishes FULL-SIZE planes
@@ -2509,10 +2524,11 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
                     float w = 0.01f;
                     if (p < term.width.size()) w = term.width[p];
                     else if (!term.width.empty()) w = term.width.back();
-                    pub.widths.push_back(w);
+                    emitW[nEmit] = w;
                 }
                 if (!reuseHairT)
-                    pub.hairT.push_back(p < term.hairT.size() ? term.hairT[p] : 0.0f);
+                    emitH[nEmit] = p < term.hairT.size() ? term.hairT[p] : 0.0f;
+                ++nEmit;
                 for (auto& extra : extraPlanes)
                     if (extra.isVertex && !extra.reuseFrom)
                         _GatherPlaneElement(*extra.source, p, &extra.output);
@@ -2549,6 +2565,16 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
                     _GatherPlaneElement(*extra.source, g, &extra.output);
         }
     }
+    // Publish the raw-pointer emission above: capacity was reserved up
+    // front and uniquely owned throughout, so these only set sizes over
+    // the already-written elements (nEmit <= totalLiveCvs: every CV emits
+    // at most once, and the ragged break only emits fewer).
+    {
+        auto noInit = [](auto* b, auto* e) { (void)b; (void)e; };
+        pub.points.resize(nEmit, noInit);
+        if (!reuseWidths) pub.widths.resize(nEmit, noInit);
+        if (!reuseHairT) pub.hairT.resize(nEmit, noInit);
+    }
     // Carried arrays share the previous tile's immutable storage (VtArray
     // copy-on-write), so downstream identity checks see them as unchanged.
     if (reuseCounts) pub.curveVertexCounts = rp->curveVertexCounts;
@@ -2574,13 +2600,12 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
     // Extent is a pure function of the published points (03 §6.3: min/max
     // fused into the interleave loop — but InterleaveTile skips untouched
     // tiles, so tv.extent is empty on any tile this commit did not evaluate
-    // while its points are real). Reduce over pub.points in memory: same
-    // (g,p0,len) ragged walk already emitted them above, one cheap pass.
-    GfRange3f e;
-    for (GfVec3f const &pt : pub.points) e.ExtendBy(pt);
-    if (e.IsEmpty()) e = GfRange3f(GfVec3f(0.f), GfVec3f(0.f));
-    pub.extentMin = GfVec3d(e.GetMin()[0], e.GetMin()[1], e.GetMin()[2]);
-    pub.extentMax = GfVec3d(e.GetMax()[0], e.GetMax()[1], e.GetMax()[2]);
+    // while its points are real). It reduced during emission above (the
+    // same ExtendBy calls in the same order as a scan over pub.points),
+    // so only the empty-tiles fallback remains here.
+    if (extent.IsEmpty()) extent = GfRange3f(GfVec3f(0.f), GfVec3f(0.f));
+    pub.extentMin = GfVec3d(extent.GetMin()[0], extent.GetMin()[1], extent.GetMin()[2]);
+    pub.extentMax = GfVec3d(extent.GetMax()[0], extent.GetMax()[1], extent.GetMax()[2]);
 
     SdfPath dependencySurface;
     if (hasDep) {
