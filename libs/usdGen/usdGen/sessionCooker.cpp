@@ -7,6 +7,7 @@
 #include "usdGen/debugCodes.h"
 #include "usdGen/furOcclusion.h"
 #include "usdGen/cudaExecution.h"
+#include "usdGen/digest.h"
 #include "usdGen/executionBackend.h"
 #include "usdGen/executionTaskGraph.h"
 
@@ -145,11 +146,13 @@ void _CacheMixText(uint64_t *hash, std::string const &text)
 
 void _CacheMixBytes(uint64_t *hash, void const *data, size_t bytes)
 {
-    auto const *raw = static_cast<unsigned char const *>(data);
-    for (size_t i = 0; i != bytes; ++i) {
-        *hash ^= raw[i];
-        *hash *= 0x100000001b3ULL;
-    }
+    // 4-lane word-wise FNV (digest.h UsdGenDigestBytes): the byte loop ran
+    // at multiply latency (~3 cycles/byte, 31ms over the bench surface);
+    // whole words over four overlapped lanes run ~10x faster. Cache keys
+    // are equality-only internal keys (digest.h contract: deterministic,
+    // input-sensitive, never persisted or golden-tested), so the new
+    // values are fine. Only _CacheMixArray calls this, guarded non-empty.
+    *hash = UsdGenDigestBytes(data, bytes, *hash);
 }
 
 template<class Array>
