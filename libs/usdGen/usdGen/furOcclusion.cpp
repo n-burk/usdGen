@@ -750,20 +750,93 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
     // expects to find.
     std::array<std::vector<float>,6> tau;
     auto sweep=[&] {
-        ForEach(dispatcher, 6, [&](size_t direction) {
-            int const axis=int(direction)/2;
-            int const na=grid.n[axis];
-            int const nu=grid.n[(axis+1)%3], nv=grid.n[(axis+2)%3];
-            auto& out=tau[direction];
-            out.assign(cells,0.f);
-            for(int v=0;v<nv;++v) for(int u=0;u<nu;++u) {
-                float sum=0;
-                for(int step=0;step<na;++step) {
-                    int c[3]; c[axis]=(direction%2)?step:na-1-step;
-                    c[(axis+1)%3]=u;c[(axis+2)%3]=v;
-                    size_t idx=grid.Index(c[0],c[1],c[2]);
-                    float depth=density[idx][axis];
-                    out[idx]=std::min(UsdGenFurTauClamp,sum+0.5f*depth);sum+=depth;
+        // One task per direction leaves workers idle and recomputes the cell
+        // index per step; worse, the strided axes walk one column at a time,
+        // so every store misses a line its neighbour column just touched.
+        // Flatten (direction, column-block) over the dispatcher instead: each
+        // block walks 8 adjacent columns of the unit-stride dimension in
+        // lockstep with a strided index, sharing cache lines across the
+        // block. The accumulation order within a column is unchanged, so the
+        // sweep is bit-identical; every cell is still written exactly once.
+        size_t const stride[3]={
+            1, size_t(grid.n[0]), size_t(grid.n[0])*size_t(grid.n[1])};
+        struct SweepDir {
+            int axis, na, nInner, nOuter, innerBlocks;
+            size_t strideA, strideU, strideV;
+            bool innerIsU;
+        };
+        SweepDir dirs[6];
+        size_t first[7];
+        first[0]=0;
+        for(int d=0;d<6;++d) {
+            int const axis=d/2;
+            int const au=(axis+1)%3, av=(axis+2)%3;
+            SweepDir& sd=dirs[d];
+            sd.axis=axis;
+            sd.na=grid.n[axis];
+            // Axis 1 steps along y, so its unit-stride column dimension is
+            // v (x); the other axes block over u (axis 0's columns are
+            // sequential rows either way).
+            sd.innerIsU=(axis!=1);
+            sd.nInner=sd.innerIsU?grid.n[au]:grid.n[av];
+            sd.nOuter=sd.innerIsU?grid.n[av]:grid.n[au];
+            sd.strideA=stride[axis];
+            sd.strideU=stride[au];
+            sd.strideV=stride[av];
+            sd.innerBlocks=(sd.nInner+7)/8;
+            first[d+1]=first[d]+size_t(sd.nOuter)*size_t(sd.innerBlocks);
+        }
+        for(int d=0;d<6;++d) tau[d].assign(cells,0.f);
+        ForEach(dispatcher, first[6], [&](size_t block) {
+            int d=0;
+            while(block>=first[d+1]) ++d;
+            SweepDir const& sd=dirs[d];
+            size_t const local=block-first[d];
+            int const outer=int(local/size_t(sd.innerBlocks));
+            int const inner0=int(local%size_t(sd.innerBlocks))*8;
+            int const nb=std::min(8,sd.nInner-inner0);
+            float* const out=tau[d].data();
+            int const last=sd.na-1;
+            // Direction parity is the walk sense: odd starts at index 0 and
+            // ascends, even starts at the far side and descends.
+            bool const ascending=(d%2)!=0;
+            ptrdiff_t const dStride=ascending ?
+                ptrdiff_t(sd.strideA) : -ptrdiff_t(sd.strideA);
+            auto columnBase=[&](int b) {
+                int const inner=inner0+b;
+                int const u=sd.innerIsU?inner:outer;
+                int const v=sd.innerIsU?outer:inner;
+                return size_t(u)*sd.strideU+size_t(v)*sd.strideV;
+            };
+            if(nb==8) {
+                float sums[8]={0,0,0,0,0,0,0,0};
+                size_t idx[8];
+                for(int b=0;b<8;++b)
+                    idx[b]=ascending ? columnBase(b)
+                                     : columnBase(b)+size_t(last)*sd.strideA;
+                for(int step=0;step<sd.na;++step) {
+                    for(int b=0;b<8;++b) {
+                        float const depth=density[idx[b]][sd.axis];
+                        float const value=std::min(
+                            UsdGenFurTauClamp,sums[b]+0.5f*depth);
+                        sums[b]+=depth;
+                        out[idx[b]]=value;
+                        idx[b]=size_t(ptrdiff_t(idx[b])+dStride);
+                    }
+                }
+            } else {
+                for(int b=0;b<nb;++b) {
+                    size_t idx=ascending ? columnBase(b)
+                                         : columnBase(b)+size_t(last)*sd.strideA;
+                    float sum=0;
+                    for(int step=0;step<sd.na;++step) {
+                        float const depth=density[idx][sd.axis];
+                        float const value=std::min(
+                            UsdGenFurTauClamp,sum+0.5f*depth);
+                        sum+=depth;
+                        out[idx]=value;
+                        idx=size_t(ptrdiff_t(idx)+dStride);
+                    }
                 }
             }
         });
