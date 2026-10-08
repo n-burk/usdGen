@@ -6,6 +6,10 @@
 #include "pxr/base/gf/matrix4f.h"
 #include "pxr/base/trace/trace.h"
 
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -958,8 +962,9 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
     }
     // Interleave the six sweeps: the gather reads all six depths of eight
     // neighbouring cells, which is two cache lines per cell instead of six
-    // separate strided arrays.
-    std::vector<uint16_t> depths(cells*6);
+    // separate strided arrays. The 8-deep pad keeps the aarch64 gather's
+    // 8-lane tuple loads in bounds at the last cell (lanes 6-7 discarded).
+    std::vector<uint16_t> depths(cells*6+8);
     {
         TRACE_SCOPE("usdGen occlusion: interleave");
         ForEach(dispatcher, slabs, [&](size_t slab) {
@@ -1007,12 +1012,36 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
                 int c[3]; float w[3];
                 grid.CornersInner(p[i],c,w);
                 uint16_t const* const cell=&depths[grid.Index(c[0],c[1],c[2])*6];
+#if defined(__aarch64__)
+                // The six depth lanes accumulate in two NEON quads, corners
+                // in the same order, each lane the same fused
+                // acc + weight * float(at[d]) the scalar loop compiles to
+                // (u16->f32 is exact; multiply commutes exactly), so lanes
+                // 0-5 are bit-identical and 6-7 are never stored. The weight
+                // is the same scalar expression; scalar and NEON obey the
+                // same FPCR, so denormal weights round the same lane-wise.
+                float values[6];
+                float32x4_t acc0=vdupq_n_f32(0.f), acc1=vdupq_n_f32(0.f);
+                for(int z=0;z<2;++z) for(int y=0;y<2;++y) for(int x=0;x<2;++x) {
+                    float const weight=(x?w[0]:1-w[0])*(y?w[1]:1-w[1])*(z?w[2]:1-w[2]);
+                    uint16_t const* const at=cell+x*6+y*strideY+z*strideZ;
+                    float32x4_t const vw=vdupq_n_f32(weight);
+                    uint16x8_t const u=vld1q_u16(at);
+                    float32x4_t const v0=vcvtq_f32_u32(vmovl_u16(vget_low_u16(u)));
+                    float32x4_t const v1=vcvtq_f32_u32(vmovl_u16(vget_high_u16(u)));
+                    acc0=vfmaq_f32(acc0,v0,vw);
+                    acc1=vfmaq_f32(acc1,v1,vw);
+                }
+                vst1q_f32(values,acc0);
+                vst1_f32(values+4,vget_low_f32(acc1));
+#else
                 float values[6]={0,0,0,0,0,0};
                 for(int z=0;z<2;++z) for(int y=0;y<2;++y) for(int x=0;x<2;++x) {
                     float const weight=(x?w[0]:1-w[0])*(y?w[1]:1-w[1])*(z?w[2]:1-w[2]);
                     uint16_t const* const at=cell+x*6+y*strideY+z*strideZ;
                     for(int d=0;d<6;++d) values[d]+=weight*float(at[d]);
                 }
+#endif
                 for(int d=0;d<3;++d) {
                     p0[i*3+d]=values[d*2]*(1.f/kDepthScale);
                     p1[i*3+d]=values[d*2+1]*(1.f/kDepthScale);
