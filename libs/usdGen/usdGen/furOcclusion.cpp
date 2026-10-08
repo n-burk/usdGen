@@ -1339,14 +1339,34 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
             float* const p0=planes[job.tile][0];
             float* const p1=planes[job.tile][1];
             auto const& p=positions[job.tile];
+            // Consecutive CVs of a hair are usually sub-voxel apart (a
+            // single-substep splat segment is shorter than a voxel), so they
+            // usually share one cell: the eight cell x six depth loads happen
+            // once per run of same-cell CVs instead of once per CV. Each CV
+            // still runs its own Corners() for its weights, and the
+            // accumulation visits the same cells in the same order, so reused
+            // CVs are bit-identical. Job-local (the sweep is fixed for the
+            // whole gather, so a stale entry is impossible).
+            int pc[3]={0,0,0};
+            uint16_t cached[8][6];
+            bool have=false;
             for(size_t i=job.firstCv;i<job.firstCv+job.cvCount;++i) {
                 int c[3]; float w[3];
                 grid.Corners(p[i],c,w);
-                uint16_t const* const cell=&depths[grid.Index(c[0],c[1],c[2])*6];
+                if(!have || c[0]!=pc[0] || c[1]!=pc[1] || c[2]!=pc[2]) {
+                    pc[0]=c[0]; pc[1]=c[1]; pc[2]=c[2];
+                    uint16_t const* const cell=&depths[grid.Index(c[0],c[1],c[2])*6];
+                    for(int z=0;z<2;++z) for(int y=0;y<2;++y) for(int x=0;x<2;++x) {
+                        uint16_t const* const at=cell+x*6+y*strideY+z*strideZ;
+                        uint16_t* const slot=cached[(z*2+y)*2+x];
+                        for(int d=0;d<6;++d) slot[d]=at[d];
+                    }
+                    have=true;
+                }
                 float values[6]={0,0,0,0,0,0};
                 for(int z=0;z<2;++z) for(int y=0;y<2;++y) for(int x=0;x<2;++x) {
                     float const weight=(x?w[0]:1-w[0])*(y?w[1]:1-w[1])*(z?w[2]:1-w[2]);
-                    uint16_t const* const at=cell+x*6+y*strideY+z*strideZ;
+                    uint16_t const* const at=cached[(z*2+y)*2+x];
                     for(int d=0;d<6;++d) values[d]+=weight*float(at[d]);
                 }
                 for(int d=0;d<3;++d) {
