@@ -237,7 +237,19 @@ void BuildScalpShadow(std::vector<Triangle> const& triangles,
         size_t const first=(chunk*triangles.size())/nChunks;
         size_t const last=((chunk+1)*triangles.size())/nChunks;
         ChunkOut& c=chunks[chunk];
-        c.points.reserve((last-first)*perTriangle);
+        // Every chunk output has a tight upper bound: one point and normal
+        // per lattice vertex, three tau floats per point, and at most k*k
+        // sub-faces (one count, three indices each) per triangle. Without
+        // these the chunk arrays re-copy ~1GB per cook through push_back
+        // growth; reserve() changes capacity only, so the cap is
+        // bit-identical.
+        size_t const nTri=last-first;
+        c.points.reserve(nTri*perTriangle);
+        c.normals.reserve(nTri*perTriangle);
+        c.tauP.reserve(nTri*perTriangle*3);
+        c.tauN.reserve(nTri*perTriangle*3);
+        c.counts.reserve(nTri*size_t(k)*size_t(k));
+        c.indices.reserve(nTri*size_t(k)*size_t(k)*3);
         std::vector<GfVec3f> local(perTriangle), localN(perTriangle);
         std::vector<float> depth(perTriangle*6), shaded(perTriangle);
         std::vector<int> remap(perTriangle);
