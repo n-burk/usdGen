@@ -65,6 +65,20 @@ struct Grid {
             base[k]=std::min(int(q),n[k]-2); frac[k]=q-base[k];
         }
     }
+    // Corners without the clamp, for points inside the [lo,hi] the grid was
+    // grown from: every strand-gather CV qualifies, because the bounds ARE
+    // the min/max over these same positions (non-finite ones were rejected
+    // upstream) and occluder growth only expands them. Then q lands in
+    // [1.5, n-2.5] up to float rounding (n >= 8 on every axis), so neither
+    // the clamp nor the min can trigger and this is bit-identical to
+    // Corners(). Every other caller keeps the clamped form: splat samples
+    // overshoot the CV box by construction.
+    void CornersInner(GfVec3f const& p, int base[3], float frac[3]) const {
+        for (int k=0;k<3;++k) {
+            float q=(p[k]-origin[k])*invH-0.5f;
+            base[k]=int(q); frac[k]=q-base[k];
+        }
+    }
     bool Contains(GfVec3f const& p) const {
         for (int k=0;k<3;++k) {
             float const q=(p[k]-origin[k])*invH;
@@ -991,7 +1005,7 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
             auto const& p=positions[job.tile];
             for(size_t i=job.firstCv;i<job.firstCv+job.cvCount;++i) {
                 int c[3]; float w[3];
-                grid.Corners(p[i],c,w);
+                grid.CornersInner(p[i],c,w);
                 uint16_t const* const cell=&depths[grid.Index(c[0],c[1],c[2])*6];
                 float values[6]={0,0,0,0,0,0};
                 for(int z=0;z<2;++z) for(int y=0;y<2;++y) for(int x=0;x<2;++x) {
