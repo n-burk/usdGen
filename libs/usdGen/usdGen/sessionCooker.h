@@ -211,6 +211,18 @@ private:
     uint64_t _lastCookedEpoch = 0;
     UsdGenTilePublication _BuildTilePublication(UsdGenTileView const&, UsdGenRunResult const&,
                                                 UsdGenGenerationConstPtr const&);
+    // Step-6 tile-build fan-out: the worker pool takes a plain function
+    // pointer, so the per-tile work travels in this payload. Each body call
+    // builds exactly one tile publication from the immutable run result; the
+    // cook collects the slots in tile order afterwards.
+    struct TileBuildWork {
+        UsdGenSessionCooker* cooker = nullptr;
+        UsdGenRunResult const* result = nullptr;
+        UsdGenGenerationConstPtr const* prev = nullptr;
+        size_t const* tileIndex = nullptr;      // result->tiles subscript per slot
+        UsdGenTilePublication* built = nullptr; // one slot per ParallelFor index
+    };
+    static void _BuildTileWork(size_t slot, void* payload);
 };
 } // namespace usdGen
 #endif

@@ -1946,8 +1946,22 @@ UsdGenStats publishedStats, bool invalidateValues,
     phases.Phase("preview");
 
     TRACE_SCOPE("usdGen build tile publications");
+    // Tile builds are independent: each gathers its own publication from the
+    // immutable terminal output (the progress path already builds them on
+    // sweep workers), so fan them out over the scheduler pool — idle since
+    // Run returned — and collect in tile order. The generation, the progress
+    // sequence, and the rebuilt count match the serial loop exactly; only
+    // best-effort progress emission under a mid-build supersession flip can
+    // differ (fewer provisional updates, same final generation).
     size_t rebuiltTiles = 0;
-    for (UsdGenTileView const &tv : result.tiles) {
+    size_t const nTiles = result.tiles.size();
+    std::vector<UsdGenTilePublication const*> reuse(nTiles, nullptr);
+    std::vector<char> carried(nTiles, 0);
+    std::vector<char> emit(nTiles, 0);
+    std::vector<size_t> buildIndex;
+    buildIndex.reserve(nTiles);
+    for (size_t i = 0; i < nTiles; ++i) {
+        UsdGenTileView const &tv = result.tiles[i];
         // E-4: untouched tiles carry over their publication wholesale (the
         // VtArray copies share buffers, so step 7 sees IsIdentical == true).
         const bool rebuild =
@@ -1963,14 +1977,44 @@ UsdGenStats publishedStats, bool invalidateValues,
             if (it != prev->tiles.end() && it->tile == tv.tile) carry = &*it;
         }
         if (carry) {
-            gen.tiles.push_back(*carry);
+            reuse[i] = carry;
+            carried[i] = 1;
+            continue;
+        }
+        auto streamed = streamedTiles.find(tv.tile);
+        if (streamed != streamedTiles.end()) {
+            reuse[i] = &streamed->second;
+            continue;
+        }
+        emit[i] = progress ? 1 : 0;
+        buildIndex.push_back(i);
+    }
+    std::vector<UsdGenTilePublication> built(buildIndex.size());
+    if (buildIndex.size() > 1) {
+        TileBuildWork work;
+        work.cooker = this;
+        work.result = &result;
+        work.prev = &prev;
+        work.tileIndex = buildIndex.data();
+        work.built = built.data();
+        _scheduler.MakeWorkDispatcher().ParallelFor(
+            buildIndex.size(), &_BuildTileWork, &work);
+    } else if (buildIndex.size() == 1) {
+        built[0] = _BuildTilePublication(
+            result.tiles[buildIndex[0]], result, prev);
+    }
+    for (size_t i = 0, b = 0; i < nTiles; ++i) {
+        if (reuse[i]) {
+            // A streamed tile counts as rebuilt, as in the serial loop; a
+            // wholesale carry does not. Neither re-emits progress (streamed
+            // tiles were already emitted by the sweep).
+            if (!carried[i]) ++rebuiltTiles;
+            gen.tiles.push_back(*reuse[i]);
             continue;
         }
         ++rebuiltTiles;
-        auto streamed = streamedTiles.find(tv.tile);
-        gen.tiles.push_back(streamed != streamedTiles.end()
-            ? streamed->second : _BuildTilePublication(tv, result, prev));
-        if (progress && streamed == streamedTiles.end())
+        gen.tiles.push_back(std::move(built[b++]));
+        if (emit[i])
             emitProgress(gen.tiles.back());
     }
     std::sort(gen.tiles.begin(), gen.tiles.end(),
@@ -2112,6 +2156,14 @@ UsdGenStats publishedStats, bool invalidateValues,
     // Remaining chunk dirt (skipped no-op nodes are clean; anything the
     // scheduler could not run stays dirty; 03 §5.4).
     return next;
+}
+
+/*static*/
+void UsdGenSessionCooker::_BuildTileWork(size_t slot, void *payload)
+{
+    TileBuildWork *w = static_cast<TileBuildWork *>(payload);
+    w->built[slot] = w->cooker->_BuildTilePublication(
+        w->result->tiles[w->tileIndex[slot]], *w->result, *w->prev);
 }
 
 UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
