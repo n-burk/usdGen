@@ -324,30 +324,47 @@ void BuildScalpShadow(std::vector<Triangle> const& triangles,
         points.resize(nPoints); normals.resize(nPoints);
         tauP.resize(nTau); tauN.resize(nTau);
         counts.resize(nCounts); indices.resize(nIndices);
-        size_t oPoints=0, oTau=0, oCounts=0, oIndices=0;
-        for(ChunkOut& c:chunks) {
+        // Prefix offsets are serial and cheap; the copies then run per chunk
+        // over the pool. Each chunk writes disjoint ranges with the same
+        // bytes, indices, and rebase arithmetic: bit-identical.
+        size_t const nMerge=chunks.size();
+        std::vector<size_t> mergePoints(nMerge), mergeTau(nMerge),
+            mergeCounts(nMerge), mergeIndices(nMerge);
+        { size_t oP=0, oT=0, oC=0, oI=0;
+          for(size_t i=0;i<nMerge;++i) {
+              mergePoints[i]=oP; mergeTau[i]=oT;
+              mergeCounts[i]=oC; mergeIndices[i]=oI;
+              oP+=chunks[i].points.size(); oT+=chunks[i].tauP.size();
+              oC+=chunks[i].counts.size(); oI+=chunks[i].indices.size();
+          } }
+        GfVec3f* const mergePts=points.data();
+        GfVec3f* const mergeNrm=normals.data();
+        float* const mergeTauP=tauP.data(), * const mergeTauN=tauN.data();
+        int* const mergeCnt=counts.data(), * const mergeIdx=indices.data();
+        ForEach(dispatcher, nMerge, [&](size_t i) {
+            ChunkOut& c=chunks[i];
+            size_t const oPoints=mergePoints[i], oTau=mergeTau[i];
+            size_t const oCounts=mergeCounts[i], oIndices=mergeIndices[i];
             if(!c.points.empty()) {
-                std::memcpy(&points[oPoints],c.points.cdata(),
+                std::memcpy(mergePts+oPoints,c.points.cdata(),
                             c.points.size()*sizeof(GfVec3f));
-                std::memcpy(&normals[oPoints],c.normals.cdata(),
+                std::memcpy(mergeNrm+oPoints,c.normals.cdata(),
                             c.normals.size()*sizeof(GfVec3f));
             }
             if(!c.tauP.empty()) {
-                std::memcpy(&tauP[oTau],c.tauP.cdata(),
+                std::memcpy(mergeTauP+oTau,c.tauP.cdata(),
                             c.tauP.size()*sizeof(float));
-                std::memcpy(&tauN[oTau],c.tauN.cdata(),
+                std::memcpy(mergeTauN+oTau,c.tauN.cdata(),
                             c.tauN.size()*sizeof(float));
             }
             if(!c.counts.empty())
-                std::memcpy(&counts[oCounts],c.counts.cdata(),
+                std::memcpy(mergeCnt+oCounts,c.counts.cdata(),
                             c.counts.size()*sizeof(int));
             int const base=int(oPoints);
-            for(size_t i=0;i<c.indices.size();++i)
-                indices[oIndices+i]=c.indices[i]+base;
-            oPoints+=c.points.size(); oTau+=c.tauP.size();
-            oCounts+=c.counts.size(); oIndices+=c.indices.size();
-            c=ChunkOut();
-        }
+            for(size_t j=0;j<c.indices.size();++j)
+                mergeIdx[oIndices+j]=c.indices[j]+base;
+        });
+        for(ChunkOut& c:chunks) c=ChunkOut();
     }
     out->points=points; out->normals=normals;
     out->faceVertexCounts=counts; out->faceVertexIndices=indices;
@@ -363,9 +380,28 @@ void BuildScalpShadow(std::vector<Triangle> const& triangles,
             out->extraUniform.push_back(std::move(plane));
         }
         { TRACE_SCOPE("usdGen scalp: extent");
-        GfVec3f lo=points[0], hi=points[0];
-        for(GfVec3f const& p:points) for(int d=0;d<3;++d) {
-            lo[d]=std::min(lo[d],p[d]); hi[d]=std::max(hi[d],p[d]);
+        // Chunk-local extrema merged in chunk order: min/max are exact, so
+        // the reduction is deterministic and matches the serial scan for
+        // every finite input (ordered merge, no float crosses a chunk
+        // boundary except through the same pairwise min/max).
+        size_t const nExt = dispatcher ?
+            size_t(std::max(1, dispatcher->MaxConcurrency())) : 1;
+        std::vector<GfVec3f> extLo(nExt), extHi(nExt);
+        GfVec3f const* const extPts=points.cdata();
+        size_t const nPts=points.size();
+        ForEach(dispatcher, nExt, [&](size_t i) {
+            size_t const first=(i*nPts)/nExt;
+            size_t const last=((i+1)*nPts)/nExt;
+            GfVec3f lo=extPts[first], hi=extPts[first];
+            for(size_t j=first+1;j<last;++j) for(int d=0;d<3;++d) {
+                lo[d]=std::min(lo[d],extPts[j][d]);
+                hi[d]=std::max(hi[d],extPts[j][d]);
+            }
+            extLo[i]=lo; extHi[i]=hi;
+        });
+        GfVec3f lo=extLo[0], hi=extHi[0];
+        for(size_t i=1;i<nExt;++i) for(int d=0;d<3;++d) {
+            lo[d]=std::min(lo[d],extLo[i][d]); hi[d]=std::max(hi[d],extHi[i][d]);
         }
         out->extentMin=GfVec3d(lo); out->extentMax=GfVec3d(hi);
         }
