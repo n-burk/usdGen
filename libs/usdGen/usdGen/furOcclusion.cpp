@@ -184,6 +184,8 @@ void BuildScalpShadow(std::vector<Triangle> const& triangles,
 {
     // The 90th-percentile edge decides the level, so one oversized face cannot
     // refine the whole mesh; the triangle ceiling then bounds it outright.
+    int k = 1;
+    { TRACE_SCOPE("usdGen scalp: edges");
     std::vector<float> edges;
     edges.reserve(triangles.size());
     for(Triangle const& t:triangles)
@@ -191,9 +193,10 @@ void BuildScalpShadow(std::vector<Triangle> const& triangles,
                                   (t.a-t.c).GetLength()}));
     auto at=edges.begin()+std::min(edges.size()-1,size_t(0.9*double(edges.size())));
     std::nth_element(edges.begin(),at,edges.end());
-    int k=std::max(1,int(std::ceil(*at*grid.invH)));
+    k=std::max(1,int(std::ceil(*at*grid.invH)));
     int const ceiling=std::max(1,maxTriangles);
     while(k>1 && triangles.size()*size_t(k)*size_t(k) > size_t(ceiling)) --k;
+    }
 
     float const outward=-inward;
     // Sample where the cap is DRAWN, not a voxel out along the normal. The
@@ -229,6 +232,7 @@ void BuildScalpShadow(std::vector<Triangle> const& triangles,
         std::min<size_t>(triangles.size(), size_t(dispatcher ?
             std::max(1, dispatcher->MaxConcurrency()) : 1)));
     std::vector<ChunkOut> chunks(nChunks);
+    { TRACE_SCOPE("usdGen scalp: refine");
     ForEach(dispatcher, nChunks, [&](size_t chunk) {
         size_t const first=(chunk*triangles.size())/nChunks;
         size_t const last=((chunk+1)*triangles.size())/nChunks;
@@ -295,10 +299,11 @@ void BuildScalpShadow(std::vector<Triangle> const& triangles,
             }
         }
     });
+    } /* scalp: refine */
     VtVec3fArray points, normals;
     VtFloatArray tauP, tauN;
     VtIntArray counts, indices;
-    {
+    { TRACE_SCOPE("usdGen scalp: merge");
         size_t nPoints=0, nTau=0, nCounts=0, nIndices=0;
         for(ChunkOut const& c:chunks) {
             nPoints+=c.points.size(); nTau+=c.tauP.size();
@@ -345,11 +350,13 @@ void BuildScalpShadow(std::vector<Triangle> const& triangles,
             plane.f=which?tauN:tauP;
             out->extraUniform.push_back(std::move(plane));
         }
+        { TRACE_SCOPE("usdGen scalp: extent");
         GfVec3f lo=points[0], hi=points[0];
         for(GfVec3f const& p:points) for(int d=0;d<3;++d) {
             lo[d]=std::min(lo[d],p[d]); hi[d]=std::max(hi[d],p[d]);
         }
         out->extentMin=GfVec3d(lo); out->extentMax=GfVec3d(hi);
+        }
     }
     // The cap digest is presentation identity (the scene index dirties the
     // prim on it alone): same coverage and feed order as the byte-at-a-time
@@ -357,11 +364,13 @@ void BuildScalpShadow(std::vector<Triangle> const& triangles,
     // contract names cook digests explicitly. Values change; the digest is
     // in-memory equality-only (stability/sensitivity tested, never golden).
     uint64_t digest = UsdGenDigestOffset;
+    { TRACE_SCOPE("usdGen scalp: digest");
     digest = UsdGenDigestBytes(points.cdata(),points.size()*sizeof(GfVec3f),digest);
     digest = UsdGenDigestBytes(normals.cdata(),normals.size()*sizeof(GfVec3f),digest);
     digest = UsdGenDigestBytes(indices.cdata(),indices.size()*sizeof(int),digest);
     digest = UsdGenDigestBytes(tauP.cdata(),tauP.size()*sizeof(float),digest);
     digest = UsdGenDigestBytes(tauN.cdata(),tauN.size()*sizeof(float),digest);
+    }
     out->digest=digest;
     TF_DEBUG(USDGEN_FUR).Msg(
         "usdGen fur: scalp shadow %d x refinement, %zu points, %zu triangles\n",
@@ -714,12 +723,15 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
             GfMatrix4f const m(occluder.worldMatrix);
             bool const identity = occluder.worldMatrix == GfMatrix4d(1.0);
             uint32_t const base=uint32_t(vertices.size());
+            { TRACE_SCOPE("usdGen tris: vertices");
             for(GfVec3f const& p:occluder.points) {
                 GfVec3f const w=identity?p:m.Transform(p);
                 for(int k=0;k<3;++k) if(!std::isfinite(w[k]))
                     throw std::invalid_argument("non-finite occluder point");
                 vertices.push_back(w);
             }
+            }
+            { TRACE_SCOPE("usdGen tris: faces");
             size_t cursor=0;
             for(int face:occluder.faceVertexCounts) {
                 if(face<0) throw std::invalid_argument("negative occluder face vertex count");
@@ -745,15 +757,18 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
                 }
                 cursor+=size_t(face);
             }
+            }
         }
         // Area-weighted vertex normals: the cross product's length is twice the
         // triangle's area, so accumulating it unnormalised is the weighting.
+        { TRACE_SCOPE("usdGen tris: normals");
         vertexNormals.assign(vertices.size(),GfVec3f(0));
         for(Triangle const& tri:triangles) {
             GfVec3f const weighted=GfCross(tri.b-tri.a,tri.c-tri.a);
             vertexNormals[tri.ia]+=weighted;
             vertexNormals[tri.ib]+=weighted;
             vertexNormals[tri.ic]+=weighted;
+        }
         }
         for(size_t i=0;i<vertexNormals.size();++i) {
             float const length=vertexNormals[i].GetLength();
@@ -764,7 +779,7 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
         // over the triangles keeps this right for either winding order and for
         // a flat emitter, where a centroid test would be degenerate.
         float vote=0;
-        {
+        { TRACE_SCOPE("usdGen tris: vote");
             size_t const stride=std::max<size_t>(1,triangles.size()/4096);
             float const probe=3.f*h;
             auto fur=[&](GfVec3f const& at)->float {
