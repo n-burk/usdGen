@@ -211,6 +211,128 @@ int main() {
                   usdGen::UsdGenSurfaceNormalDomain::Invalid &&
               !missingInterpolation.validationErrors.empty(),
           "nonempty rest normals without interpolation remain Invalid");
+
+    // ---- geometry reuse across captures ----------------------------------
+    // A pooled desc survives while its prim stays clean: no upstream read,
+    // identical values, generations and diagnostics. A dirty on the prim
+    // (or an ancestor) re-reads; a changed sample time disables reuse.
+    auto const geoRoot = SdfPath("/geoDesc");
+    auto const geoSource = SdfPath("/geoDesc/source");
+    auto const geoMesh = SdfPath("/geoMesh");
+    auto const geoCurves = SdfPath("/geoCurves");
+    VtVec3fArray const triPoints{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}};
+    VtVec3fArray const triPointsMoved{{0, 0, 1}, {1, 0, 1}, {0, 1, 1}};
+    auto geoMeshData = [&](VtVec3fArray const &pts) {
+        return Flat({
+            {TfToken("points"), Value(pts)},
+            {TfToken("mesh"), Flat({
+                {TfToken("topology"), Flat({
+                    {TfToken("faceVertexCounts"), Value(VtIntArray{3})},
+                    {TfToken("faceVertexIndices"), Value(VtIntArray{0, 1, 2})}})}})},
+            // Mismatched rest topology: the error below proves diagnostics
+            // ride the cache entry, not the rebuild.
+            {TfToken("usdGen"), Flat({
+                {TfToken("rest"), Flat({
+                    {TfToken("points"), Value(pts)},
+                    {TfToken("faceVertexCounts"), Value(VtIntArray{4})},
+                    {TfToken("faceVertexIndices"), Value(VtIntArray{0, 1, 2})}})}})}});
+    };
+    auto geoCurvesData = [&]() {
+        return Flat({
+            {TfToken("points"), Value(VtVec3fArray{{0, 0, 0}, {0, 1, 0}})},
+            {TfToken("basisCurves"), Flat({
+                {TfToken("topology"), Flat({
+                    {TfToken("curveVertexCounts"), Value(VtIntArray{2})}})}})}});
+    };
+    auto geo = TfCreateRefPtr(new Input);
+    auto geoSourceData = [&](bool guide) {
+        geo->data->AddPrims({{geoSource, TfToken("UsdGenCurveSource"), Flat({
+            {TfToken("curves"), Value(SdfPathVector{geoCurves})},
+            {TfToken("guides"), Value(guide ? SdfPathVector{geoCurves}
+                                            : SdfPathVector{})}})}});
+    };
+    geo->data->AddPrims({
+        {geoRoot, TfToken("UsdGenDescription"), Flat({
+            {TfToken("operatorOrder"), Value(SdfPathVector{geoSource})},
+            {TfToken("surface"), Value(SdfPathVector{geoMesh})}})},
+        {geoMesh, TfToken("mesh"), geoMeshData(triPoints)},
+        {geoCurves, TfToken("basisCurves"), geoCurvesData()}});
+    geoSourceData(true);
+    auto geoBase = CaptureGraphDescFromHydra(*geo, geoRoot);
+    Check(geoBase.desc.surfaces.size() == 1 &&
+              geoBase.desc.curveSets.size() == 1 &&
+              !geoBase.desc.validationErrors.empty() &&
+              geoBase.desc.surfaces[0].surfaceGeneration != 0 &&
+              geoBase.desc.curveSets[0].curveGeneration != 0 &&
+              geoBase.desc.curveSets[0].role == usdGen::UsdGenRole::Reference,
+          "geometry capture pools a surface and a reference curve set");
+    UsdGenGraphDescBuildOptions gopts;
+    gopts.reuseGeometry = true;
+    gopts.previousCache = geoBase.cache;
+    geo->reads.clear();
+    auto geoReused = CaptureGraphDescFromHydra(*geo, geoRoot, gopts);
+    Check(geo->reads[geoMesh] == 0 && geo->reads[geoCurves] == 0,
+          "clean surface and curve prims are not re-read");
+    Check(geoReused.desc.surfaces[0].points == triPoints &&
+              geoReused.desc.surfaces[0].surfaceGeneration ==
+                  geoBase.desc.surfaces[0].surfaceGeneration &&
+              geoReused.desc.curveSets[0].curveGeneration ==
+                  geoBase.desc.curveSets[0].curveGeneration &&
+              geoReused.desc.validationErrors ==
+                  geoBase.desc.validationErrors,
+          "reused desc equals the fresh capture: values, generations, errors");
+
+    geo->data->AddPrims({{geoMesh, TfToken("mesh"), geoMeshData(triPointsMoved)}});
+    gopts.previousCache = geoReused.cache;
+    gopts.dirtyPrimPaths = {geoMesh};
+    geo->reads.clear();
+    auto geoMoved = CaptureGraphDescFromHydra(*geo, geoRoot, gopts);
+    Check(geo->reads[geoMesh] > 0 && geo->reads[geoCurves] == 0,
+          "only the dirtied surface prim re-reads");
+    Check(geoMoved.desc.surfaces[0].points == triPointsMoved &&
+              geoMoved.desc.surfaces[0].surfaceGeneration !=
+                  geoBase.desc.surfaces[0].surfaceGeneration &&
+              geoMoved.desc.curveSets[0].curveGeneration ==
+                  geoBase.desc.curveSets[0].curveGeneration,
+          "dirtied surface refreshes its values and generation; curves keep theirs");
+
+    gopts.previousCache = geoMoved.cache;
+    gopts.dirtyPrimPaths = {SdfPath::AbsoluteRootPath()};
+    geo->reads.clear();
+    auto geoAncestor = CaptureGraphDescFromHydra(*geo, geoRoot, gopts);
+    Check(geo->reads[geoMesh] > 0 && geo->reads[geoCurves] > 0,
+          "ancestor dirty re-reads pooled geometry");
+    Check(geoAncestor.desc.surfaces[0].points == triPointsMoved &&
+              geoAncestor.desc.surfaces[0].surfaceGeneration ==
+                  geoMoved.desc.surfaces[0].surfaceGeneration,
+          "ancestor re-read restores identical values and generation");
+
+    gopts.previousCache = geoAncestor.cache;
+    gopts.dirtyPrimPaths.clear();
+    gopts.time = 1;
+    geo->reads.clear();
+    auto geoTimed = CaptureGraphDescFromHydra(*geo, geoRoot, gopts);
+    Check(geo->reads[geoMesh] > 0 && geo->reads[geoCurves] > 0,
+          "changed sample time disables geometry reuse");
+    gopts.time = 0;
+
+    // Dropping the guide relationship re-claims the pool in the Curves
+    // lane: the role term moves, so the carried generation must go and
+    // the prim re-reads even with no dirty.
+    geoSourceData(false);
+    gopts.previousCache = geoTimed.cache;
+    geo->reads.clear();
+    auto geoDerolled = CaptureGraphDescFromHydra(*geo, geoRoot, gopts);
+    Check(geoDerolled.desc.curveSets[0].role == usdGen::UsdGenRole::Curves &&
+              geo->reads[geoCurves] > 0,
+          "lane change re-reads the curve set without a dirty");
+    gopts.previousCache = geoDerolled.cache;
+    geo->reads.clear();
+    auto geoSettled = CaptureGraphDescFromHydra(*geo, geoRoot, gopts);
+    Check(geo->reads[geoCurves] == 0 &&
+              geoSettled.desc.curveSets[0].curveGeneration ==
+                  geoDerolled.desc.curveSets[0].curveGeneration,
+          "re-claimed lane reuses once its role is stable");
     std::printf("testUsdGenCaptureCache: %s\n", failures ? "FAILED" : "PASS");
     return failures ? 1 : 0;
 }

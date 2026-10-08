@@ -58,10 +58,42 @@ public:
         bool exists = false;
     };
 
+    // Geometry pools, keyed by prim path: a pooled desc is reused when its
+    // prim (and, for subsets, the parent mesh it reads) saw no dirty since
+    // the cached capture. Errors ride along so a reused entry splices the
+    // same diagnostics at the same point; a unioned subset also records
+    // its member set, which must match to reuse.
+    struct SurfaceCapture {
+        SdfPath path;
+        usdGen::UsdGenSurfaceDesc surface;
+        std::vector<std::string> validationErrors;
+        SdfPathVector unionMembers;
+        bool exists = false;
+    };
+    struct CurveCapture {
+        SdfPath path;
+        usdGen::UsdGenCurveSetDesc curves;
+        bool exists = false;
+    };
+    struct MapCapture {
+        SdfPath path;
+        usdGen::UsdGenMapDesc map;
+        std::vector<std::string> validationErrors;
+    };
+    struct GeometryCapture {
+        SdfPath path;
+        usdGen::UsdGenGeometryDesc geometry;
+        std::vector<std::string> validationErrors;
+    };
+
     SdfPath description;
     double time = 0.0;
     SdfPathVector operatorOrder;
     std::vector<NodeCapture> nodes;
+    std::map<std::string, SurfaceCapture> surfaces;
+    std::map<std::string, CurveCapture> curves;
+    std::map<std::string, MapCapture> maps;
+    std::map<std::string, GeometryCapture> geometries;
 };
 
 namespace {
@@ -1480,12 +1512,22 @@ CaptureGraphDescFromHydra(
     // Collider targets ride along keyed by node path; they append to the
     // Collide nodes' surfaces after surface inheritance below.
     std::map<std::string, SdfPathVector> colliderTargets;
+    auto const previousCache =
+        (options.reuseNodes || options.reuseGeometry) ? options.previousCache
+                                                      : nullptr;
+    // Geometry values flow only from Hydra data, so a prim no dirty touched
+    // still reads what the cached capture read -- across frames, unlike
+    // operator params, which can read the frame procedurally ($frame/$time)
+    // and stay gated on it below.
+    bool const reuseGeometry = options.reuseGeometry && previousCache &&
+        previousCache->description == descriptionPath &&
+        previousCache->time == options.time;
+    auto cache = std::make_shared<UsdGenGraphDescCaptureCache>();
     {
         TRACE_SCOPE("usdGen capture operators");
-        auto const previous = options.reuseNodes ? options.previousCache : nullptr;
+        auto const previous = options.reuseNodes ? previousCache : nullptr;
         bool const reusable = previous && previous->description == descriptionPath &&
             previous->time == options.time && previous->operatorOrder == operatorOrder;
-        auto cache = std::make_shared<UsdGenGraphDescCaptureCache>();
         cache->description = descriptionPath;
         cache->time = options.time;
         cache->operatorOrder = operatorOrder;
@@ -1517,7 +1559,6 @@ CaptureGraphDescFromHydra(
                 colliderTargets[captured.path.GetString()] = captured.colliders;
             desc.nodes.push_back(std::move(node));
         }
-        result.cache = std::move(cache);
     }
 
     // ---- surface inheritance (02 §2) -------------------------------------
@@ -1563,37 +1604,113 @@ CaptureGraphDescFromHydra(
         if (surfaceIndex.count(p.GetString())) {
             return;
         }
+        size_t const index = desc.surfaces.size();
+        if (reuseGeometry) {
+            auto const prev = previousCache->surfaces.find(p.GetString());
+            if (prev != previousCache->surfaces.end() && prev->second.exists &&
+                !_HNodeDirty(p, options.dirtyPrimPaths)) {
+                // A subset reads its parent mesh and its union members, so
+                // all of those must be clean too, with the same member set.
+                bool stale = false;
+                if (prev->second.surface.isSubset) {
+                    if (_HNodeDirty(p.GetParentPath(), options.dirtyPrimPaths))
+                        stale = true;
+                    auto const u = surfaceUnions.find(p);
+                    SdfPathVector const empty;
+                    SdfPathVector const &unioned =
+                        u == surfaceUnions.end() ? empty : u->second;
+                    if (unioned != prev->second.unionMembers) stale = true;
+                    for (SdfPath const &m : unioned)
+                        if (_HNodeDirty(m, options.dirtyPrimPaths)) stale = true;
+                }
+                if (!stale) {
+                    UsdGenSurfaceDesc reused = prev->second.surface;
+                    reused.id = usdGen::UsdGenSurfaceId(index);
+                    surfaceIndex.emplace(p.GetString(), index);
+                    desc.surfaces.push_back(reused);
+                    desc.validationErrors.insert(
+                        desc.validationErrors.end(),
+                        prev->second.validationErrors.begin(),
+                        prev->second.validationErrors.end());
+                    cache->surfaces.emplace(p.GetString(), prev->second);
+                    return;
+                }
+            }
+        }
         UsdGenSurfaceDesc surface;
-        surface.path = p;
-        surface.id = usdGen::UsdGenSurfaceId(desc.surfaces.size());
-        surfaceIndex.emplace(p.GetString(), desc.surfaces.size());
-        desc.surfaces.push_back(std::move(surface));
-        UsdGenSurfaceDesc &slot = desc.surfaces[surfaceIndex[p.GetString()]];
         HdContainerDataSourceHandle primDs;
+        std::vector<std::string> surfaceErrors;
+        SdfPathVector unionMembers;
         if (_HPrim(input, p, &primDs, nullptr) &&
             HdGeomSubsetSchema::GetFromParent(primDs).IsDefined()) {
             // R15: the subset's desc carries its parent mesh's geometry and
             // the PARENT-mesh face indices it selects.
             auto const u = surfaceUnions.find(p);
-            _HBuildSubsetSurface(input, p,
-                                 u == surfaceUnions.end() ? SdfPathVector() : u->second,
-                                 time, t, &slot, &desc.validationErrors);
+            if (u != surfaceUnions.end()) unionMembers = u->second;
+            _HBuildSubsetSurface(input, p, unionMembers,
+                                 time, t, &surface, &surfaceErrors);
         } else {
-            _HBuildSurface(input, p, time, t, &slot, &desc.validationErrors);
+            _HBuildSurface(input, p, time, t, &surface, &surfaceErrors);
         }
+        // Both builders set out->path past their existence/type checks, so
+        // an unset path marks a miss: a missing prim rebuilds (and re-emits
+        // its diagnostic) every capture, exactly as before. The published
+        // desc still names the target, as the historical slot preset did.
+        bool const exists = surface.path == p;
+        if (!exists) surface.path = p;
+        surface.id = usdGen::UsdGenSurfaceId(index);
+        surfaceIndex.emplace(p.GetString(), index);
+        desc.surfaces.push_back(surface);
+        desc.validationErrors.insert(desc.validationErrors.end(),
+            surfaceErrors.begin(), surfaceErrors.end());
+        UsdGenGraphDescCaptureCache::SurfaceCapture captured;
+        captured.path = p;
+        captured.surface = surface;
+        captured.validationErrors = std::move(surfaceErrors);
+        captured.unionMembers = std::move(unionMembers);
+        captured.exists = exists;
+        cache->surfaces.emplace(p.GetString(), std::move(captured));
     };
 
     auto curveFor = [&](SdfPath const &p, UsdGenRole role) {
         auto it = curveIndex.find(p.GetString());
         if (it == curveIndex.end()) {
+            if (reuseGeometry) {
+                auto const prev = previousCache->curves.find(p.GetString());
+                if (prev != previousCache->curves.end() &&
+                    prev->second.exists &&
+                    prev->second.curves.role == role &&
+                    !_HNodeDirty(p, options.dirtyPrimPaths)) {
+                    it = curveIndex.emplace(p.GetString(),
+                                            desc.curveSets.size()).first;
+                    desc.curveSets.push_back(prev->second.curves);
+                    cache->curves.emplace(p.GetString(), prev->second);
+                    return;
+                }
+            }
             UsdGenCurveSetDesc cs;
             _HBuildCurveSet(input, p, role, t, &cs);
+            bool const exists = cs.path == p;
             it = curveIndex.emplace(p.GetString(), desc.curveSets.size())
                      .first;
             desc.curveSets.push_back(std::move(cs));
-        } else if (role == UsdGenRole::Reference) {
-            // Reference is the stronger lane claim (I3).
+            UsdGenGraphDescCaptureCache::CurveCapture captured;
+            captured.path = p;
+            captured.curves = desc.curveSets.back();
+            captured.exists = exists;
+            cache->curves.emplace(p.GetString(), std::move(captured));
+        } else if (role == UsdGenRole::Reference &&
+                   desc.curveSets[it->second].role != UsdGenRole::Reference) {
+            // Reference is the stronger lane claim (I3). The role feeds the
+            // generation, so a reused entry drops its carried one and
+            // Finalize re-hashes; a fresh entry was never finalized.
             desc.curveSets[it->second].role = UsdGenRole::Reference;
+            desc.curveSets[it->second].curveGeneration = 0;
+            auto const kept = cache->curves.find(p.GetString());
+            if (kept != cache->curves.end()) {
+                kept->second.curves.role = UsdGenRole::Reference;
+                kept->second.curves.curveGeneration = 0;
+            }
         }
     };
 
@@ -1601,10 +1718,26 @@ CaptureGraphDescFromHydra(
         if (mapIndex.count(p.GetString())) {
             return;
         }
+        if (reuseGeometry) {
+            auto const prev = previousCache->maps.find(p.GetString());
+            // A missing map builds a silent default either way, so every
+            // cached entry is reusable; a repaint dirties the prim.
+            if (prev != previousCache->maps.end() &&
+                !_HNodeDirty(p, options.dirtyPrimPaths)) {
+                mapIndex.emplace(p.GetString(), desc.maps.size());
+                desc.maps.push_back(prev->second.map);
+                desc.validationErrors.insert(desc.validationErrors.end(),
+                    prev->second.validationErrors.begin(),
+                    prev->second.validationErrors.end());
+                cache->maps.emplace(p.GetString(), prev->second);
+                return;
+            }
+        }
         usdGen::UsdGenMapDesc map;
         map.path = p;
         HdContainerDataSourceHandle primDs;
         TfToken primType;
+        std::vector<std::string> mapErrors;
         if (_HPrim(input, p, &primDs, &primType)) {
             HdContainerDataSourceHandle const ug = _HUsdGen(primDs);
             TfToken type;
@@ -1623,12 +1756,18 @@ CaptureGraphDescFromHydra(
             }
             _HPullUsdGen(ug, t, nullptr, &map.params, "usdGen");
             if (map.type == TfToken("UsdGenPaintMap")) {
-                _HCapturePaintMap(input, primDs, t, &map,
-                                     &desc.validationErrors);
+                _HCapturePaintMap(input, primDs, t, &map, &mapErrors);
             }
         }
         mapIndex.emplace(p.GetString(), desc.maps.size());
-        desc.maps.push_back(std::move(map));
+        desc.maps.push_back(map);
+        desc.validationErrors.insert(desc.validationErrors.end(),
+            mapErrors.begin(), mapErrors.end());
+        UsdGenGraphDescCaptureCache::MapCapture captured;
+        captured.path = p;
+        captured.map = map;
+        captured.validationErrors = std::move(mapErrors);
+        cache->maps.emplace(p.GetString(), std::move(captured));
     };
 
     // Expression inputs: what geoSampler()/ptex() read. Each target is read
@@ -1646,10 +1785,42 @@ CaptureGraphDescFromHydra(
             }
             for (SdfPath const &g : in.geometries) {
                 if (geometryIndex.count(g.GetString())) continue;
+                if (reuseGeometry) {
+                    auto const prev =
+                        previousCache->geometries.find(g.GetString());
+                    // A missing geometry builds a silent default either
+                    // way; a subset also reads its parent mesh.
+                    bool const parentClean =
+                        prev == previousCache->geometries.end() ||
+                        !prev->second.geometry.isSubset ||
+                        !_HNodeDirty(g.GetParentPath(),
+                                     options.dirtyPrimPaths);
+                    if (prev != previousCache->geometries.end() &&
+                        parentClean &&
+                        !_HNodeDirty(g, options.dirtyPrimPaths)) {
+                        geometryIndex.emplace(g.GetString(),
+                                              desc.geometries.size());
+                        desc.geometries.push_back(prev->second.geometry);
+                        desc.validationErrors.insert(
+                            desc.validationErrors.end(),
+                            prev->second.validationErrors.begin(),
+                            prev->second.validationErrors.end());
+                        cache->geometries.emplace(g.GetString(), prev->second);
+                        continue;
+                    }
+                }
                 usdGen::UsdGenGeometryDesc geometry;
-                _HBuildGeometry(input, g, t, &geometry, &desc.validationErrors);
+                std::vector<std::string> geometryErrors;
+                _HBuildGeometry(input, g, t, &geometry, &geometryErrors);
                 geometryIndex.emplace(g.GetString(), desc.geometries.size());
-                desc.geometries.push_back(std::move(geometry));
+                desc.geometries.push_back(geometry);
+                desc.validationErrors.insert(desc.validationErrors.end(),
+                    geometryErrors.begin(), geometryErrors.end());
+                UsdGenGraphDescCaptureCache::GeometryCapture captured;
+                captured.path = g;
+                captured.geometry = geometry;
+                captured.validationErrors = std::move(geometryErrors);
+                cache->geometries.emplace(g.GetString(), std::move(captured));
             }
             for (SdfPath const &m : in.maps) mapFor(m);
         }
@@ -1795,6 +1966,20 @@ CaptureGraphDescFromHydra(
 
     ResolveUsdGenImageMaps(&desc);
     UsdGenFinalizeInputGenerations(&desc);
+    // The pooled descs were cached before their generations existed; carry
+    // the fresh ones back so a reuse restores a fully finalized desc and
+    // Finalize can skip its proven-identical arrays outright.
+    for (usdGen::UsdGenSurfaceDesc const &surface : desc.surfaces) {
+        auto const kept = cache->surfaces.find(surface.path.GetString());
+        if (kept != cache->surfaces.end())
+            kept->second.surface.surfaceGeneration = surface.surfaceGeneration;
+    }
+    for (usdGen::UsdGenCurveSetDesc const &curves : desc.curveSets) {
+        auto const kept = cache->curves.find(curves.path.GetString());
+        if (kept != cache->curves.end())
+            kept->second.curves.curveGeneration = curves.curveGeneration;
+    }
+    result.cache = std::move(cache);
     return result;
 }
 

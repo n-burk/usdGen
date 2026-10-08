@@ -2268,23 +2268,27 @@ void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
                     RecordingInput recorder(_pruned);
                     ::usdGenImaging::UsdGenGraphDescBuildOptions options;
                     // Hydra samples are relative to the current stage frame:
-                    // keep offset zero, and gate reuse with the absolute
-                    // packet frame separately. Passing packet.frame as the
-                    // offset here would sample at twice the current frame.
-                    // A groom waking from dormancy slept through dirties
-                    // this packet does not carry, so it captures in full.
+                    // keep offset zero, and gate operator reuse with the
+                    // absolute packet frame separately. Passing packet.frame
+                    // as the offset here would sample at twice the current
+                    // frame. Geometry has no procedural time dependence, so
+                    // it reuses across frames while its prims stay clean. A
+                    // groom waking from dormancy slept through dirties this
+                    // packet does not carry, so it captures in full.
                     if (!packet.fullPopulation && known != catalog->members.end() &&
-                        !known->dormant && known->frame == packet.frame) {
-                        options.reuseNodes = true;
+                        !known->dormant && known->cache) {
                         options.previousCache = known->cache;
                         for (auto const& dirty : packet.dirtied)
                             options.dirtyPrimPaths.push_back(dirty.primPath);
+                        options.reuseGeometry = true;
+                        if (known->frame == packet.frame)
+                            options.reuseNodes = true;
                     }
                     auto const captureStart = std::chrono::steady_clock::now();
                     auto result = ::usdGenImaging::CaptureGraphDescFromHydra(
                         recorder, captured.description, options);
                     TF_DEBUG(USDGEN_INGRESS).Msg(
-                        "usdGen ingress   capture %s at frame %g: %.2f ms (%s, operator reuse %s)\n",
+                        "usdGen ingress   capture %s at frame %g: %.2f ms (%s, operator reuse %s, geometry reuse %s)\n",
                         captured.description.GetText(), packet.frame,
                         std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - captureStart).count(),
@@ -2293,7 +2297,12 @@ void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
                         known == catalog->members.end() ? "off: new groom" :
                         packet.fullPopulation ? "off: full population" :
                         known->dormant ? "off: waking from dormancy" :
-                        "off: the frame changed");
+                        "off: the frame changed",
+                        options.reuseGeometry ? "on" :
+                        known == catalog->members.end() ? "off: new groom" :
+                        packet.fullPopulation ? "off: full population" :
+                        known->dormant ? "off: waking from dormancy" :
+                        "off: no previous cache");
                     captured.desc = std::make_shared<const Desc>(std::move(result.desc));
                     // A CUDA graph always has renderer-local session identity,
                     // even though this plugin does not yet hand its device

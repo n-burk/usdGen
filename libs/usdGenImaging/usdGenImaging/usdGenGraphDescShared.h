@@ -79,11 +79,15 @@ inline void _GenMixToken(uint64_t &h, TfToken const &t)
 /// capture digest keyed by them follows every points/topology/id edit (and
 /// animation) while both builders give equal content the same value.
 /// Provenance flags and the curves' world matrix are not terms: consumers
-/// that read the matrix digest it themselves.
+/// that read the matrix digest it themselves. An entry that already carries
+/// a generation keeps it: only the Hydra builder restores carried
+/// generations, from descs its dirty gate proved identical, so the content
+/// hash is identical too and the re-hash is skipped.
 inline void
 UsdGenFinalizeInputGenerations(usdGen::UsdGenGraphDesc *desc)
 {
     for (usdGen::UsdGenCurveSetDesc &curves : desc->curveSets) {
+        if (curves.curveGeneration) continue;
         uint64_t h = usdGen::UsdGenDigestOffset;
         _GenMixWord(h, uint64_t(curves.role));
         _GenMixToken(h, curves.curveRole);
@@ -127,6 +131,7 @@ UsdGenFinalizeInputGenerations(usdGen::UsdGenGraphDesc *desc)
         curves.curveGeneration = h ? h : 1;
     }
     for (usdGen::UsdGenSurfaceDesc &surface : desc->surfaces) {
+        if (surface.surfaceGeneration) continue;
         uint64_t h = usdGen::UsdGenDigestOffset;
         _GenMixArray(h, surface.faceVertexCounts);
         _GenMixArray(h, surface.faceVertexIndices);
