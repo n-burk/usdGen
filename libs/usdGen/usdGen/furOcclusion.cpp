@@ -723,6 +723,12 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
             GfMatrix4f const m(occluder.worldMatrix);
             bool const identity = occluder.worldMatrix == GfMatrix4d(1.0);
             uint32_t const base=uint32_t(vertices.size());
+            // Both arrays below grow to a size known up front: the points
+            // copy is exact, and the face walk emits one triangle per face
+            // on a tri mesh (a lower bound otherwise). reserve() changes
+            // capacity only, so the built arrays are bit-identical.
+            vertices.reserve(vertices.size()+occluder.points.size());
+            triangles.reserve(triangles.size()+occluder.faceVertexCounts.size());
             { TRACE_SCOPE("usdGen tris: vertices");
             for(GfVec3f const& p:occluder.points) {
                 GfVec3f const w=identity?p:m.Transform(p);
