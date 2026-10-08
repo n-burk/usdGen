@@ -415,6 +415,63 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
             bool const identity = tile.xformMatrix == GfMatrix4d(1.0);
             auto& p=positions[t]; p.resize(count);
             GfVec3f lo=tileLo[t], hi=tileHi[t];
+#if defined(__aarch64__)
+            // Identity fast path: copy + bounds + finiteness in 4-wide
+            // deinterleaved quads. min/max over finite values (signed zeros
+            // included) select lane-wise with no rounding, so splitting the
+            // set across lanes is exact; the exponent-255 test flags NaN and
+            // Inf alike, deferred to the end, and the partial positions are
+            // discarded by the same throw the scalar loop reports. Bit-
+            // identical bounds, same invalid[] verdict.
+            static_assert(sizeof(GfVec3f)==3*sizeof(float),
+                          "vec3 is 3 contiguous floats");
+            if(identity) {
+                float const* const src=
+                    reinterpret_cast<float const*>(tile.points.cdata());
+                float* const dst=reinterpret_cast<float*>(p.data());
+                float32x4_t lox=vdupq_n_f32(lo[0]), loy=vdupq_n_f32(lo[1]),
+                              loz=vdupq_n_f32(lo[2]);
+                float32x4_t hix=vdupq_n_f32(hi[0]), hiy=vdupq_n_f32(hi[1]),
+                              hiz=vdupq_n_f32(hi[2]);
+                uint32x4_t bad=vdupq_n_u32(0);
+                uint32x4_t const e255=vdupq_n_u32(255);
+                size_t i=0;
+                size_t const m4=count&~size_t(3);
+                for(;i<m4;i+=4) {
+                    float32x4x3_t const v=vld3q_f32(src+i*3);
+                    lox=vminq_f32(lox,v.val[0]); loy=vminq_f32(loy,v.val[1]);
+                    loz=vminq_f32(loz,v.val[2]);
+                    hix=vmaxq_f32(hix,v.val[0]); hiy=vmaxq_f32(hiy,v.val[1]);
+                    hiz=vmaxq_f32(hiz,v.val[2]);
+                    bad=vorrq_u32(bad,vceqq_u32(vshrq_n_u32(vshlq_n_u32(
+                        vreinterpretq_u32_f32(v.val[0]),1),24),e255));
+                    bad=vorrq_u32(bad,vceqq_u32(vshrq_n_u32(vshlq_n_u32(
+                        vreinterpretq_u32_f32(v.val[1]),1),24),e255));
+                    bad=vorrq_u32(bad,vceqq_u32(vshrq_n_u32(vshlq_n_u32(
+                        vreinterpretq_u32_f32(v.val[2]),1),24),e255));
+                    vst3q_f32(dst+i*3,v);
+                }
+                lo[0]=vminvq_f32(lox); lo[1]=vminvq_f32(loy);
+                lo[2]=vminvq_f32(loz);
+                hi[0]=vmaxvq_f32(hix); hi[1]=vmaxvq_f32(hiy);
+                hi[2]=vmaxvq_f32(hiz);
+                if(vmaxvq_u32(bad)!=0) {
+                    invalid[t]="non-finite fur point"; return;
+                }
+                for(;i<count;++i) {
+                    GfVec3f const w=tile.points[i];
+                    for(int k=0;k<3;++k) {
+                        if(!std::isfinite(w[k])) {
+                            invalid[t]="non-finite fur point"; return;
+                        }
+                        lo[k]=std::min(lo[k],w[k]); hi[k]=std::max(hi[k],w[k]);
+                    }
+                    p[i]=w;
+                }
+                tileLo[t]=lo; tileHi[t]=hi;
+                return;
+            }
+#endif
             for(size_t i=0;i<count;++i) {
                 GfVec3f const w = identity ? tile.points[i] : m.Transform(tile.points[i]);
                 for(int k=0;k<3;++k) {
