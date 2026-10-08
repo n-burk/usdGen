@@ -943,46 +943,126 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
         for(UsdGenFurOccluder const& occluder:params.occluders) {
             GfMatrix4f const m(occluder.worldMatrix);
             bool const identity = occluder.worldMatrix == GfMatrix4d(1.0);
-            uint32_t const base=uint32_t(vertices.size());
-            // Both arrays below grow to a size known up front: the points
-            // copy is exact, and the face walk emits one triangle per face
-            // on a tri mesh (a lower bound otherwise). reserve() changes
-            // capacity only, so the built arrays are bit-identical.
-            vertices.reserve(vertices.size()+occluder.points.size());
-            triangles.reserve(triangles.size()+occluder.faceVertexCounts.size());
+            size_t const vbase=vertices.size();
+            uint32_t const base=uint32_t(vbase);
+            // Vertices: every output slot is an independent function of its
+            // input point, so chunks write disjoint ranges of the resized
+            // array directly: no merge, identical order. The serial build
+            // throws on the first non-finite point; chunks report their
+            // lowest bad index and the serial min reproduces that throw.
             { TRACE_SCOPE("usdGen tris: vertices");
-            for(GfVec3f const& p:occluder.points) {
-                GfVec3f const w=identity?p:m.Transform(p);
-                for(int k=0;k<3;++k) if(!std::isfinite(w[k]))
-                    throw std::invalid_argument("non-finite occluder point");
-                vertices.push_back(w);
-            }
-            }
-            { TRACE_SCOPE("usdGen tris: faces");
-            size_t cursor=0;
-            for(int face:occluder.faceVertexCounts) {
-                if(face<0) throw std::invalid_argument("negative occluder face vertex count");
-                if(cursor+size_t(face)>occluder.faceVertexIndices.size())
-                    throw std::invalid_argument("invalid occluder face cardinality");
-                if(face<3) { cursor+=size_t(face); continue; }
-                auto vertex=[&](size_t at)->uint32_t {
-                    int const index=occluder.faceVertexIndices[cursor+at];
-                    if(index<0 || size_t(index)>=occluder.points.size())
-                        throw std::invalid_argument("occluder face index out of range");
-                    return base+uint32_t(index);
-                };
-                uint32_t const first=vertex(0);
-                for(size_t k=1;k+1<size_t(face);++k) {
-                    uint32_t const ib=vertex(k), ic=vertex(k+1);
-                    UsdGenFurOccluderTriangle tri{vertices[first],vertices[ib],vertices[ic],
-                                 GfVec3f(0),first,ib,ic};
-                    GfVec3f const n=GfCross(tri.b-tri.a,tri.c-tri.a);
-                    float const length=n.GetLength();
-                    if(!(length>0.f)) continue;
-                    tri.normal=n/length;
-                    triangles.push_back(tri);
+            size_t const nPoints=occluder.points.size();
+            size_t const nVChunks=std::max<size_t>(1,std::min(nPoints,
+                size_t(dispatcher?std::max(1,dispatcher->MaxConcurrency()):1)));
+            vertices.resize(vbase+nPoints);
+            std::vector<size_t> vFirstBad(nVChunks,nPoints);
+            ForEach(dispatcher,nVChunks,[&](size_t chunk) {
+                size_t const first=(chunk*nPoints)/nVChunks;
+                size_t const last=((chunk+1)*nPoints)/nVChunks;
+                size_t bad=nPoints;
+                for(size_t i=first;i<last;++i) {
+                    GfVec3f const& p=occluder.points[i];
+                    GfVec3f const w=identity?p:m.Transform(p);
+                    if(bad==nPoints && !(std::isfinite(w[0])&&
+                                         std::isfinite(w[1])&&std::isfinite(w[2])))
+                        bad=i;
+                    vertices[vbase+i]=w;
                 }
-                cursor+=size_t(face);
+                vFirstBad[chunk]=bad;
+            });
+            size_t badPoint=nPoints;
+            for(size_t b:vFirstBad) badPoint=std::min(badPoint,b);
+            if(badPoint!=nPoints)
+                throw std::invalid_argument("non-finite occluder point");
+            }
+            // Faces: fan triangulation is per-face independent, so chunks
+            // emit into thread-local vectors merged in chunk order: the same
+            // triangles in the same order, degenerates skipped the same way.
+            // The serial build throws on its first bad face in scan order;
+            // chunks stop at their first bad face and the serial
+            // lexicographic min over (face, check, corner) reproduces that
+            // exact throw, since every face before it scanned clean.
+            { TRACE_SCOPE("usdGen tris: faces");
+            size_t const nFaces=occluder.faceVertexCounts.size();
+            size_t const nFChunks=std::max<size_t>(1,std::min(nFaces,
+                size_t(dispatcher?std::max(1,dispatcher->MaxConcurrency()):1)));
+            std::vector<size_t> chunkCursor(nFChunks+1,0);
+            for(size_t chunk=0;chunk<nFChunks;++chunk) {
+                size_t const first=(chunk*nFaces)/nFChunks;
+                size_t const last=((chunk+1)*nFaces)/nFChunks;
+                size_t cursor=chunkCursor[chunk];
+                for(size_t f=first;f<last;++f)
+                    cursor+=size_t(occluder.faceVertexCounts[f]);
+                chunkCursor[chunk+1]=cursor;
+            }
+            struct FaceError {
+                size_t face=0; int step=0; size_t corner=0; int code=0;
+                bool has=false;
+            };
+            std::vector<FaceError> chunkErr(nFChunks);
+            std::vector<std::vector<UsdGenFurOccluderTriangle>> fchunks(nFChunks);
+            ForEach(dispatcher,nFChunks,[&](size_t chunk) {
+                size_t const first=(chunk*nFaces)/nFChunks;
+                size_t const last=((chunk+1)*nFaces)/nFChunks;
+                auto& out=fchunks[chunk]; out.reserve(last-first);
+                FaceError err;
+                size_t cursor=chunkCursor[chunk];
+                for(size_t f=first;f<last && !err.has;++f) {
+                    int const face=occluder.faceVertexCounts[f];
+                    if(face<0) {
+                        err={f,1,0,1,true}; break;
+                    }
+                    if(cursor+size_t(face)>occluder.faceVertexIndices.size()) {
+                        err={f,2,0,2,true}; break;
+                    }
+                    if(face<3) { cursor+=size_t(face); continue; }
+                    size_t seq=0;
+                    bool faceBad=false;
+                    auto vertex=[&](size_t at)->uint32_t {
+                        int const index=occluder.faceVertexIndices[cursor+at];
+                        size_t const here=seq++;
+                        if(index<0 || size_t(index)>=occluder.points.size()) {
+                            err={f,3,here,3,true}; faceBad=true; return uint32_t(0);
+                        }
+                        return base+uint32_t(index);
+                    };
+                    uint32_t const vfirst=vertex(0);
+                    for(size_t k=1;k+1<size_t(face) && !faceBad;++k) {
+                        uint32_t const ib=vertex(k);
+                        if(faceBad) break;
+                        uint32_t const ic=vertex(k+1);
+                        if(faceBad) break;
+                        UsdGenFurOccluderTriangle tri{vertices[vfirst],vertices[ib],vertices[ic],
+                                     GfVec3f(0),vfirst,ib,ic};
+                        GfVec3f const n=GfCross(tri.b-tri.a,tri.c-tri.a);
+                        float const length=n.GetLength();
+                        if(!(length>0.f)) continue;
+                        tri.normal=n/length;
+                        out.push_back(tri);
+                    }
+                    cursor+=size_t(face);
+                }
+                chunkErr[chunk]=err;
+            });
+            size_t total=0;
+            for(auto const& c:fchunks) total+=c.size();
+            triangles.reserve(triangles.size()+total);
+            for(auto const& c:fchunks)
+                triangles.insert(triangles.end(),c.begin(),c.end());
+            FaceError first;
+            for(auto const& e:chunkErr) {
+                if(!e.has) continue;
+                if(!first.has || e.face<first.face ||
+                   (e.face==first.face && (e.step<first.step ||
+                    (e.step==first.step && e.corner<first.corner))))
+                    first=e;
+            }
+            if(first.has) {
+                if(first.code==1)
+                    throw std::invalid_argument("negative occluder face vertex count");
+                if(first.code==2)
+                    throw std::invalid_argument("invalid occluder face cardinality");
+                throw std::invalid_argument("occluder face index out of range");
             }
             }
         }

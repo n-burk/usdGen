@@ -1,5 +1,6 @@
 #include "usdGen/furOcclusion.h"
 #include "usdGen/generationStore.h"
+#include "usdGen/scheduler.h"
 #include "usdGenImaging/usdGenTilePublisher.h"
 #include "pxr/base/gf/rotation.h"
 #include "pxr/imaging/hd/primvarsSchema.h"
@@ -628,6 +629,81 @@ int main() try {
         Require(!UsdGenBuildFurOcclusion(&live,&before,params,&volumeKey,&carried),
                 "unchanged groom reuses");
         Require(carried.points.IsIdentical(kept.points),"the cap shares its arrays");
+    }
+
+    // ---- parallel mesh build: dispatcher identity + error equivalence ----
+    // The occluder mesh build fans vertices/faces over the dispatcher pool
+    // and merges in chunk order; the parallel bake must match the serial
+    // bake bit-for-bit, and every malformed occluder must throw the same
+    // message in both modes (the serial scan order's first error).
+    {
+        UsdGenScheduler sched(4);
+        UsdGenWorkDispatcher disp=sched.MakeWorkDispatcher();
+        UsdGenFurOcclusionParams params;
+        params.occluders.push_back(SphereMesh(0.5f,12,16));
+        params.occluders.push_back(Quad(0.4f,0.6f,true));
+        params.scalpShadow=true;
+        auto bake=[&](UsdGenWorkDispatcher* d,
+                      std::vector<UsdGenTilePublication>* tiles,
+                      UsdGenScalpShadowPublication* shadow) {
+            UsdGenFurOcclusionParams q=params; q.dispatcher=d;
+            return UsdGenBuildFurOcclusion(tiles,nullptr,q,nullptr,shadow);
+        };
+        std::vector<UsdGenTilePublication> a{HairShell(0,200,777u)}, b=a;
+        UsdGenScalpShadowPublication sa, sb;
+        Require(bake(nullptr,&a,&sa),"serial reference bake");
+        Require(bake(&disp,&b,&sb),"parallel bake");
+        Require(a.size()==b.size(),"tile count");
+        for(size_t t=0;t<a.size();++t) for(auto name:{"furTauP","furTauN"}) {
+            auto const& g=Plane(a[t],name).f, &w=Plane(b[t],name).f;
+            Require(g.size()==w.size(),"plane size");
+            for(size_t i=0;i<g.size();++i) Require(g[i]==w[i],"plane bits");
+        }
+        Require(sa.digest==sb.digest,"cap digest");
+        Require(sa.points.size()==sb.points.size(),"cap points");
+        for(size_t i=0;i<sa.points.size();++i) {
+            Require(sa.points[i]==sb.points[i],"cap point bits");
+            Require(sa.normals[i]==sb.normals[i],"cap normal bits");
+        }
+        Require(sa.faceVertexCounts==sb.faceVertexCounts,"cap counts");
+        Require(sa.faceVertexIndices==sb.faceVertexIndices,"cap indices");
+        auto message=[&](UsdGenFurOccluder const& bad,UsdGenWorkDispatcher* d) {
+            std::vector<UsdGenTilePublication> t{HairShell(0,8,1u)};
+            UsdGenFurOcclusionParams q; q.occluders.push_back(bad);
+            q.dispatcher=d;
+            try { UsdGenBuildFurOcclusion(&t,nullptr,q); }
+            catch(std::invalid_argument const& e) { return std::string(e.what()); }
+            return std::string("<no throw>");
+        };
+        UsdGenFurOccluder const good=SphereMesh(0.5f,4,6);
+        auto bad=good; bad.points[3][1]=std::numeric_limits<float>::quiet_NaN();
+        Require(message(bad,nullptr)==message(bad,&disp),"NaN point message");
+        Require(message(bad,nullptr)=="non-finite occluder point","NaN point throws");
+        bad=good; bad.faceVertexCounts[1]=-2;
+        Require(message(bad,nullptr)==message(bad,&disp),"negative count message");
+        Require(message(bad,nullptr)=="negative occluder face vertex count",
+                "negative count throws");
+        bad=good; bad.faceVertexCounts[1]=1000000;
+        Require(message(bad,nullptr)==message(bad,&disp),"cardinality message");
+        Require(message(bad,nullptr)=="invalid occluder face cardinality",
+                "cardinality throws");
+        bad=good; bad.faceVertexIndices[2]=999999;
+        Require(message(bad,nullptr)==message(bad,&disp),"index range message");
+        Require(message(bad,nullptr)=="occluder face index out of range",
+                "index range throws");
+        bad=good; bad.faceVertexIndices[0]=-1;
+        Require(message(bad,nullptr)==message(bad,&disp),"negative index message");
+        Require(message(bad,nullptr)=="occluder face index out of range",
+                "negative index throws");
+        // First error in scan order wins, whichever check it is.
+        bad=good; bad.faceVertexCounts[1]=1000000; bad.faceVertexCounts[3]=-2;
+        Require(message(bad,nullptr)=="invalid occluder face cardinality",
+                "earlier cardinality shadows later negative");
+        Require(message(bad,&disp)==message(bad,nullptr),"parallel keeps scan order");
+        bad=good; bad.faceVertexCounts[1]=-2; bad.faceVertexCounts[3]=1000000;
+        Require(message(bad,nullptr)=="negative occluder face vertex count",
+                "earlier negative shadows later cardinality");
+        Require(message(bad,&disp)==message(bad,nullptr),"parallel keeps scan order");
     }
 
     std::vector<UsdGenTilePublication> bench{Make(0,0,50000)};
