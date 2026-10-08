@@ -890,6 +890,39 @@ int main() try {
         }
         Require(sa.faceVertexCounts==sb.faceVertexCounts,"cap counts");
         Require(sa.faceVertexIndices==sb.faceVertexIndices,"cap indices");
+        // The k==1 chunk emission writes through raw pointers into
+        // scratch capacity and publishes sizes once per chunk: parallel
+        // bakes reusing one scratch (cleared, re-reserved, rewritten)
+        // must match the serial k==1 cap bit-for-bit. The ceiling of 8
+        // forces the skip path (386 triangles > 8) and k==1.
+        {
+            std::vector<UsdGenTilePublication> ref{HairShell(0,200,777u)};
+            UsdGenFurOcclusionParams serialP=params;
+            serialP.scalpMaxTriangles=8;
+            UsdGenScalpShadowPublication want;
+            Require(UsdGenBuildFurOcclusion(&ref,nullptr,serialP,nullptr,
+                                           &want),
+                    "serial k==1 reference bake");
+            Require(want.tessLevel==1,"the reference refines exactly 1x1");
+            UsdGenScalpShadowScratch scratch;
+            for(int round=0;round<2;++round) {
+                std::vector<UsdGenTilePublication> t{HairShell(0,200,777u)};
+                UsdGenFurOcclusionParams q=params;
+                q.dispatcher=&disp; q.scalpScratch=&scratch;
+                q.scalpMaxTriangles=8;
+                UsdGenScalpShadowPublication s;
+                Require(UsdGenBuildFurOcclusion(&t,nullptr,q,nullptr,&s),
+                        "parallel scratch k==1 bake");
+                Require(s.tessLevel==1,"the scratch bake refines exactly 1x1");
+                Require(s.digest==want.digest,"scratch cap digest");
+                Require(s.points==want.points,"scratch cap points");
+                Require(s.normals==want.normals,"scratch cap normals");
+                Require(s.faceVertexCounts==want.faceVertexCounts,
+                        "scratch cap counts");
+                Require(s.faceVertexIndices==want.faceVertexIndices,
+                        "scratch cap indices");
+            }
+        }
         auto message=[&](UsdGenFurOccluder const& bad,UsdGenWorkDispatcher* d) {
             std::vector<UsdGenTilePublication> t{HairShell(0,8,1u)};
             UsdGenFurOcclusionParams q; q.occluders.push_back(bad);

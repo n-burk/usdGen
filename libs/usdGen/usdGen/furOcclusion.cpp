@@ -330,6 +330,24 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
         c.tauN.reserve(nTri*perTriangle*3);
         c.counts.reserve(nTri*size_t(k)*size_t(k));
         c.indices.reserve(nTri*size_t(k)*size_t(k)*3);
+        // At k==1 the emission below writes through raw pointers into the
+        // reserved capacity and publishes the sizes once per chunk after
+        // the triangle loop: six VtArray::resize calls per lit triangle
+        // (size check, uniqueness check, size store each) cost more than
+        // the ~20 stores they frame. data() detaches when shared, so the
+        // pointers are uniquely owned; nothing between here and the
+        // closing resizes can reallocate (the k>1 push_back path never
+        // runs in a k==1 build). Same values in the same order as the
+        // per-triangle resizes: bit-identical.
+        GfVec3f* emitPts=nullptr; GfVec3f* emitNrm=nullptr;
+        float* emitTauP=nullptr; float* emitTauN=nullptr;
+        int* emitCounts=nullptr; int* emitIndices=nullptr;
+        size_t nEmitPts=0, nEmitTau=0, nEmitCounts=0, nEmitIndices=0;
+        if(k==1) {
+            emitPts=c.points.data(); emitNrm=c.normals.data();
+            emitTauP=c.tauP.data(); emitTauN=c.tauN.data();
+            emitCounts=c.counts.data(); emitIndices=c.indices.data();
+        }
         std::vector<GfVec3f> local(perTriangle), localN(perTriangle);
         std::vector<float> depth(perTriangle*6), shaded(perTriangle);
         std::vector<int> remap(perTriangle);
@@ -382,35 +400,26 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
                 // `any`, emitting its three corners in visit order with
                 // indices base, base+1, base+2 and one count of 3. The slot
                 // arithmetic, remap fill, per-corner memo checks, and 28
-                // capacity-checked push_backs per triangle collapse into six
-                // no-init resizes and direct stores of the same expressions
-                // in the same order: bit-identical.
-                size_t const vb=c.points.size();
-                size_t const tb=c.tauP.size();
-                size_t const cb=c.counts.size();
-                size_t const ib=c.indices.size();
-                auto noInit=[](auto* b,auto* e) { (void)b; (void)e; };
-                c.points.resize(vb+3,noInit);
-                c.normals.resize(vb+3,noInit);
-                c.tauP.resize(tb+9,noInit);
-                c.tauN.resize(tb+9,noInit);
-                c.counts.resize(cb+1,noInit);
-                c.indices.resize(ib+3,noInit);
+                // capacity-checked push_backs per triangle collapse into
+                // direct stores of the same expressions in the same order
+                // through the chunk's raw pointers; the sizes publish once
+                // per chunk after the loop: bit-identical.
                 int const order[3]={0,2,1};
                 for(int e=0;e<3;++e) {
                     int const s=order[e];
-                    c.points[vb+size_t(e)]=
+                    emitPts[nEmitPts+size_t(e)]=
                         local[size_t(s)]+localN[size_t(s)]*lift;
-                    c.normals[vb+size_t(e)]=localN[size_t(s)];
+                    emitNrm[nEmitPts+size_t(e)]=localN[size_t(s)];
                     for(int d=0;d<3;++d) {
-                        c.tauP[tb+size_t(e)*3+size_t(d)]=
+                        emitTauP[nEmitTau+size_t(e)*3+size_t(d)]=
                             depth[size_t(s)*6+size_t(d)*2];
-                        c.tauN[tb+size_t(e)*3+size_t(d)]=
+                        emitTauN[nEmitTau+size_t(e)*3+size_t(d)]=
                             depth[size_t(s)*6+size_t(d)*2+1];
                     }
-                    c.indices[ib+size_t(e)]=int(vb+size_t(e));
+                    emitIndices[nEmitIndices+size_t(e)]=int(nEmitPts+size_t(e));
                 }
-                c.counts[cb]=3;
+                emitCounts[nEmitCounts]=3;
+                nEmitPts+=3; nEmitTau+=9; nEmitCounts+=1; nEmitIndices+=3;
                 UsdGenDigestMixWord(topo, uint64_t(ti));
                 continue;
             }
@@ -454,6 +463,18 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
                 face(i,j, i+1,j, i,j+1);
                 if(i+j+2<=k) face(i+1,j, i+1,j+1, i,j+1);
             }
+        }
+        if(k==1) {
+            // Publish the raw-pointer emission above: capacity was reserved
+            // up front and uniquely owned throughout, so these only set
+            // sizes over the already-written elements.
+            auto noInit=[](auto* b,auto* e) { (void)b; (void)e; };
+            c.points.resize(nEmitPts,noInit);
+            c.normals.resize(nEmitPts,noInit);
+            c.tauP.resize(nEmitTau,noInit);
+            c.tauN.resize(nEmitTau,noInit);
+            c.counts.resize(nEmitCounts,noInit);
+            c.indices.resize(nEmitIndices,noInit);
         }
         chunkTopo[chunk] = topo;
     });
