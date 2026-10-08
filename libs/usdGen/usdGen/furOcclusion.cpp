@@ -1306,6 +1306,38 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
                 float const extent=extents[ti];
                 int const n=std::clamp(int(std::ceil(1.5f*extent*grid.invH)),1,512);
                 GfVec3f const step=tri.normal*(inward*h);
+                if(n==1 && mark<=8) {
+                    // Sub-voxel triangles (every benchmark triangle): the
+                    // lattice is exactly the three corners in (i,j) order
+                    // (0,0),(0,1),(1,0), and float(i)/float(1) is exactly
+                    // {0,1}, so the points are a, a+e2, a+e1 with no
+                    // divisions: x*1 and x+0 are exact, so a+e1*1+e2*0 is
+                    // bit-identical to a+e1 (likewise a+e2 and a). The
+                    // per-layer offsets hoist out of the point loop (the
+                    // same expressions, evaluated once). The stencil below
+                    // is the general one, call for call.
+                    GfVec3f off[8];
+                    for(int layer=0;layer<mark;++layer)
+                        off[layer]=step*(float(bias+layer)+0.5f);
+                    GfVec3f const pts[3]={tri.a, tri.a+e2, tri.a+e1};
+                    for(int q=0;q<3;++q) {
+                        GfVec3f const& on=pts[q];
+                        for(int layer=0;layer<mark;++layer) {
+                            GfVec3f const at=on+off[layer];
+                            if(!grid.Contains(at)) continue;
+                            int c[3]; float w[3];
+                            grid.Corners(at,c,w);
+                            for(int z=0;z<2;++z) {
+                                for(int y=0;y<2;++y) for(int x=0;x<2;++x) {
+                                    float const weight=(x?w[0]:1-w[0])*(y?w[1]:1-w[1])*(z?w[2]:1-w[2]);
+                                    float& cell=mask[grid.Index(c[0]+x,c[1]+y,c[2]+z)];
+                                    cell=std::max(cell,weight);
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
                 for(int i=0;i<=n;++i) for(int j=0;i+j<=n;++j) {
                     GfVec3f const on=tri.a+e1*(float(i)/float(n))+e2*(float(j)/float(n));
                     for(int layer=0;layer<mark;++layer) {
