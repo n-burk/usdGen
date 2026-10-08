@@ -263,6 +263,10 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
         std::vector<GfVec3f> local(perTriangle), localN(perTriangle);
         std::vector<float> depth(perTriangle*6), shaded(perTriangle);
         std::vector<int> remap(perTriangle);
+        // Memo epoch for the lazy coverage below: one int per lattice slot,
+        // stamped per triangle, so skipped corners cost no fill.
+        std::vector<int> shadedEpoch(perTriangle, 0);
+        int shadedClock = 0;
         for(size_t ti=first;ti<last;++ti) {
             UsdGenFurOccluderTriangle const& tri=triangles[ti];
             GfVec3f const na=vertexNormals[tri.ia]*outward;
@@ -271,7 +275,6 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
             GfVec3f const flat=tri.normal*outward;
             GfVec3f const e1=tri.b-tri.a, e2=tri.c-tri.a;
             size_t index=0;
-            bool any=false;
             for(int i=0;i<=k;++i) for(int j=0;i+j<=k;++j,++index) {
                 float const u=float(i)/float(k), v=float(j)/float(k);
                 GfVec3f const on=tri.a+e1*u+e2*v;
@@ -280,9 +283,27 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
                 n = length>1e-6f ? n/length : flat;
                 local[index]=on; localN[index]=n;
                 gather(on+n*(probe+lift),&depth[index*6]);
-                shaded[index]=HemisphereDepth(&depth[index*6],n);
-                if(shaded[index]>kScalpShadowFloor) any=true;
             }
+            // Coverage is read only through OR-reductions (the triangle-wide
+            // `any` and each face's lit check), so corners are evaluated
+            // lazily, at most once each, with short-circuit. HemisphereDepth
+            // is a pure function of the corner's gathered depths and normal,
+            // and skipped corners are never read, so the cap is
+            // bit-identical; the lazy loop never evaluates more corners than
+            // the eager one. With a lit first corner at k=1 this is one
+            // evaluation per triangle instead of three.
+            ++shadedClock;
+            auto coverage=[&](int s)->float {
+                if(shadedEpoch[size_t(s)]!=shadedClock) {
+                    shadedEpoch[size_t(s)]=shadedClock;
+                    shaded[size_t(s)]=HemisphereDepth(&depth[size_t(s)*6],
+                                                     localN[size_t(s)]);
+                }
+                return shaded[size_t(s)];
+            };
+            bool any=false;
+            for(size_t s=0;s<perTriangle;++s)
+                if(coverage(int(s))>kScalpShadowFloor) { any=true; break; }
             if(!any) continue;
             // (i, j) -> the lattice slot, walking i in rows of decreasing length.
             auto slot=[&](int i,int j) {
@@ -308,7 +329,7 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
                 int const t0=slot(i0,j0), t1=slot(i1,j1), t2=slot(i2,j2);
                 bool lit=false;
                 for(int s:{t0,t1,t2})
-                    if(shaded[size_t(s)]>kScalpShadowFloor) lit=true;
+                    if(coverage(s)>kScalpShadowFloor) { lit=true; break; }
                 if(!lit) return;
                 c.counts.push_back(3);
                 c.indices.push_back(emit(i0,j0));
