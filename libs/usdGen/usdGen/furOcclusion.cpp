@@ -305,6 +305,44 @@ void BuildScalpShadow(std::vector<UsdGenFurOccluderTriangle> const& triangles,
             for(size_t s=0;s<perTriangle;++s)
                 if(coverage(int(s))>kScalpShadowFloor) { any=true; break; }
             if(!any) continue;
+            if(k==1) {
+                // The ceiling forces k==1 whenever the mesh exceeds it (every
+                // benchmark groom), and then the general machinery below has
+                // exactly one outcome: one face over slots {0,2,1}, lit iff
+                // `any`, emitting its three corners in visit order with
+                // indices base, base+1, base+2 and one count of 3. The slot
+                // arithmetic, remap fill, per-corner memo checks, and 28
+                // capacity-checked push_backs per triangle collapse into six
+                // no-init resizes and direct stores of the same expressions
+                // in the same order: bit-identical.
+                size_t const vb=c.points.size();
+                size_t const tb=c.tauP.size();
+                size_t const cb=c.counts.size();
+                size_t const ib=c.indices.size();
+                auto noInit=[](auto* b,auto* e) { (void)b; (void)e; };
+                c.points.resize(vb+3,noInit);
+                c.normals.resize(vb+3,noInit);
+                c.tauP.resize(tb+9,noInit);
+                c.tauN.resize(tb+9,noInit);
+                c.counts.resize(cb+1,noInit);
+                c.indices.resize(ib+3,noInit);
+                int const order[3]={0,2,1};
+                for(int e=0;e<3;++e) {
+                    int const s=order[e];
+                    c.points[vb+size_t(e)]=
+                        local[size_t(s)]+localN[size_t(s)]*lift;
+                    c.normals[vb+size_t(e)]=localN[size_t(s)];
+                    for(int d=0;d<3;++d) {
+                        c.tauP[tb+size_t(e)*3+size_t(d)]=
+                            depth[size_t(s)*6+size_t(d)*2];
+                        c.tauN[tb+size_t(e)*3+size_t(d)]=
+                            depth[size_t(s)*6+size_t(d)*2+1];
+                    }
+                    c.indices[ib+size_t(e)]=int(vb+size_t(e));
+                }
+                c.counts[cb]=3;
+                continue;
+            }
             // (i, j) -> the lattice slot, walking i in rows of decreasing length.
             auto slot=[&](int i,int j) {
                 int base=0;
