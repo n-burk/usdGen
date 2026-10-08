@@ -719,6 +719,14 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
             for(int k=0;k<3;++k) { GfVec3d axis(0);axis[k]=1;
                 scale=std::max(scale,float(tile.xformMatrix.TransformDir(axis).GetLength())); }
             bool const catmullRom = tile.basis == "catmullRom";
+            // Single-substep segments (chord under one voxel: every segment
+            // of a groom whose CV spacing is sub-voxel) evaluate the basis
+            // at exactly u=0 and u=1, so both weight sets hoist out of the
+            // segment loop. Same function, same inputs (float(1)/float(1)
+            // is exactly 1): bit-identical.
+            float sw0[4], sw1[4];
+            CubicWeights(catmullRom,0.f,sw0);
+            CubicWeights(catmullRom,1.f,sw1);
             bool const constantWidth = tile.widths.size()==1;
             float const oneWidth = tile.widths.empty() ? 0.f :
                 (std::isfinite(tile.widths[0]) ? std::max(0.f,tile.widths[0])*scale : 0.f);
@@ -752,6 +760,27 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
                     if(!(chord>0.f)) continue;
                     int const steps=std::clamp(
                         int(std::ceil(kSamplesPerVoxel*chord*grid.invH)),1,kMaxSegmentSteps);
+                    if(steps==1) {
+                        // The general loop below unrolled for its common
+                        // case: one substep at u=1 with hoisted weights. The
+                        // lerps and the deposit tail are the same
+                        // expressions in the same order: bit-identical.
+                        GfVec3f const a=q[0]*sw0[0]+q[1]*sw0[1]+q[2]*sw0[2]+q[3]*sw0[3];
+                        float const aw=qw[0]*sw0[0]+qw[1]*sw0[1]+qw[2]*sw0[2]+qw[3]*sw0[3];
+                        GfVec3f const b=q[0]*sw1[0]+q[1]*sw1[1]+q[2]*sw1[2]+q[3]*sw1[3];
+                        float const bw=qw[0]*sw1[0]+qw[1]*sw1[1]+qw[2]*sw1[2]+qw[3]*sw1[3];
+                        GfVec3f const d=b-a;
+                        float const len=d.GetLength();
+                        if(len>1e-12f) {
+                            GfVec3f const tangent=d/len;
+                            float const area=std::max(0.f,0.5f*(aw+bw))*len*grid.invH*grid.invH;
+                            GfVec3f projection;
+                            for(int k=0;k<3;++k)
+                                projection[k]=std::sqrt(std::max(0.f,1-tangent[k]*tangent[k]));
+                            deposit(a+0.5f*d,projection*area);
+                        }
+                        continue;
+                    }
                     float w4[4];
                     CubicWeights(catmullRom,0.f,w4);
                     GfVec3f a=q[0]*w4[0]+q[1]*w4[1]+q[2]*w4[2]+q[3]*w4[3];
