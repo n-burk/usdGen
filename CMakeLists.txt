@@ -2883,9 +2883,9 @@ set_tests_properties(testUsdGenReferenceSource PROPERTIES LABELS "T1;sources;ref
 set_tests_properties(testUsdGenLookPrimvars PROPERTIES LABELS "T1;look;primvars")
 set_tests_properties(testUsdGenPaintLengthRecook PROPERTIES
     LABELS "T1;imaging;paint;brush" TIMEOUT 120)
-# The 4098-generation coalescing burst fits in 60s on a quiet runner and
-# misses it when the canonical collide playback test is cooking on the
-# other cores. Serialize so the budget measures the burst, not the neighbor.
+# The 4098-generation drain finishes in ~14s when each cook returns. The
+# 60s timeout is the hang bound for a cook that never publishes; do not
+# raise it. RUN_SERIAL keeps that drain off the parallel ctest mix.
 set_tests_properties(testUsdGenScenePublication PROPERTIES
     LABELS "T1;scheduling;imaging;scene-owner" TIMEOUT 60 RUN_SERIAL TRUE)
 # Canonical Collide playback cooks the 8000-density example (128 collide
