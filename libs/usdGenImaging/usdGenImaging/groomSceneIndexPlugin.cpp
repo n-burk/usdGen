@@ -26,6 +26,7 @@
 #include "pxr/imaging/hd/systemMessages.h"
 #include <tbb/flow_graph.h>
 #include <tbb/parallel_for.h>
+#include <tbb/task_group.h>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -658,6 +659,36 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
     usdGen::UsdGenExecutionSequenceWindow sequences;
     std::atomic<bool> closing{false};
     std::atomic<bool> quiesced{false};
+    // Retired visible snapshots awaiting destruction. The drain's `before`
+    // snapshot pins the previous frame's tiles, captures and scalp cap, so
+    // destroying it on the Hydra thread costs tens of ms of frees per drain
+    // (ss1m: ~17ms); ReleaseRetired runs that destruction on the TBB arena
+    // instead, where the cook workers sit idle this late in the frame. The
+    // bundle is self-contained (no _State back-references), so concurrent
+    // GetPrim readers holding the old snapshot stay correct by shared
+    // ownership whichever thread drops the last reference.
+    tbb::task_group releaser;
+    std::atomic<int> releaserPending{0};
+    void ReleaseRetired(std::shared_ptr<const Snapshot>&& retired) {
+        if (!retired || retired->members.empty()) return;
+        int const pending =
+            releaserPending.fetch_add(1, std::memory_order_acq_rel);
+        if (pending >= 2) {
+            // Releases are already two frames behind: destroy inline (the
+            // old cost) rather than letting retired frames pile up.
+            releaserPending.fetch_sub(1, std::memory_order_acq_rel);
+            return;
+        }
+        // task_group::run takes a const-callable, so the bundle rides in a
+        // copyable handle; resetting it drops the last drain reference.
+        auto bundle = std::make_shared<std::shared_ptr<const Snapshot>>(
+            std::move(retired));
+        releaser.run([this, bundle]() {
+            TRACE_SCOPE("usdGen drain: release retired");
+            bundle->reset();
+            releaserPending.fetch_sub(1, std::memory_order_acq_rel);
+        });
+    }
     std::atomic<bool> asyncAllowed{false};
     bool const progressiveRenderer;
     // An input notice that cannot enter the bounded owner immediately
@@ -717,7 +748,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         if (!closeTicket)
             throw std::runtime_error("usdGen groom owner requires command capacity for shutdown");
     }
-    ~_State() { if (owner) owner->Shutdown(); }
+    ~_State() { releaser.wait(); if (owner) owner->Shutdown(); }
     auto SnapshotValue() const { return std::atomic_load(&catalog); }
     auto VisibleSnapshot() const { return std::atomic_load(&visible); }
     std::shared_ptr<const Snapshot> PublishSnapshot() {
@@ -1702,6 +1733,9 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                 Added added;
                 Removed removed;
                 Dirtied dirtied;
+                // Staged-out retired snapshot (see the move below): its
+                // destruction runs on the background releaser.
+                std::shared_ptr<const _State::Snapshot> retired;
                 {
                 TRACE_SCOPE("usdGen drain: diff snapshots");
                 auto before = _state->VisibleSnapshot();
@@ -2061,7 +2095,16 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                 });
                 std::atomic_store(&_state->visible, target);
                 } /* drain: merge */
+                // The retired visible snapshot pins the previous frame's
+                // tiles, captures and scalp cap; destroying it here costs
+                // tens of ms of main-thread frees, so stage it out for the
+                // background releaser. Everything else in this block either
+                // references the new snapshot (pinned by `visible` above, so
+                // only reference counts drop here) or is plain keys, and
+                // still dies here cheaply.
+                retired = std::move(before);
                 }
+                _state->ReleaseRetired(std::move(retired));
                 {
                 TRACE_SCOPE("usdGen drain: notify Hydra");
                 try { if (!removed.empty()) index->_SendPrimsRemoved(removed); }
