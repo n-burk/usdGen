@@ -1680,6 +1680,25 @@ CaptureGraphDescFromHydra(
         } else {
             _HBuildSurface(input, p, time, t, &surface, &surfaceErrors);
         }
+        // Invariant sub-hash memo: a deform moves points, never rest or
+        // topology, so when the previous capture's rest/topology shares are
+        // identical to this build's, its sub-hash is this build's (same CoW
+        // rule as the occluder digest: the cache holds the shares, so equal
+        // (size, cdata) is equal content). Anything else recomputes fresh
+        // in Finalize; the values are identical either way.
+        if (reuseGeometry) {
+            auto const prev = previousCache->surfaces.find(p.GetString());
+            if (prev != previousCache->surfaces.end() && prev->second.exists) {
+                usdGen::UsdGenSurfaceDesc const &ps = prev->second.surface;
+                if (ps.restNormalDomain == surface.restNormalDomain &&
+                    ps.faceVertexCounts.IsIdentical(surface.faceVertexCounts) &&
+                    ps.faceVertexIndices.IsIdentical(surface.faceVertexIndices) &&
+                    ps.restPoints.IsIdentical(surface.restPoints) &&
+                    ps.restNormals.IsIdentical(surface.restNormals))
+                    surface.surfaceInvariantGeneration =
+                        ps.surfaceInvariantGeneration;
+            }
+        }
         // Both builders set out->path past their existence/type checks, so
         // an unset path marks a miss: a missing prim rebuilds (and re-emits
         // its diagnostic) every capture, exactly as before. The published
@@ -2014,8 +2033,11 @@ CaptureGraphDescFromHydra(
     // Finalize can skip its proven-identical arrays outright.
     for (usdGen::UsdGenSurfaceDesc const &surface : desc.surfaces) {
         auto const kept = cache->surfaces.find(surface.path.GetString());
-        if (kept != cache->surfaces.end())
+        if (kept != cache->surfaces.end()) {
             kept->second.surface.surfaceGeneration = surface.surfaceGeneration;
+            kept->second.surface.surfaceInvariantGeneration =
+                surface.surfaceInvariantGeneration;
+        }
     }
     for (usdGen::UsdGenCurveSetDesc const &curves : desc.curveSets) {
         auto const kept = cache->curves.find(curves.path.GetString());

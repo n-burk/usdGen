@@ -83,6 +83,15 @@ inline void _GenMixToken(uint64_t &h, TfToken const &t)
 /// a generation keeps it: only the Hydra builder restores carried
 /// generations, from descs its dirty gate proved identical, so the content
 /// hash is identical too and the re-hash is skipped.
+///
+/// The surface generation combines two sub-hashes: the slowly-varying rest
+/// and topology bytes, and the per-cook points, samples, and attributes. A
+/// deform re-cooks every frame with identical rest/topology shares, so the
+/// Hydra builder memoizes the invariant sub-hash across cooks (see
+/// UsdGenSurfaceDesc::surfaceInvariantGeneration) and only the moving bytes
+/// re-hash. A zero invariant hash always recomputes here, identically in
+/// both builders, so a memo miss (or a hash that is legitimately zero) is
+/// exactly the fresh value.
 inline void
 UsdGenFinalizeInputGenerations(usdGen::UsdGenGraphDesc *desc)
 {
@@ -132,12 +141,18 @@ UsdGenFinalizeInputGenerations(usdGen::UsdGenGraphDesc *desc)
     }
     for (usdGen::UsdGenSurfaceDesc &surface : desc->surfaces) {
         if (surface.surfaceGeneration) continue;
+        uint64_t inv = surface.surfaceInvariantGeneration;
+        if (!inv) {
+            inv = usdGen::UsdGenDigestOffset;
+            _GenMixArray(inv, surface.faceVertexCounts);
+            _GenMixArray(inv, surface.faceVertexIndices);
+            _GenMixArray(inv, surface.restPoints);
+            _GenMixArray(inv, surface.restNormals);
+            _GenMixWord(inv, uint64_t(surface.restNormalDomain));
+            surface.surfaceInvariantGeneration = inv;
+        }
         uint64_t h = usdGen::UsdGenDigestOffset;
-        _GenMixArray(h, surface.faceVertexCounts);
-        _GenMixArray(h, surface.faceVertexIndices);
-        _GenMixArray(h, surface.restPoints);
-        _GenMixArray(h, surface.restNormals);
-        _GenMixWord(h, uint64_t(surface.restNormalDomain));
+        _GenMixWord(h, inv);
         _GenMixArray(h, surface.points);
         for (size_t i = 0; i < surface.samples.size(); ++i) {
             auto const &sample = surface.samples[i];

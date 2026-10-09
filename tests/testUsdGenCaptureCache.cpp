@@ -336,6 +336,79 @@ int main() {
               geoSettled.desc.curveSets[0].curveGeneration ==
                   geoDerolled.desc.curveSets[0].curveGeneration,
           "re-claimed lane reuses once its role is stable");
+
+    // ---- invariant sub-hash memo across deform cooks ----------------------
+    // Moving points with identical topology/rest shares keeps the invariant
+    // sub-hash while the generation moves (the memo hits); a topology edit
+    // moves both (the memo misses). Shared arrays across captures model
+    // Hydra's static topology shares under a deform. The memo is
+    // value-identical to a fresh hash either way, so these pin the
+    // sensitivity contract a stale memo would break, not the memo itself.
+    VtIntArray const memoCounts{3}, memoIndices{0, 1, 2};
+    VtVec3fArray const memoRest{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}};
+    auto memoMeshData = [&](VtVec3fArray const &pts, VtIntArray const &counts,
+                            VtIntArray const &indices) {
+        return Flat({
+            {TfToken("points"), Value(pts)},
+            {TfToken("mesh"), Flat({
+                {TfToken("topology"), Flat({
+                    {TfToken("faceVertexCounts"), Value(counts)},
+                    {TfToken("faceVertexIndices"), Value(indices)}})}})},
+            {TfToken("usdGen"), Flat({
+                {TfToken("rest"), Flat({
+                    {TfToken("points"), Value(memoRest)},
+                    {TfToken("faceVertexCounts"), Value(counts)},
+                    {TfToken("faceVertexIndices"), Value(indices)}})}})}});
+    };
+    UsdGenGraphDescBuildOptions mopts;
+    mopts.reuseGeometry = true;
+    geo->data->AddPrims(
+        {{geoMesh, TfToken("mesh"), memoMeshData(triPoints, memoCounts, memoIndices)}});
+    mopts.previousCache = geoSettled.cache;
+    mopts.dirtyPrimPaths = {geoMesh};
+    auto memoBase = CaptureGraphDescFromHydra(*geo, geoRoot, mopts);
+    Check(memoBase.desc.surfaces.size() == 1 &&
+              memoBase.desc.surfaces[0].points == triPoints &&
+              memoBase.desc.surfaces[0].surfaceGeneration != 0,
+          "memo baseline captures values and a generation");
+    // Points move, shares hold: generation moves, invariant sub-hash holds.
+    geo->data->AddPrims(
+        {{geoMesh, TfToken("mesh"), memoMeshData(triPointsMoved, memoCounts, memoIndices)}});
+    mopts.previousCache = memoBase.cache;
+    auto memoMoved = CaptureGraphDescFromHydra(*geo, geoRoot, mopts);
+    Check(memoMoved.desc.surfaces[0].points == triPointsMoved &&
+              memoMoved.desc.surfaces[0].surfaceGeneration !=
+                  memoBase.desc.surfaces[0].surfaceGeneration &&
+              memoMoved.desc.surfaces[0].surfaceInvariantGeneration ==
+                  memoBase.desc.surfaces[0].surfaceInvariantGeneration,
+          "points-only move refreshes the generation, holds the invariant sub-hash");
+    // The memo is value-identical to a fresh hash: the same data captured
+    // without a cache must produce both generations exactly. A stale memo
+    // (any dropped key term) fails here.
+    auto memoMovedFresh = CaptureGraphDescFromHydra(*geo, geoRoot);
+    Check(memoMovedFresh.desc.surfaces[0].surfaceGeneration ==
+                  memoMoved.desc.surfaces[0].surfaceGeneration &&
+              memoMovedFresh.desc.surfaces[0].surfaceInvariantGeneration ==
+                  memoMoved.desc.surfaces[0].surfaceInvariantGeneration,
+          "memoized capture equals the fresh hash after a points-only move");
+    // Topology edit, indices only (counts shares hold): both move. Single
+    // term, so a memo key that dropped the indices term would stale-hit.
+    VtIntArray const memoIndices2{0, 2, 1};
+    geo->data->AddPrims(
+        {{geoMesh, TfToken("mesh"), memoMeshData(triPointsMoved, memoCounts, memoIndices2)}});
+    mopts.previousCache = memoMoved.cache;
+    auto memoRetopo = CaptureGraphDescFromHydra(*geo, geoRoot, mopts);
+    Check(memoRetopo.desc.surfaces[0].surfaceGeneration !=
+                  memoMoved.desc.surfaces[0].surfaceGeneration &&
+              memoRetopo.desc.surfaces[0].surfaceInvariantGeneration !=
+                  memoMoved.desc.surfaces[0].surfaceInvariantGeneration,
+          "topology edit refreshes the generation and the invariant sub-hash");
+    auto memoRetopoFresh = CaptureGraphDescFromHydra(*geo, geoRoot);
+    Check(memoRetopoFresh.desc.surfaces[0].surfaceGeneration ==
+                  memoRetopo.desc.surfaces[0].surfaceGeneration &&
+              memoRetopoFresh.desc.surfaces[0].surfaceInvariantGeneration ==
+                  memoRetopo.desc.surfaces[0].surfaceInvariantGeneration,
+          "memoized capture equals the fresh hash after a topology edit");
     std::printf("testUsdGenCaptureCache: %s\n", failures ? "FAILED" : "PASS");
     return failures ? 1 : 0;
 }
