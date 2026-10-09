@@ -780,12 +780,17 @@ int UsdGenScheduler::ThreadLimit() const noexcept { return _threadLimit; }
 void UsdGenWorkDispatcher::ParallelFor(
     size_t count, void (*body)(size_t, void *), void *payload)
 {
-    // 03 §5.3: every parallel region is a plain tbb::parallel_for run inside
-    // the private arena (never pxr work::, which honours the process-global
-    // PXR_WORK_THREAD_LIMIT and would serialise under PXR_WORK_THREAD_LIMIT=1).
+    // 03 §5.3: every parallel region is a plain tbb::parallel_for (never
+    // pxr work::, which honours the process-global PXR_WORK_THREAD_LIMIT and
+    // would serialise under PXR_WORK_THREAD_LIMIT=1).
     // (E-7 pass 3: an explicit ceil(chunks/workers) grainsize REGRESSED E-1
     // 35.5 vs 28.5 — reverted to the default auto-partitioner.)
-    _arena->execute([&]() {
+    if (count == 0 || !body) return;
+    auto invoke = [&]() {
+        if (count == 1) {
+            body(0, payload);
+            return;
+        }
         tbb::parallel_for(
             tbb::blocked_range<size_t>(0, count),
             [&](tbb::blocked_range<size_t> const &range) {
@@ -793,7 +798,19 @@ void UsdGenWorkDispatcher::ParallelFor(
                     body(i, payload);
                 }
             });
-    });
+    };
+    // Session cooks call this from a pipeline worker. task_arena::execute
+    // into this private arena then waits for a market thread while holding
+    // one, and with the market already saturated that wait never finishes.
+    // testUsdGenScenePublication hits it inside the 4098-generation drain:
+    // ctest kills the process at the 60s bound, while a run that wins the
+    // race finishes in ~14s. A thread already inside a TBB arena runs the
+    // region there. External callers still enter this arena.
+    if (tbb::this_task_arena::current_thread_index() ==
+            tbb::task_arena::not_initialized)
+        _arena->execute(invoke);
+    else
+        invoke();
 }
 
 UsdGenWorkDispatcher UsdGenScheduler::MakeWorkDispatcher() const

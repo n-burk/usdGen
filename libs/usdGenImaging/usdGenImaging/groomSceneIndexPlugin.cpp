@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <exception>
 #include <map>
 #include <limits>
@@ -936,6 +937,17 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
     bool Post(std::function<void()> command) {
         return owner->PostCommand(std::move(command));
     }
+    // A rejected post does not run onCancel (the ticket is released and the
+    // command is dropped). Callers that already Hold() or issued a sequence
+    // retry once with a fresh credit so Synchronize cannot wait forever on
+    // that admission. The originals stay intact: Post copies an lvalue.
+    bool PostRetained(Pipeline::CommandTicket&& ticket, std::function<void()> command,
+                      std::function<void()> onCancel, char const* what) {
+        if (Post(std::move(ticket), command, onCancel)) return true;
+        if (owner->PostCommand(command, onCancel)) return true;
+        std::fprintf(stderr, "usdGen groom owner dropped %s\n", what ? what : "command");
+        return false;
+    }
     void CheckWaiters() {
         auto it = waiters.begin();
         while (it != waiters.end()) {
@@ -1031,8 +1043,9 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
             accepted = ::usdGenImaging::UsdGenSessionStore::GetInstance().DetachAsync(
                 std::move(sourceTicket), key, session,
                 [self, session, seq, reply] {
-                    (void)self->Post(std::move(*reply), [self, session, seq] { self->Release(seq); },
-                                      [self, seq] { self->Release(seq); });
+                    (void)self->PostRetained(std::move(*reply), [self, session, seq] { self->Release(seq); },
+                                      [self, seq] { self->Release(seq); },
+                                      "detach acknowledgement");
                 });
         } catch (...) { std::terminate(); }
         if (!accepted) Release(seq);
@@ -1092,8 +1105,9 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
                     if (!session->UnregisterRepublishCallbackAsync(
                         std::move(replies->sourceUnregister), callback,
                         [self, seq, reply, mailbox] {
-                            (void)self->Post(std::move(*reply), [self, seq, mailbox] { self->Release(seq); },
-                                              [self, seq] { self->Release(seq); });
+                            (void)self->PostRetained(std::move(*reply), [self, seq, mailbox] { self->Release(seq); },
+                                              [self, seq] { self->Release(seq); },
+                                              "unregister acknowledgement");
                         }))
                         Release(seq);
                 } catch (...) { std::terminate(); }
@@ -1369,8 +1383,11 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
                 [self, g, sourceSession, attachmentEpoch, structuralRevision,
                  seq, ticket, reveals](
                      Session::CommitPayload const& payload, Pipeline::Outcome outcome) {
-                    (void)self->Post(std::move(*ticket), [self, g, sourceSession,
-                        attachmentEpoch, structuralRevision, seq, payload, reveals, outcome] {
+                    auto finish = [self, g, sourceSession, attachmentEpoch, seq] {
+                        self->FinishCook(g, sourceSession, attachmentEpoch, seq);
+                    };
+                    auto publish = [self, g, sourceSession, attachmentEpoch, structuralRevision,
+                                    payload, reveals, outcome, finish] {
                         try {
                             if (g->structuralRevision == structuralRevision) {
                                 self->Publish(g, sourceSession, attachmentEpoch, payload, true);
@@ -1387,10 +1404,10 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
                             if (reveals) self->Reveal(g);
                         }
                         catch (...) { g->playbackFailed = true; TF_WARN("usdGen scene publication failed"); }
-                            self->FinishCook(g, sourceSession, attachmentEpoch, seq);
-                    }, [self, g, sourceSession, attachmentEpoch, seq] {
-                        self->FinishCook(g, sourceSession, attachmentEpoch, seq);
-                    });
+                        finish();
+                    };
+                    (void)self->PostRetained(std::move(*ticket), publish, finish,
+                                             "cook completion");
                 }, std::move(directProgress));
         } catch (...) { TF_WARN("usdGen scene cook request failed"); }
         if (!accepted) {
@@ -1426,7 +1443,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
             accepted = ::usdGenImaging::UsdGenSessionStore::GetInstance().AttachAsync(
                 std::move(replies->sourceAttach), requestedKey,
                 [self, g, requestedKey, attachmentEpoch, seq, replies](SessionHandle session) {
-                    (void)self->Post(std::move(replies->attachAck), [self, g, requestedKey, attachmentEpoch, seq, session, replies] {
+                    (void)self->PostRetained(std::move(replies->attachAck), [self, g, requestedKey, attachmentEpoch, seq, session, replies] {
                         try {
                             if (!session) { self->Reveal(g); self->Release(seq); return; }
                             self->RememberSession(session);
@@ -1477,7 +1494,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
                             self->Cook(g, seq);
                             self->Release(seq);
                         } catch (...) { std::terminate(); }
-                    }, [self, seq] { self->Release(seq); });
+                    }, [self, seq] { self->Release(seq); }, "attach acknowledgement");
                 });
         } catch (...) { TF_WARN("usdGen scene attachment request failed"); }
         if (!accepted) { Reveal(g); Release(seq); }
@@ -2370,8 +2387,10 @@ void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
         }
         if (input && packet.sourceFull) {
             std::vector<SdfPath> sourceStack{SdfPath::AbsoluteRootPath()};
+            std::set<SdfPath> sourceSeen;
             while (!sourceStack.empty()) {
                 SdfPath path = sourceStack.back(); sourceStack.pop_back();
+                if (!sourceSeen.insert(path).second) continue;
                 HdSceneIndexPrim prim = input->GetPrim(path);
                 // The absolute root is a namespace anchor, not an emitted
                 // scene prim; every descendant is recorded, including groom
@@ -2423,8 +2442,10 @@ void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
                 }))
             packet.frame = *packet.stageFrame;
         if (input && !stack.empty()) {
+            std::set<SdfPath> seen;
             while (!stack.empty()) {
                 const auto path = stack.back(); stack.pop_back();
+                if (!seen.insert(path).second) continue;
                 const auto prim = input->GetPrim(path);
                 if (path != SdfPath::AbsoluteRootPath() && IsGroom(TypeName(prim))) {
                     auto known = std::find_if(catalog->members.begin(), catalog->members.end(),
@@ -2507,21 +2528,26 @@ void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
         state->deferredFullCapture.store(true, std::memory_order_release);
         packet.inputs.clear();
         uint64_t const sequence = packet.sequence;
-        (void)state->Post(std::move(*ingressTicket),
-            [state, packet=std::move(packet)] { state->Apply(packet); },
-            [state, sequence] { state->CompleteIngress(sequence); });
+        auto failedPacket = std::move(packet);
+        auto applyFailed = [state, failedPacket] { state->Apply(failedPacket); };
+        auto abandon = [state, sequence] { state->CompleteIngress(sequence); };
+        (void)state->PostRetained(std::move(*ingressTicket), applyFailed, abandon,
+                                  "failed ingress");
         throw;
     }
     uint64_t const sequence = packet.sequence;
-    (void)state->Post(std::move(*ingressTicket), [state, packet=std::move(packet)] {
-        try { state->Apply(packet); }
+    auto submitted = std::move(packet);
+    auto apply = [state, submitted] {
+        try { state->Apply(submitted); }
         catch (...) {
             // Required ownership/hold updates are not transactionally
             // recoverable after an allocation/framework failure yet.
             // Never disguise partial mutation as a completed ingress.
             std::terminate();
         }
-    }, [state, sequence] { state->CompleteIngress(sequence); });
+    };
+    auto abandon = [state, sequence] { state->CompleteIngress(sequence); };
+    (void)state->PostRetained(std::move(*ingressTicket), apply, abandon, "ingress");
     // Without asyncAllow, the upstream observer call is the only legal
     // frontend delivery point.  Wait through causal attach/cook/publication
     // work, then send from this caller rather than the owner worker.
