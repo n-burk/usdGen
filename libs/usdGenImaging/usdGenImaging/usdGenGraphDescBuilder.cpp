@@ -730,7 +730,20 @@ _HBuildSurface(HdSceneIndexBase &input, SdfPath const &path, double time,
         bool valid = _HGetTyped(rest, 0.0, &out->restPoints, {"points"}) &&
             _HGetTyped(rest, 0.0, &restCounts, {"faceVertexCounts"}) &&
             _HGetTyped(rest, 0.0, &restIndices, {"faceVertexIndices"});
-        if (!valid || restCounts != out->faceVertexCounts || restIndices != out->faceVertexIndices) {
+        // A deform moves points, never faces, so the rest and live topology
+        // are usually the same Hydra shares: identical shares prove equality
+        // in O(1) and skip the ~20MB deep compare, which runs only when the
+        // shares actually differ (a retopology). Same predicate, same
+        // short-circuit order, either way.
+        auto countsMatch = [&] {
+            return restCounts.IsIdentical(out->faceVertexCounts) ||
+                restCounts == out->faceVertexCounts;
+        };
+        auto indicesMatch = [&] {
+            return restIndices.IsIdentical(out->faceVertexIndices) ||
+                restIndices == out->faceVertexIndices;
+        };
+        if (!valid || !countsMatch() || !indicesMatch()) {
             errors->push_back(path.GetString() + ": missing rest data or animated/rest topology mismatch");
             out->restFromCurrentPoints = true;
         }

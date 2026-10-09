@@ -139,9 +139,22 @@ UsdGenFinalizeInputGenerations(usdGen::UsdGenGraphDesc *desc)
         _GenMixArray(h, surface.restNormals);
         _GenMixWord(h, uint64_t(surface.restNormalDomain));
         _GenMixArray(h, surface.points);
-        for (auto const &sample : surface.samples) {
+        for (size_t i = 0; i < surface.samples.size(); ++i) {
+            auto const &sample = surface.samples[i];
             _GenMixBytes(h, &sample.time, sizeof(sample.time));
-            _GenMixArray(h, sample.points);
+            // The builders seed each sample's points from the surface points,
+            // so a sample usually shares them: identical shares are already
+            // covered above (or by an earlier sample), and re-hashing the
+            // same ~12MB buys no sensitivity. Times still mix, so a new
+            // sample always moves the generation. Values change; generations
+            // are in-memory equality-only, and both builders share this
+            // function so parity holds.
+            bool covered = sample.points.IsIdentical(surface.points);
+            for (size_t j = 0; !covered && j < i; ++j)
+                covered = sample.points.IsIdentical(
+                    surface.samples[j].points);
+            if (!covered)
+                _GenMixArray(h, sample.points);
         }
         _GenMixArray(h, surface.velocities);
         _GenMixArray(h, surface.uv);
