@@ -1391,9 +1391,13 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
             vertexNormals[tri.ia]+=weighted;
             vertexNormals[tri.ib]+=weighted;
             vertexNormals[tri.ic]+=weighted;
-            GfVec3f const e1=tri.b-tri.a, e2=tri.c-tri.a;
-            extents[i]=std::max({e1.GetLength(),e2.GetLength(),
-                                 (tri.c-tri.b).GetLength()});
+            GfVec3f const e1=tri.b-tri.a, e2=tri.c-tri.a, e3=tri.c-tri.b;
+            // One sqrt, not three: sqrt is monotone on [0,inf), so the max
+            // of the square roots is the square root of the max, bit for
+            // bit (GetLength is exactly GfSqrt(GetLengthSq())).
+            float const m2=std::max({e1.GetLengthSq(),e2.GetLengthSq(),
+                                     e3.GetLengthSq()});
+            extents[i]=std::sqrt(m2);
         }
         }
         for(size_t i=0;i<vertexNormals.size();++i) {
