@@ -24,12 +24,18 @@
 //
 // Novel vs cached deform: run with warmup+frames == scene span (RBF scenes
 // span 12: --warmup 2 --frames 10; surface scenes span 4: --warmup 1
-// --frames 3). Then cold repeat 0 cooks every frame (execution-cache
-// MISSES: novel motion) and kept repeats re-cook the same frames (HITS:
-// tiles rebuilt from cache, no operator eval). novelFrameMs reports the
-// cold median, frameMs the cached median. When a frame exceeds cache
-// capacity (large grooms), every repeat misses and the two converge;
-// that convergence itself is signal (cache thrash).
+// --frames 3). Both repeats then cook every frame of the span: cold
+// repeat 0 is the first loop iteration (cold allocator/scratch/topology
+// caches) and kept repeats are subsequent iterations (warm). There are
+// no execution-cache HITS on repeats (trace-verified: displace strands
+// and BuildFurOcclusion evaluate on every repeat; Scheduler::Run is
+// cheaper on kept repeats only because static upstream nodes hit). The
+// 64MB execution cache (sessionCooker.h) cannot retain deform frames
+// (~96MB+ of positions alone at 1M), and the drain compares consecutive
+// snapshots, so every repeat frame is a novel transition anyway (t11->t0
+// across the repeat boundary, then t0->t1...). novelFrameMs reports the
+// cold-iteration median, frameMs the warm-iteration median; their gap is
+// warmth (allocation, scratch, driver caches), not skipped evaluation.
 //
 // Counter honesty: HdPerfLog drawCalls/drawBatches/itemsDrawn are reset by
 // every HdStCommandBuffer::Commit (hdSt/commandBuffer.cpp), so a final read
