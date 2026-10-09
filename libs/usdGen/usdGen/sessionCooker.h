@@ -188,6 +188,9 @@ private:
     // The cap-build chunk outputs, carried across cooks for their capacity
     // (see UsdGenFurOcclusionParams::scalpScratch).
     UsdGenScalpShadowScratch _furScalpScratch;
+    // The volume bake's temporaries, carried across cooks for their capacity
+    // (see UsdGenFurOcclusionParams::bakeScratch).
+    UsdGenFurBakeScratch _furBakeScratch;
     // The published baseline is not this graph's last run: rebuild every tile.
     bool _rebuildAllTiles = false;
     UsdGenGenerationStore _store;

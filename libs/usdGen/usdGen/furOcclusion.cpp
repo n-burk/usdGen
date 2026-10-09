@@ -1044,7 +1044,14 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
     }
 
     // --- splat projected fibre area, per job into its own sub-box -------------
-    std::vector<GfVec3f> density(cells,GfVec3f(0));
+    // With caller-owned bake scratch the density grid keeps its capacity
+    // across cooks; the zero fill stays either way (cells outside every job
+    // sub-box must read 0), it just lands on already-faulted storage.
+    UsdGenFurBakeScratch* const bakeScratch = params.bakeScratch;
+    std::vector<GfVec3f> localDensity;
+    std::vector<GfVec3f>& density =
+        bakeScratch ? bakeScratch->density : localDensity;
+    density.assign(cells,GfVec3f(0));
     size_t const slabs=std::max<size_t>(1,std::min<size_t>(size_t(grid.n[2]),64));
     {
         TRACE_SCOPE("usdGen occlusion: splat");
@@ -1562,14 +1569,18 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
     // lights. Half the receiver's own cell is the correct discretisation of an
     // integral that starts at the CV, and is what a host renderer's HairCount - 1 shift
     // expects to find.
-    std::array<std::vector<float>,6> tau;
+    // The sweep writes every cell exactly once, so the planes need sizing,
+    // never filling: carried planes skip the ~7MB zero fill per sweep.
+    std::array<std::vector<float>,6> localTau;
+    std::array<std::vector<float>,6>& tau =
+        bakeScratch ? bakeScratch->tau : localTau;
     auto sweep=[&] {
         ForEach(dispatcher, 6, [&](size_t direction) {
             int const axis=int(direction)/2;
             int const na=grid.n[axis];
             int const nu=grid.n[(axis+1)%3], nv=grid.n[(axis+2)%3];
             auto& out=tau[direction];
-            out.assign(cells,0.f);
+            if(out.size()!=cells) out.resize(cells);
             for(int v=0;v<nv;++v) for(int u=0;u<nu;++u) {
                 float sum=0;
                 for(int step=0;step<na;++step) {
@@ -1618,7 +1629,13 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
         size_t const nShellChunks = std::max<size_t>(1, std::min<size_t>(
             triangles.size(), size_t(dispatcher ?
                 std::max(1, dispatcher->MaxConcurrency()) : 1)));
-        std::vector<std::vector<float>> chunkMasks(nShellChunks);
+        // Carried chunk masks keep their capacities (the per-chunk zero fill
+        // stays: each chunk's stencil writes are sparse, so max() needs the
+        // zero start); only a changed chunk count resizes the outer vector.
+        std::vector<std::vector<float>> localChunkMasks;
+        std::vector<std::vector<float>>& chunkMasks =
+            bakeScratch ? bakeScratch->chunkMasks : localChunkMasks;
+        if(chunkMasks.size()!=nShellChunks) chunkMasks.resize(nShellChunks);
         ForEach(dispatcher,nShellChunks,[&](size_t chunk) {
             size_t const first=(chunk*triangles.size())/nShellChunks;
             size_t const last=((chunk+1)*triangles.size())/nShellChunks;
@@ -1682,7 +1699,10 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
                 }
             }
         });
-        std::vector<float> mask(cells,0.f);
+        // The merge writes every cell, so the carried mask skips the fill.
+        std::vector<float> localMask;
+        std::vector<float>& mask = bakeScratch ? bakeScratch->mask : localMask;
+        if(mask.size()!=cells) mask.resize(cells);
         ForEach(dispatcher,slabs,[&](size_t slab) {
             size_t const first=(slab*cells)/slabs, last=((slab+1)*cells)/slabs;
             for(size_t i=first;i<last;++i) {
@@ -1691,7 +1711,7 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
                 mask[i]=m;
             }
         });
-        chunkMasks.clear(); chunkMasks.shrink_to_fit();
+        if(!bakeScratch) { chunkMasks.clear(); chunkMasks.shrink_to_fit(); }
         ForEach(dispatcher,slabs,[&](size_t slab) {
             size_t const first=(slab*cells)/slabs, last=((slab+1)*cells)/slabs;
             for(size_t i=first;i<last;++i)
@@ -1706,8 +1726,12 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
     }
     // Interleave the six sweeps: the gather reads all six depths of eight
     // neighbouring cells, which is two cache lines per cell instead of six
-    // separate strided arrays.
-    std::vector<uint16_t> depths(cells*6);
+    // separate strided arrays. The interleave writes every element, so the
+    // carried array skips the fill.
+    std::vector<uint16_t> localDepths;
+    std::vector<uint16_t>& depths =
+        bakeScratch ? bakeScratch->depths : localDepths;
+    if(depths.size()!=cells*6) depths.resize(cells*6);
     {
         TRACE_SCOPE("usdGen occlusion: interleave");
         ForEach(dispatcher, slabs, [&](size_t slab) {
@@ -1716,7 +1740,7 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
                 for(int d=0;d<6;++d)
                     depths[i*6+d]=uint16_t(tau[d][i]*kDepthScale+0.5f);
         });
-        for(auto& plane:tau) std::vector<float>().swap(plane);
+        if(!bakeScratch) for(auto& plane:tau) std::vector<float>().swap(plane);
     }
 
     // --- gather: every receiver reads its six depths once --------------------

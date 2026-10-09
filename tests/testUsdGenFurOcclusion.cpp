@@ -346,6 +346,10 @@ int main() try {
         // comparison after the first runs on retained chunk capacity.
         UsdGenScalpShadowScratch scratch;
         params.scalpScratch=&scratch;
+        // And the volume-bake temporaries: the moved/edited bakes below run
+        // on retained sweep/density/shell capacity at changed grid sizes.
+        UsdGenFurBakeScratch bake;
+        params.bakeScratch=&bake;
         std::vector<UsdGenTilePublication> live{
             Make(0,-0.1f,400), Probe(1,GfVec3f(0,-0.3f,0),GfVec3f(0,-0.25f,0))};
         UsdGenScalpShadowPublication first;
@@ -359,6 +363,7 @@ int main() try {
         UsdGenFurOcclusionParams bare=params;
         bare.occluderCache=nullptr;
         bare.scalpScratch=nullptr;
+        bare.bakeScratch=nullptr;
         auto expect=moved;
         UsdGenScalpShadowPublication expectShadow;
         Require(UsdGenBuildFurOcclusion(&expect,nullptr,bare,nullptr,&expectShadow),

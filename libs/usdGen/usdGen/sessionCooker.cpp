@@ -2145,6 +2145,7 @@ UsdGenStats publishedStats, bool invalidateValues,
         if (prev) gen.scalpShadow = prev->scalpShadow;
         occlusion.occluderCache = &_furOccluderBuild;
         occlusion.scalpScratch = &_furScalpScratch;
+        occlusion.bakeScratch = &_furBakeScratch;
         UsdGenBuildFurOcclusion(&gen.tiles, prev ? &prev->tiles : nullptr,
                                 occlusion, &_furVolumeKey, &gen.scalpShadow);
         if (!gen.scalpShadow.IsEmpty()) {

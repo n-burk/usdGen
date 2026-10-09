@@ -3,6 +3,10 @@
 
 #include "usdGen/curveBuffer.h"
 
+#include <array>
+#include <cstdint>
+#include <vector>
+
 namespace usdGen {
 class UsdGenWorkDispatcher;
 
@@ -101,6 +105,23 @@ struct UsdGenScalpShadowScratch
     std::vector<Chunk> chunks;
 };
 
+/// Caller-owned scratch for the volume bake's temporaries: the six sweep
+/// planes, the interleaved fixed-point depths, the splat density grid, and
+/// the opaque-shell masks. A deform timeline re-cooks every frame at (nearly)
+/// the same grid size, so carrying these reuses tens of megabytes of
+/// already-faulted storage instead of re-zeroing fresh pages per cook; the
+/// sweep, interleave, and merged-mask fills overwrite every element, so
+/// carried planes skip the fill entirely. Never published, and live in
+/// exactly one cook at a time like `volumeKey`.
+struct UsdGenFurBakeScratch
+{
+    std::array<std::vector<float>,6> tau;
+    std::vector<uint16_t> depths;
+    std::vector<GfVec3f> density;
+    std::vector<float> mask;
+    std::vector<std::vector<float>> chunkMasks;
+};
+
 struct UsdGenFurOcclusionParams
 {
     /// Opaque blockers, normally the groom's emitting surfaces. Only the part
@@ -152,6 +173,11 @@ struct UsdGenFurOcclusionParams
     /// keeps the historical behaviour of allocating the chunk outputs fresh
     /// every bake.
     UsdGenScalpShadowScratch* scalpScratch = nullptr;
+
+    /// Caller-owned volume-bake scratch (see UsdGenFurBakeScratch). Null
+    /// keeps the historical behaviour of allocating the sweep, density,
+    /// and shell temporaries fresh every bake.
+    UsdGenFurBakeScratch* bakeScratch = nullptr;
 };
 
 /// Bakes geometry-derived directional optical depth for a whole groom.
