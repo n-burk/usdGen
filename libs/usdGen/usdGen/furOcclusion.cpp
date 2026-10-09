@@ -1586,6 +1586,54 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
             int const nu=grid.n[(axis+1)%3], nv=grid.n[(axis+2)%3];
             auto& out=tau[direction];
             if(out.size()!=cells) out.resize(cells);
+            if (axis != 0) {
+                // The recurrence runs along a strided axis (stride nx for
+                // axis 1, nx*ny for axis 2: one 4-byte element per 64-byte
+                // line touched). Step outermost instead: the inner loop
+                // walks x consecutively while per-line running sums hold the
+                // recurrence state. Each (u,v) line still accumulates in
+                // stepping order with the same expressions, so the bytes
+                // are bit-identical; only the interleave across lines
+                // changes. The sums plane (nu*nv floats) stays L1/L2-hot
+                // across steps.
+                int const nx=grid.n[0], ny=grid.n[1];
+                std::vector<float> sums(size_t(nu)*size_t(nv), 0.f);
+                for(int step=0;step<na;++step) {
+                    int const s=(direction%2)?step:na-1-step;
+                    if(axis==1) {
+                        // u over z, v over x: idx=v+nx*(s+ny*u); x innermost.
+                        for(int u=0;u<nu;++u) {
+                            size_t const base=size_t(nx)*(size_t(s)+
+                                size_t(ny)*size_t(u));
+                            float* const row=sums.data()+size_t(nv)*size_t(u);
+                            for(int v=0;v<nv;++v) {
+                                size_t const idx=size_t(v)+base;
+                                float const depth=density[idx][axis];
+                                float const sum=row[v];
+                                out[idx]=std::min(UsdGenFurTauClamp,
+                                    sum+0.5f*depth);
+                                row[v]=sum+depth;
+                            }
+                        }
+                    } else {
+                        // u over x, v over y: idx=u+nx*(v+ny*s); x innermost.
+                        size_t const plane=size_t(nx)*size_t(ny)*size_t(s);
+                        for(int v=0;v<nv;++v) {
+                            size_t const base=size_t(nx)*size_t(v)+plane;
+                            float* const row=sums.data()+size_t(nu)*size_t(v);
+                            for(int u=0;u<nu;++u) {
+                                size_t const idx=size_t(u)+base;
+                                float const depth=density[idx][axis];
+                                float const sum=row[u];
+                                out[idx]=std::min(UsdGenFurTauClamp,
+                                    sum+0.5f*depth);
+                                row[u]=sum+depth;
+                            }
+                        }
+                    }
+                }
+                return;
+            }
             for(int v=0;v<nv;++v) for(int u=0;u<nu;++u) {
                 float sum=0;
                 for(int step=0;step<na;++step) {
