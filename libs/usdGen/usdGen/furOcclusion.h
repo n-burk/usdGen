@@ -33,7 +33,8 @@ struct UsdGenFurOccluderTriangle
 };
 
 /// Caller-owned reuse for the world-space occluder mesh (the fan
-/// triangulation plus area-weighted vertex normals). A deform timeline
+/// triangulation plus area-weighted vertex normals and their vertices).
+/// A deform timeline
 /// re-cooks every frame while its emitting surfaces sit still, so the mesh
 /// is identical cook to cook; the bake keys it on the occluder bytes alone
 /// and skips the rebuild on a match. Like `volumeKey`, this is live in
@@ -43,6 +44,12 @@ struct UsdGenFurOccluderBuild
     uint64_t key = 0;
     bool valid = false;
     std::vector<UsdGenFurOccluderTriangle> triangles;
+    // World-space vertices, carried across rebuilds for their capacity: a
+    // deforming surface moves its points every cook but never their count,
+    // so the steady-state rebuild overwrites these in place with no resize
+    // and no re-fault. Build-only temporaries (every later stage reads the
+    // triangles); sized exactly after each rebuild.
+    std::vector<GfVec3f> vertices;
     std::vector<GfVec3f> vertexNormals;
     // Max edge length per triangle, filled by the same build: the k/n slits
     // in the edges, vote, and shell loops read this instead of recomputing

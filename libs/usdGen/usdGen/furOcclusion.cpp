@@ -1220,30 +1220,42 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
     // The mesh is a pure function of the occluder bytes, so a caller-owned
     // cache carries it across cooks: a deform timeline re-cooks every frame
     // while its emitting surfaces sit still. On a miss the build lands
-    // directly in the cache's vectors (cleared first, the key published only
-    // after the whole mesh built without throwing); on a hit the cached mesh
-    // is used as-is. The side vote below always re-runs: it reads the fresh
-    // hair density, so `inward` is identical to a from-scratch build either
-    // way. The world-space vertices are build-only temporaries (every later
-    // stage reads the triangles), so they stay local and uncached.
+    // directly in the cache's vectors, overwritten in place from per-array
+    // write cursors (the key published only after the whole mesh built
+    // without throwing); on a hit the cached mesh is used as-is. In-place
+    // overwrite matters: a deforming surface rebuilds every cook with the
+    // same counts, so the steady-state rebuild resizes nothing and the
+    // ~120MB triangle fill plus the vertex transform land on already-faulted
+    // storage instead of re-zeroing fresh pages. The side vote below always
+    // re-runs: it reads the fresh hair density, so `inward` is identical to
+    // a from-scratch build either way. The world-space vertices are
+    // build-only temporaries (every later stage reads the triangles) but
+    // ride the same cache for their capacity.
     // (occluderCache was hoisted to the digest block above.)
     bool const occluderHit = occluderCache && occluderCache->valid &&
                              occluderCache->key == occluderKey;
     std::vector<UsdGenFurOccluderTriangle> missTriangles;
+    std::vector<GfVec3f> missVertices;
     std::vector<GfVec3f> missNormals;
     std::vector<float> missExtents;
     if (occluderCache && !occluderHit) {
-        occluderCache->triangles.clear();
-        occluderCache->vertexNormals.clear();
         occluderCache->valid = false;
+        if (params.occluders.empty()) {
+            // No mesh this cook: drop the carried arrays exactly as the
+            // historical clear() did, so the emptiness checks below agree.
+            occluderCache->triangles.clear();
+            occluderCache->vertices.clear();
+            occluderCache->vertexNormals.clear();
+        }
     }
     std::vector<UsdGenFurOccluderTriangle>& triangles =
         occluderCache ? occluderCache->triangles : missTriangles;
+    std::vector<GfVec3f>& vertices =
+        occluderCache ? occluderCache->vertices : missVertices;
     std::vector<GfVec3f>& vertexNormals =
         occluderCache ? occluderCache->vertexNormals : missNormals;
     std::vector<float>& extents =
         occluderCache ? occluderCache->extents : missExtents;
-    std::vector<GfVec3f> vertices;
     float inward = -1.f;
     if(!params.occluders.empty()) {
         TRACE_SCOPE("usdGen occlusion: occluder triangles");
@@ -1257,11 +1269,12 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
             occluderCache->topo.clear();
             occluderCache->topo.resize(params.occluders.size());
         }
+        size_t vCursor=0, tCursor=0;
         for(size_t oi=0;oi<params.occluders.size();++oi) {
             UsdGenFurOccluder const& occluder=params.occluders[oi];
             GfMatrix4f const m(occluder.worldMatrix);
             bool const identity = occluder.worldMatrix == GfMatrix4d(1.0);
-            size_t const vbase=vertices.size();
+            size_t const vbase=vCursor;
             uint32_t const base=uint32_t(vbase);
             // Vertices: every output slot is an independent function of its
             // input point, so chunks write disjoint ranges of the resized
@@ -1272,7 +1285,10 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
             size_t const nPoints=occluder.points.size();
             size_t const nVChunks=std::max<size_t>(1,std::min(nPoints,
                 size_t(dispatcher?std::max(1,dispatcher->MaxConcurrency()):1)));
-            vertices.resize(vbase+nPoints);
+            // Every slot below is written, so only a shortfall resizes (and
+            // only its delta zero-fills): the steady-state rebuild with
+            // carried capacity writes straight into place.
+            if(vertices.size()<vbase+nPoints) vertices.resize(vbase+nPoints);
             std::vector<size_t> vFirstBad(nVChunks,nPoints);
             ForEach(dispatcher,nVChunks,[&](size_t chunk) {
                 size_t const first=(chunk*nPoints)/nVChunks;
@@ -1292,6 +1308,7 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
             for(size_t b:vFirstBad) badPoint=std::min(badPoint,b);
             if(badPoint!=nPoints)
                 throw std::invalid_argument("non-finite occluder point");
+            vCursor=vbase+nPoints;
             }
             // Faces: a deforming surface moves its points every cook but never
             // its topology, so the fan expansion and its validation run once
@@ -1320,8 +1337,8 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
                 size_t const nFan=fan.size();
                 size_t const nHChunks=std::max<size_t>(1,std::min(nFan,
                     size_t(dispatcher?std::max(1,dispatcher->MaxConcurrency()):1)));
-                size_t const tbase=triangles.size();
-                triangles.resize(tbase+nFan);
+                size_t const tbase=tCursor;
+                if(triangles.size()<tbase+nFan) triangles.resize(tbase+nFan);
                 std::vector<size_t> hCounts(nHChunks,0);
                 ForEach(dispatcher,nHChunks,[&](size_t chunk) {
                     size_t const first=(chunk*nFan)/nHChunks;
@@ -1352,6 +1369,7 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
                     }
                     triangles.resize(tbase+emitted);
                 }
+                tCursor=tbase+emitted;
             } else {
             size_t const nFaces=occluder.faceVertexCounts.size();
             size_t const nFChunks=std::max<size_t>(1,std::min(nFaces,
@@ -1420,11 +1438,16 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
                 }
                 chunkErr[chunk]=err;
             });
+            size_t const tbase=tCursor;
+            // Truncate any carried tail (a shrink, never a fill), then append
+            // this occluder's expansion exactly as the cleared build did.
+            triangles.resize(tbase);
             size_t total=0;
             for(auto const& c:fchunks) total+=c.size();
             triangles.reserve(triangles.size()+total);
             for(auto const& c:fchunks)
                 triangles.insert(triangles.end(),c.begin(),c.end());
+            tCursor=tbase+total;
             FaceError first;
             for(auto const& e:chunkErr) {
                 if(!e.has) continue;
@@ -1456,6 +1479,10 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
             }
             }
         }
+        // Size the carried arrays exactly: steady-state cursors already match,
+        // so these are no-ops; a shrunk mesh truncates without filling.
+        triangles.resize(tCursor);
+        vertices.resize(vCursor);
         // Area-weighted vertex normals: the cross product's length is twice the
         // triangle's area, so accumulating it unnormalised is the weighting.
         // The max edge length fills in the same pass (see the header): the
