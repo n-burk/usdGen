@@ -49,6 +49,17 @@ struct UsdGenFurOccluderBuild
     // three lengths per triangle per cook. Same floats the recomputation
     // yields (max selects, never rounds); valid whenever the mesh is.
     std::vector<float> extents;
+    // Memoized occluder-byte digest (the occluderKey the volume key folds
+    // and the mesh carry compares): the occluder arrays are VtArray CoW
+    // shares of the emitting surfaces, so equal (size, cdata) is equal
+    // content and the multi-megabyte rehash is skipped. Same rule as
+    // opUtil::ContentDigestCache, and holding the shares is what keeps it
+    // sound: a caller's mutating subscript detaches (new cdata, a miss),
+    // so in-place content changes under a live share cannot happen. The
+    // digest feeds equality-only keys, never goldens.
+    std::vector<UsdGenFurOccluder> digestArrays;
+    uint64_t digest = 0;
+    bool digestValid = false;
 };
 
 /// Caller-owned scratch for the scalp-shadow cap build: the per-chunk

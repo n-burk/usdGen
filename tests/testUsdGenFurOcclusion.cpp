@@ -383,6 +383,17 @@ int main() try {
                 "edited uncached reference bake");
         checkSame(edited,expectEdited,editedShadow,expectEditedShadow,
                   "occluder edit rebuilds bit-identically");
+        // Bake once more unchanged: the memoized occluder digest holds the
+        // mesh key stable (a hit returns exactly the recomputed value).
+        uint64_t const afterEdit=cache.key;
+        auto still=edited;
+        UsdGenScalpShadowPublication stillShadow;
+        Require(UsdGenBuildFurOcclusion(&still,nullptr,params,nullptr,
+                                       &stillShadow),
+                "repeat bake through the cache");
+        Require(cache.key==afterEdit,"an unchanged rebake holds the mesh key");
+        checkSame(still,expectEdited,stillShadow,expectEditedShadow,
+                  "the repeat bake matches bit-identically");
     }
 
     // ---- scalp-cap array carry across deform frames -------------------------

@@ -810,7 +810,9 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
     // equality-only (stability/sensitivity tested, never golden).
     uint64_t key = UsdGenDigestOffset;
     uint64_t occluderKey = UsdGenDigestOffset;
+    UsdGenFurOccluderBuild* const occluderCache = params.occluderCache;
     {
+        TRACE_SCOPE("usdGen occlusion: identity");
         auto word = [&](void const* p, size_t n) {
             key = UsdGenDigestBytes(p, n, key);
         };
@@ -827,14 +829,41 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
         // The occluder bytes feed their own digest first, which the build
         // cache below keys on; folding that digest into the volume key keeps
         // one pass over the mesh while covering the same inputs. Key values
-        // change; the key is in-memory equality-only (never golden).
-        for (UsdGenFurOccluder const& occluder : params.occluders) {
-            oword(&occluder.worldMatrix, sizeof(occluder.worldMatrix));
-            oword(occluder.points.cdata(), occluder.points.size()*sizeof(GfVec3f));
-            oword(occluder.faceVertexCounts.cdata(),
-                  occluder.faceVertexCounts.size()*sizeof(int));
-            oword(occluder.faceVertexIndices.cdata(),
-                  occluder.faceVertexIndices.size()*sizeof(int));
+        // change; the key is in-memory equality-only (never golden). A
+        // deform timeline re-cooks every frame while its emitting surfaces
+        // sit still, so the memoized digest skips the rehash when the
+        // arrays are the same shares; identical bytes hash identically, so a
+        // hit returns exactly the recomputed value.
+        auto sameShare = [](auto const& a, auto const& b) {
+            return a.size() == b.size() &&
+                (a.empty() || a.cdata() == b.cdata());
+        };
+        bool digestHit = occluderCache && occluderCache->digestValid &&
+            occluderCache->digestArrays.size() == params.occluders.size();
+        for (size_t i = 0; digestHit && i < params.occluders.size(); ++i) {
+            UsdGenFurOccluder const& a = occluderCache->digestArrays[i];
+            UsdGenFurOccluder const& b = params.occluders[i];
+            digestHit = a.worldMatrix == b.worldMatrix &&
+                sameShare(a.points, b.points) &&
+                sameShare(a.faceVertexCounts, b.faceVertexCounts) &&
+                sameShare(a.faceVertexIndices, b.faceVertexIndices);
+        }
+        if (digestHit) {
+            occluderKey = occluderCache->digest;
+        } else {
+            for (UsdGenFurOccluder const& occluder : params.occluders) {
+                oword(&occluder.worldMatrix, sizeof(occluder.worldMatrix));
+                oword(occluder.points.cdata(), occluder.points.size()*sizeof(GfVec3f));
+                oword(occluder.faceVertexCounts.cdata(),
+                      occluder.faceVertexCounts.size()*sizeof(int));
+                oword(occluder.faceVertexIndices.cdata(),
+                      occluder.faceVertexIndices.size()*sizeof(int));
+            }
+            if (occluderCache) {
+                occluderCache->digestArrays = params.occluders;
+                occluderCache->digest = occluderKey;
+                occluderCache->digestValid = true;
+            }
         }
         key = UsdGenDigestBytes(&occluderKey, sizeof(occluderKey), key);
     }
@@ -1197,7 +1226,7 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
     // hair density, so `inward` is identical to a from-scratch build either
     // way. The world-space vertices are build-only temporaries (every later
     // stage reads the triangles), so they stay local and uncached.
-    UsdGenFurOccluderBuild* const occluderCache = params.occluderCache;
+    // (occluderCache was hoisted to the digest block above.)
     bool const occluderHit = occluderCache && occluderCache->valid &&
                              occluderCache->key == occluderKey;
     std::vector<UsdGenFurOccluderTriangle> missTriangles;
