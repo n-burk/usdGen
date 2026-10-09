@@ -4,9 +4,12 @@
 // 8-thread knee (EV-001/EV-008), never the process-default 20-worker arena.
 // USDGEN_THREAD_LIMIT (env) pins it explicitly; otherwise one-time calibration
 // (03 §5.3) picks the smallest concurrency within 5 % of best.
-// All loops are tbb::parallel_for inside _arena.execute — never pxr work::
-// (WorkHasConcurrency() reads the process-global PXR_WORK_THREAD_LIMIT and would
-// serialise under PXR_WORK_THREAD_LIMIT=1, 03 §5.3 caveat).
+// Loops are tbb::parallel_for, never pxr work:: (WorkHasConcurrency() reads
+// the process-global PXR_WORK_THREAD_LIMIT and would serialise under
+// PXR_WORK_THREAD_LIMIT=1, 03 §5.3 caveat). An external caller enters the
+// private arena. A thread that is already a TBB worker stays in its current
+// arena: joining this one from another worker deadlocks once the market is
+// saturated.
 #ifndef USDGEN_SCHEDULER_H
 #define USDGEN_SCHEDULER_H
 

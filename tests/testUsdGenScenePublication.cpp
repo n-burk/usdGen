@@ -947,7 +947,10 @@ def Scope "Groom"
     // The latest-publication slot must release superseded immutable snapshots
     // and their tile maps while a consumer declines to poll.  This uses the
     // CPU fixture so no GPU work is needed to exercise generation ownership.
+    // stderr is unbuffered, so a 60s stall still reports which phase stopped.
+    std::fprintf(stderr, "scene-publication phase: coalesced scene\n");
     Scene coalesced = MakeScene("scene-publication-coalesced");
+    std::fprintf(stderr, "scene-publication phase: coalesced scene ready\n");
     Check(coalesced.owner != nullptr, "coalesced fixture creates a groom owner");
     if (coalesced.owner) {
         coalesced.owner->Synchronize();
@@ -981,6 +984,13 @@ def Scope "Groom"
         bool allBurstEditsAccepted = true;
         bool allGenerationBatchesBounded = true;
         for (unsigned i = 0; i != kGenerationBurst; ++i) {
+            if ((i & 255u) == 0)
+                std::fprintf(stderr,
+                    "scene-publication burst %u issued %llu completed %llu\n", i,
+                    static_cast<unsigned long long>(
+                        UsdGenImagingTestHook::groomSequenceLastIssued(*coalesced.groom)),
+                    static_cast<unsigned long long>(
+                        UsdGenImagingTestHook::groomSequenceCompletedThrough(*coalesced.groom)));
             float const value = 1.0f + static_cast<float>(i);
             allBurstEditsAccepted =
                 coalescedWidth.Set(value, UsdTimeCode(6.0)) && allBurstEditsAccepted;
@@ -1018,6 +1028,7 @@ def Scope "Groom"
                       cooksBeforeCoalescedPoll,
               "one poll installs the final width without capture or cook work");
         coalesced.groom->RemoveObserver(TfCreateWeakPtr(&coalescedNotices));
+        std::fprintf(stderr, "scene-publication phase: coalesced drain finished\n");
     }
 
     // Keep the original process-teardown coverage independent of the removal
