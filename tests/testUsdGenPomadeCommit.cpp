@@ -2045,9 +2045,13 @@ main()
               "P6: the post-detach edit survives the reload");
 
         // A shelf layer built but never swapped counts as dropped at Detach.
+        // Sample before Enqueue. The worker can finish this one-tube layer
+        // before the next statement; a count taken afterwards already
+        // includes that build, the wait then runs out the 5s bound, and
+        // the equality fails even though Detach still drops the layer.
         PomadeCommitter dcommitter(&rmodel, paths);
-        dcommitter.Enqueue(stageNew);
         size_t const b0 = dcommitter.BuildCount();
+        dcommitter.Enqueue(stageNew);
         auto dl = std::chrono::steady_clock::now() +
             std::chrono::milliseconds(5000);
         while (dcommitter.BuildCount() == b0 &&
