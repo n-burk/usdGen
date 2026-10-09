@@ -2943,9 +2943,9 @@ foreach(_t testUsdGenTileContract testUsdGenStockStormContract testUsdGenInvalid
            testUsdGenSnapshotRace testUsdGenPopulation testUsdGenAdapter testUsdGenScenePublication
            testUsdGenRestAdapter testUsdGenCurveRestAdapter testUsdGenContracts
            testUsdGenExpressionPrimConnection testUsdGenViewportOverlay testUsdGenFurOcclusion
-           testUsdGenSourceColor testUsdGenLookPrimvars
+           testUsdGenSourceColor testUsdGenLookPrimvars testUsdGenTileReuse
            testUsdGenInstance testUsdGenReferenceSource testUsdGenPaintLengthRecook
-           testUsdGenDormantGroom)
+           testUsdGenDormantGroom testUsdGenTauPrimvars)
     add_executable(${_t} tests/${_t}.cpp)
     target_link_libraries(${_t} PRIVATE usdGenTestUtilsHd)
     add_test(NAME ${_t} COMMAND ${_t})
@@ -2959,6 +2959,7 @@ set_tests_properties(testUsdGenFurOcclusion PROPERTIES LABELS "T1;fur;shadows")
 set_tests_properties(testUsdGenSourceColor PROPERTIES LABELS "T1;look;sources")
 set_tests_properties(testUsdGenReferenceSource PROPERTIES LABELS "T1;sources;reference")
 set_tests_properties(testUsdGenLookPrimvars PROPERTIES LABELS "T1;look;primvars")
+set_tests_properties(testUsdGenTileReuse PROPERTIES LABELS "T1;scheduling;tiles")
 set_tests_properties(testUsdGenPaintLengthRecook PROPERTIES
     LABELS "T1;imaging;paint;brush" TIMEOUT 120)
 set_tests_properties(testUsdGenScenePublication PROPERTIES
@@ -2966,6 +2967,7 @@ set_tests_properties(testUsdGenScenePublication PROPERTIES
 set_tests_properties(testUsdGenDormantGroom PROPERTIES
     LABELS "T1;scheduling;imaging;scene-owner" TIMEOUT 60)
 set_tests_properties(testUsdGenInvalidation PROPERTIES LABELS "T1;gate:SI-2")
+set_tests_properties(testUsdGenTauPrimvars PROPERTIES LABELS "T1;imaging;primvars")
 
 add_test(NAME testUsdGenUnpatchedOpenUsd
     COMMAND ${CMAKE_COMMAND}
@@ -4286,6 +4288,40 @@ set_tests_properties(benchUsdGenStorm PROPERTIES
     LABELS "T2;perf;gate:S-1;gate:S-5;gate:S-6;gate:S-12"
     ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" ENVIRONMENT "HD_ENABLE_PERFLOG=1" SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 
+# Shader/viewport/render benchmark (benchUsdGenShaderRender): per-config
+# cold first frame, CPU submission, total frame, and color-AOV checksum on
+# the usd/fixtures/{sr,ss,gr,gs}{1m,10m}.usda matrix (stdlib-only
+# make_shader_scenes.py; gitignored outputs like G1-G5). The ctest entry
+# exercises the small sr010k scene briefly as a smoke gate; full-matrix
+# numbers come from direct bench runs, never ctest.
+if(NOT WIN32)
+    add_executable(benchUsdGenShaderRender tests/perf/benchUsdGenShaderRender.cpp)
+    target_link_libraries(benchUsdGenShaderRender PRIVATE usdGenTestUtilsHd)
+    target_include_directories(benchUsdGenShaderRender PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/test)
+endif()
+usdgen_add_unix_only_test(benchUsdGenShaderRender benchUsdGenShaderRender
+    --scene ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/sr010k.usda
+    --deform --refine 2 --frames 2 --warmup 1 --repeats 1 --res 640x360)
+set_tests_properties(benchUsdGenShaderRender PROPERTIES
+    LABELS "T2;perf"
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+
+# The bench must draw a non-empty frame: it once skipped SetFraming (empty
+# data window) and rooted the render at the Groom prim (excluding the
+# Key/Fill lights), so every checksum verified a single artifact pixel.
+# Renders sr010k once via --dump-ppm and fails on a (near-)clear frame.
+# Skips (77) without the bench binary or a headless EGL context.
+usdgen_add_unix_only_test(testUsdGenShaderBenchFrame "${_usdgen_test_python}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/checks/check_shader_bench_frame.py"
+    "$<TARGET_FILE:benchUsdGenShaderRender>"
+    "${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/sr010k.usda")
+set_tests_properties(testUsdGenShaderBenchFrame PROPERTIES
+    LABELS "T2;perf" TIMEOUT 300
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}"
+    FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+    SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+
 # Groom fixtures G1-G5 (S-1/S-5/S-6/S-12/E-5 scenes): pure-text output of
 # usd/fixtures/make_fixtures.py (stdlib only, no pxr), so T2 stays
 # self-contained wherever python3 exists. Regeneration is byte-identical
@@ -4300,6 +4336,17 @@ if(NOT WIN32)
     add_custom_target(usdGenFixtures ALL
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/g3_head100k.usda)
     add_dependencies(benchUsdGenStorm usdGenFixtures)
+    # Small shader/render matrix (010k/100k; the full 1m/10m scenes are a
+    # manual `make_shader_scenes.py` run, never a default-build artifact).
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/sr010k.usda
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/make_shader_scenes.py --small
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/make_shader_scenes.py
+        COMMENT "Generating usdGen shader/render small scenes (gitignored)"
+        VERBATIM)
+    add_custom_target(usdGenShaderScenes ALL
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/sr010k.usda)
+    add_dependencies(benchUsdGenShaderRender usdGenShaderScenes)
 endif()
 
 # N-4 (09 §5.3/§5.4, 10 §5.6 + §6.5): the remaining M1 Storm decision gates.
