@@ -399,6 +399,29 @@ int main() try {
         Require(cache.key==afterEdit,"an unchanged rebake holds the mesh key");
         checkSame(still,expectEdited,stillShadow,expectEditedShadow,
                   "the repeat bake matches bit-identically");
+        // Retopologize one tile to degenerate (zero-CV) curves through the
+        // same scratch: its jobs now carry no CVs, so the splat clears
+        // their retained sub-boxes instead of merging them. Without the
+        // clear the stale boxes corrupt the rebake.
+        std::vector<UsdGenTilePublication> retopo{
+            Make(0,-0.1f,400), Make(1,0.2f,400)};
+        UsdGenScalpShadowPublication retopoSeedShadow;
+        Require(UsdGenBuildFurOcclusion(&retopo,nullptr,params,nullptr,
+                                       &retopoSeedShadow),
+                "seed bake populates the carried sub-boxes");
+        retopo[1].points.clear();
+        retopo[1].curveVertexCounts.clear();
+        for(int i=0;i<400;++i) retopo[1].curveVertexCounts.push_back(0);
+        auto expectRetopo = retopo;
+        UsdGenScalpShadowPublication retopoShadow, expectRetopoShadow;
+        Require(UsdGenBuildFurOcclusion(&expectRetopo,nullptr,bare,nullptr,
+                                       &expectRetopoShadow),
+                "retopologized uncached reference bake");
+        Require(UsdGenBuildFurOcclusion(&retopo,nullptr,params,nullptr,
+                                       &retopoShadow),
+                "retopologized bake through retained sub-boxes");
+        checkSame(retopo,expectRetopo,retopoShadow,expectRetopoShadow,
+                  "cleared sub-boxes match the uncached bake");
     }
 
     // ---- scalp-cap array carry across deform frames -------------------------

@@ -106,12 +106,9 @@ struct Job {
     size_t   firstCv = 0, cvCount = 0;
 };
 
-// A job's contribution to the density grid, over the sub-box of cells its
-// samples touch; jobs are splatted in parallel and summed over disjoint slabs.
-struct JobDensity {
-    int lo[3] = {0, 0, 0}, dims[3] = {0, 0, 0};
-    std::vector<GfVec3f> density;
-};
+// A job's contribution (UsdGenSplatJobDensity, furOcclusion.h) covers the
+// sub-box of cells its samples touch; jobs are splatted in parallel and
+// summed over disjoint slabs.
 
 // The world-space mesh lives in UsdGenFurOccluderTriangle (furOcclusion.h)
 // so a caller-owned build cache can carry it across cooks.
@@ -1056,17 +1053,25 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
     {
         TRACE_SCOPE("usdGen occlusion: splat");
         auto const clock0=std::chrono::steady_clock::now();
-        std::vector<JobDensity> local(jobs.size());
+        // Carried sub-boxes keep their capacities across cooks (hundreds of
+        // per-cook mallocs otherwise); the per-job zero fill stays, landing
+        // on already-faulted storage. A job with no CVs leaves no
+        // contribution, so it clears its (possibly carried) box: without
+        // this a retopologized cook could merge a stale carried box.
+        std::vector<UsdGenSplatJobDensity> localJobs;
+        std::vector<UsdGenSplatJobDensity>& local =
+            bakeScratch ? bakeScratch->jobDensity : localJobs;
+        local.resize(jobs.size());
         ForEach(dispatcher, jobs.size(), [&](size_t index) {
             Job const& job=jobs[index];
             auto const& tile=(*tiles)[job.tile]; GfVec3f const* const p=positions[job.tile].data;
-            if(!job.cvCount) return;
+            if(!job.cvCount) { local[index].density.clear(); return; }
             GfVec3f jobLo(std::numeric_limits<float>::max()), jobHi(-jobLo[0]);
             for(size_t i=job.firstCv;i<job.firstCv+job.cvCount;++i)
                 for(int k=0;k<3;++k) {
                     jobLo[k]=std::min(jobLo[k],p[i][k]); jobHi[k]=std::max(jobHi[k],p[i][k]);
                 }
-            JobDensity& out=local[index];
+            UsdGenSplatJobDensity& out=local[index];
             int b0[3], b1[3]; float f[3];
             grid.Corners(jobLo,b0,f);
             grid.Corners(jobHi,b1,f);
@@ -1207,7 +1212,7 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
         ForEach(dispatcher, slabs, [&](size_t slab) {
             int const z0=int((slab*size_t(grid.n[2]))/slabs);
             int const z1=int(((slab+1)*size_t(grid.n[2]))/slabs);
-            for(JobDensity const& job:local) {
+            for(UsdGenSplatJobDensity const& job:local) {
                 if(job.density.empty()) continue;
                 int const first=std::max(z0,job.lo[2]);
                 int const last=std::min(z1,job.lo[2]+job.dims[2]);
