@@ -508,6 +508,9 @@ struct UsdGenGroomSceneIndex::_Ingress {
     uint64_t sequence = 0;
     int device = -2;
     double frame = 0;
+    // True once this ingress sampled HdsiSceneGlobals currentFrame. A default
+    // frame of 0 is a real time, so Apply cannot treat "unset" as zero.
+    bool frameObserved = false;
     std::optional<double> stageFrame;
     bool initial = false, failed = false;
     // A pressure-deferred ingress intentionally re-discovers the complete
@@ -1486,7 +1489,9 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
             captureTrustSequence = seq;
         }
         if (closing.load() || packet.failed) { CompleteIngress(seq); return; }
-        if (seq >= sceneFrameSequence) {
+        // Unrelated dirties do not sample the root and must not clobber the
+        // last observed scene frame with the ingress default of 0.
+        if (seq >= sceneFrameSequence && (packet.stageFrame || packet.frameObserved)) {
             sceneFrame = packet.stageFrame.value_or(packet.frame);
             sceneFrameSequence = seq;
         }
@@ -2383,25 +2388,41 @@ void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
                 sourceStack.insert(sourceStack.end(), children.begin(), children.end());
             }
         }
-        // The scene-time fence also advances when all grooms are static or
-        // dormant and the dependency router therefore selected no roots.
-        if (input) {
+        // Sample the root currentFrame only when this ingress can change
+        // time or must capture grooms. An unrelated dirty used to skip the
+        // root entirely; reading it here counts as a groom-root rescan
+        // (testUsdGenIncrementalCapture). Scene time with no affected groom
+        // still advances the playback fence: StageFrame() does not touch the
+        // input, and a scene-globals notice is the one empty-stack case that
+        // does read the root.
+        bool const sceneGlobalsNotice = std::any_of(packet.dirtied.begin(),
+            packet.dirtied.end(), [](auto const& dirty) {
+                return dirty.primPath.IsAbsoluteRootPath() &&
+                    OnlySceneGlobals(dirty.dirtyLocators);
+            });
+        bool const sampleRootFrame = !stack.empty() || sceneGlobalsNotice;
+        if (input && sampleRootFrame) {
             auto frame = HdSceneGlobalsSchema::GetFromParent(
                 input->GetPrim(SdfPath::AbsoluteRootPath()).dataSource).GetCurrentFrame();
             if (frame) {
                 double value = frame->GetTypedValue(0);
-                if (std::isfinite(value)) packet.frame = value;
+                if (std::isfinite(value)) {
+                    packet.frame = value;
+                    packet.frameObserved = true;
+                }
             }
-            // UsdImaging emits animated-prim dirties from SetTime before
-            // HdsiSceneGlobals advances currentFrame. Pair the captured
-            // geometry and native time consumers to the same stage sample;
-            // a later scene-global-only edit can still drive Wind alone.
-            if (packet.stageFrame && std::any_of(catalog->members.begin(),
-                    catalog->members.end(), [&](auto const& member) {
-                        return member.stageFrame &&
-                            *member.stageFrame != *packet.stageFrame;
-                    }))
-                packet.frame = *packet.stageFrame;
+        }
+        // UsdImaging emits animated-prim dirties from SetTime before
+        // HdsiSceneGlobals advances currentFrame. Pair the captured
+        // geometry and native time consumers to the same stage sample;
+        // a later scene-global-only edit can still drive Wind alone.
+        if (packet.stageFrame && std::any_of(catalog->members.begin(),
+                catalog->members.end(), [&](auto const& member) {
+                    return member.stageFrame &&
+                        *member.stageFrame != *packet.stageFrame;
+                }))
+            packet.frame = *packet.stageFrame;
+        if (input && !stack.empty()) {
             while (!stack.empty()) {
                 const auto path = stack.back(); stack.pop_back();
                 const auto prim = input->GetPrim(path);
