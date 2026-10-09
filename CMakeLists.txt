@@ -1539,6 +1539,11 @@ if(USDGEN_BUILD_VULKAN_TESTS)
     set_tests_properties(testUsdGenVulkanScatterGrowPipeline PROPERTIES
         LABELS "T1;vulkan;operators;scatterGrow" RESOURCE_LOCK usdgen_gpu
         TIMEOUT 60 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
+    add_executable(testUsdGenVulkanScatterGrowCpuReject tests/testUsdGenVulkanScatterGrowCpuReject.cpp)
+    target_link_libraries(testUsdGenVulkanScatterGrowCpuReject PRIVATE usdGenVulkanNative)
+    add_test(NAME testUsdGenVulkanScatterGrowCpuReject COMMAND testUsdGenVulkanScatterGrowCpuReject)
+    set_tests_properties(testUsdGenVulkanScatterGrowCpuReject PROPERTIES
+        LABELS "T0;vulkan;operators;scatterGrowCpuReject" TIMEOUT 60)
     add_executable(testUsdGenVulkanRootFrames tests/testUsdGenVulkanRootFrames.cpp
         "${_usdgen_vulkan_rfval_spv}" "${_usdgen_vulkan_rfbuild_spv}")
     target_link_libraries(testUsdGenVulkanRootFrames PRIVATE usdGenVulkanNative)
@@ -2324,6 +2329,12 @@ if(USDGEN_ENABLE_CUDA)
     add_test(NAME testUsdGenCudaScatterGrowValidate COMMAND testUsdGenCudaScatterGrowValidate)
     set_tests_properties(testUsdGenCudaScatterGrowValidate PROPERTIES
         LABELS "T0;cuda;scatter-grow;validate" TIMEOUT 120)
+    add_executable(testUsdGenCudaScatterGrowOverlap tests/testUsdGenCudaScatterGrowOverlap.cpp)
+    target_link_libraries(testUsdGenCudaScatterGrowOverlap PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaScatterGrowOverlap COMMAND testUsdGenCudaScatterGrowOverlap)
+    set_tests_properties(testUsdGenCudaScatterGrowOverlap PROPERTIES
+        LABELS "T0;cuda;topology;scatter-grow" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
     add_executable(testUsdGenCudaScatterInput tests/testUsdGenCudaScatterInput.cpp)
     add_executable(testUsdGenCudaScatterGrowSession tests/testUsdGenCudaScatterGrowSession.cpp)
     add_executable(testUsdGenCudaScatterGrowWidthDag tests/testUsdGenCudaScatterGrowWidthDag.cpp)
@@ -2832,7 +2843,8 @@ foreach(_t testUsdGenGraph testUsdGenKernelDeterminism testUsdGenWidth
            testUsdGenCpuCurveSource testUsdGenLengthRaggedLayout testUsdGenSurfaceRootFrames
            testUsdGenSurfaceRootBindings testUsdGenSurfaceRootBindingBoundaries
            testUsdGenSurfaceBindingCache testUsdGenScatterDensity testUsdGenLimitScatter
-           testUsdGenScatterTwoPass)
+           testUsdGenScatterTwoPass testUsdGenScatterSortSkips
+           testUsdGenScatterDegenerateFan testUsdGenScatterTwoPassMult)
     add_executable(${_t} tests/${_t}.cpp)
     target_link_libraries(${_t} PRIVATE usdGenTestUtils)
     add_test(NAME ${_t} COMMAND ${_t})
@@ -2853,6 +2865,12 @@ set_tests_properties(testUsdGenSurfaceBindingCache PROPERTIES LABELS "T0;sources
 set_tests_properties(testUsdGenScatterDensity PROPERTIES LABELS "T0;sources;scatter;density")
 set_tests_properties(testUsdGenScatterTwoPass PROPERTIES LABELS "T0;sources;scatter;twopass")
 target_link_libraries(testUsdGenScatterTwoPass PRIVATE usdGenMath)
+set_tests_properties(testUsdGenScatterSortSkips PROPERTIES LABELS "T0;sources;scatter;sortskips")
+target_link_libraries(testUsdGenScatterSortSkips PRIVATE usdGenMath)
+set_tests_properties(testUsdGenScatterDegenerateFan PROPERTIES LABELS "T0;sources;scatter;degenfan")
+target_link_libraries(testUsdGenScatterDegenerateFan PRIVATE usdGenMath)
+set_tests_properties(testUsdGenScatterTwoPassMult PROPERTIES LABELS "T0;sources;scatter;twopassmult")
+target_link_libraries(testUsdGenScatterTwoPassMult PRIVATE usdGenMath)
 
 # M1 T0 perf benches (E-1/E-7 via --threads; E-2 sparse; carried in from
 # prototypes/data-plane-benchmark, 11 §2.2).
