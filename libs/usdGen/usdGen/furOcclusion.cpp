@@ -1250,7 +1250,15 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
         TF_DEBUG(USDGEN_FUR).Msg("usdGen fur: occluder mesh %s\n",
                                  occluderHit ? "reused" : "rebuilt");
         if (!occluderHit) {
-        for(UsdGenFurOccluder const& occluder:params.occluders) {
+        if (occluderCache &&
+            occluderCache->topo.size() != params.occluders.size()) {
+            // Structural change (an occluder added or removed): the fan
+            // entries are per-ordinal, so drop them all rather than skew.
+            occluderCache->topo.clear();
+            occluderCache->topo.resize(params.occluders.size());
+        }
+        for(size_t oi=0;oi<params.occluders.size();++oi) {
+            UsdGenFurOccluder const& occluder=params.occluders[oi];
             GfMatrix4f const m(occluder.worldMatrix);
             bool const identity = occluder.worldMatrix == GfMatrix4d(1.0);
             size_t const vbase=vertices.size();
@@ -1285,14 +1293,66 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
             if(badPoint!=nPoints)
                 throw std::invalid_argument("non-finite occluder point");
             }
-            // Faces: fan triangulation is per-face independent, so chunks
-            // emit into thread-local vectors merged in chunk order: the same
-            // triangles in the same order, degenerates skipped the same way.
-            // The serial build throws on its first bad face in scan order;
-            // chunks stop at their first bad face and the serial
-            // lexicographic min over (face, check, corner) reproduces that
-            // exact throw, since every face before it scanned clean.
+            // Faces: a deforming surface moves its points every cook but never
+            // its topology, so the fan expansion and its validation run once
+            // and later rebuilds emit straight from the cached triples (the
+            // degenerate skip still re-evaluates per cook: it reads
+            // positions). On a topology hit chunks emit disjoint ranges of
+            // the pre-sized output directly: no thread-local vectors, no
+            // merge. When no chunk skipped (every benchmark cook) that is
+            // already exactly the merged sequence; otherwise the rare serial
+            // compact below restores it in chunk order. The fill is the old
+            // validated expansion verbatim (same throws, same triangles)
+            // plus the triple record.
             { TRACE_SCOPE("usdGen tris: faces");
+            bool topoHit=false;
+            if(occluderCache) {
+                auto const& topo=occluderCache->topo[oi];
+                topoHit=topo.valid
+                    && topo.counts.size()==occluder.faceVertexCounts.size()
+                    && topo.counts.cdata()==occluder.faceVertexCounts.cdata()
+                    && topo.indices.size()==occluder.faceVertexIndices.size()
+                    && topo.indices.cdata()==occluder.faceVertexIndices.cdata()
+                    && topo.pointsSize==occluder.points.size();
+            }
+            if(topoHit) {
+                auto const& fan=occluderCache->topo[oi].fan;
+                size_t const nFan=fan.size();
+                size_t const nHChunks=std::max<size_t>(1,std::min(nFan,
+                    size_t(dispatcher?std::max(1,dispatcher->MaxConcurrency()):1)));
+                size_t const tbase=triangles.size();
+                triangles.resize(tbase+nFan);
+                std::vector<size_t> hCounts(nHChunks,0);
+                ForEach(dispatcher,nHChunks,[&](size_t chunk) {
+                    size_t const first=(chunk*nFan)/nHChunks;
+                    size_t const last=((chunk+1)*nFan)/nHChunks;
+                    size_t w=tbase+first, kept=0;
+                    for(size_t t=first;t<last;++t) {
+                        auto const& r=fan[t];
+                        uint32_t const ia=base+r.a, ib=base+r.b, ic=base+r.c;
+                        UsdGenFurOccluderTriangle tri{vertices[ia],vertices[ib],vertices[ic],
+                                         GfVec3f(0),ia,ib,ic};
+                        GfVec3f const n=GfCross(tri.b-tri.a,tri.c-tri.a);
+                        float const length=n.GetLength();
+                        if(!(length>0.f)) continue;
+                        tri.normal=n/length;
+                        triangles[w++]=tri; ++kept;
+                    }
+                    hCounts[chunk]=kept;
+                });
+                size_t emitted=0;
+                for(size_t c:hCounts) emitted+=c;
+                if(emitted!=nFan) {
+                    size_t w=tbase;
+                    for(size_t chunk=0;chunk<nHChunks;++chunk) {
+                        size_t const first=(chunk*nFan)/nHChunks;
+                        size_t const n=hCounts[chunk];
+                        for(size_t k=0;k<n;++k,++w)
+                            triangles[w]=triangles[tbase+first+k];
+                    }
+                    triangles.resize(tbase+emitted);
+                }
+            } else {
             size_t const nFaces=occluder.faceVertexCounts.size();
             size_t const nFChunks=std::max<size_t>(1,std::min(nFaces,
                 size_t(dispatcher?std::max(1,dispatcher->MaxConcurrency()):1)));
@@ -1311,10 +1371,14 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
             };
             std::vector<FaceError> chunkErr(nFChunks);
             std::vector<std::vector<UsdGenFurOccluderTriangle>> fchunks(nFChunks);
+            using FanTri=UsdGenFurOccluderBuild::TopoEntry::Tri;
+            std::vector<std::vector<FanTri>> tchunks(nFChunks);
+            bool const record=occluderCache!=nullptr;
             ForEach(dispatcher,nFChunks,[&](size_t chunk) {
                 size_t const first=(chunk*nFaces)/nFChunks;
                 size_t const last=((chunk+1)*nFaces)/nFChunks;
                 auto& out=fchunks[chunk]; out.reserve(last-first);
+                auto& tout=tchunks[chunk]; if(record) tout.reserve(last-first);
                 FaceError err;
                 size_t cursor=chunkCursor[chunk];
                 for(size_t f=first;f<last && !err.has;++f) {
@@ -1334,14 +1398,16 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
                         if(index<0 || size_t(index)>=occluder.points.size()) {
                             err={f,3,here,3,true}; faceBad=true; return uint32_t(0);
                         }
-                        return base+uint32_t(index);
+                        return uint32_t(index);
                     };
-                    uint32_t const vfirst=vertex(0);
+                    uint32_t const afirst=vertex(0);
                     for(size_t k=1;k+1<size_t(face) && !faceBad;++k) {
-                        uint32_t const ib=vertex(k);
+                        uint32_t const ab=vertex(k);
                         if(faceBad) break;
-                        uint32_t const ic=vertex(k+1);
+                        uint32_t const ac=vertex(k+1);
                         if(faceBad) break;
+                        if(record) tout.push_back({afirst,ab,ac});
+                        uint32_t const vfirst=base+afirst, ib=base+ab, ic=base+ac;
                         UsdGenFurOccluderTriangle tri{vertices[vfirst],vertices[ib],vertices[ic],
                                      GfVec3f(0),vfirst,ib,ic};
                         GfVec3f const n=GfCross(tri.b-tri.a,tri.c-tri.a);
@@ -1374,14 +1440,28 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
                     throw std::invalid_argument("invalid occluder face cardinality");
                 throw std::invalid_argument("occluder face index out of range");
             }
+            if(occluderCache) {
+                auto& topo=occluderCache->topo[oi];
+                topo.counts=occluder.faceVertexCounts;
+                topo.indices=occluder.faceVertexIndices;
+                topo.pointsSize=occluder.points.size();
+                topo.fan.clear();
+                size_t totalT=0;
+                for(auto const& c:tchunks) totalT+=c.size();
+                topo.fan.reserve(totalT);
+                for(auto const& c:tchunks)
+                    topo.fan.insert(topo.fan.end(),c.begin(),c.end());
+                topo.valid=true;
+            }
+            }
             }
         }
         // Area-weighted vertex normals: the cross product's length is twice the
         // triangle's area, so accumulating it unnormalised is the weighting.
         // The max edge length fills in the same pass (see the header): the
         // triangle is already in hand, so the edges, vote, and shell loops'
-        // per-cook lengths cost one sqrt triple per mesh build, never a
-        // second sweep over the mesh.
+        // per-cook lengths cost one sqrt per triangle per mesh build, never
+        // a second sweep over the mesh.
         { TRACE_SCOPE("usdGen tris: normals");
         vertexNormals.assign(vertices.size(),GfVec3f(0));
         extents.resize(triangles.size());

@@ -60,6 +60,23 @@ struct UsdGenFurOccluderBuild
     std::vector<UsdGenFurOccluder> digestArrays;
     uint64_t digest = 0;
     bool digestValid = false;
+    // Cached fan-triangulation index triples, one entry per occluder
+    // ordinal: a deforming surface moves its points every cook but never
+    // its topology, so the fan expansion and its validation run once and
+    // later rebuilds emit triangles straight from the triples (the
+    // degenerate skip still re-evaluates per cook: it reads positions).
+    // Keyed on (size, cdata) of the counts/indices shares plus the point
+    // count, and the entry holds those shares (same CoW rule as digest:
+    // a mutating subscript detaches, so content under a live share is
+    // immutable and an address can never alias different content).
+    struct TopoEntry {
+        VtIntArray counts, indices;
+        size_t pointsSize = 0;
+        struct Tri { uint32_t a, b, c; };
+        std::vector<Tri> fan;
+        bool valid = false;
+    };
+    std::vector<TopoEntry> topo;
 };
 
 /// Caller-owned scratch for the scalp-shadow cap build: the per-chunk
