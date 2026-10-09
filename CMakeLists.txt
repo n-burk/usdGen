@@ -2883,10 +2883,18 @@ set_tests_properties(testUsdGenReferenceSource PROPERTIES LABELS "T1;sources;ref
 set_tests_properties(testUsdGenLookPrimvars PROPERTIES LABELS "T1;look;primvars")
 set_tests_properties(testUsdGenPaintLengthRecook PROPERTIES
     LABELS "T1;imaging;paint;brush" TIMEOUT 120)
+# The 4098-generation coalescing burst fits in 60s on a quiet runner and
+# misses it when the canonical collide playback test is cooking on the
+# other cores. Serialize so the budget measures the burst, not the neighbor.
 set_tests_properties(testUsdGenScenePublication PROPERTIES
-    LABELS "T1;scheduling;imaging;scene-owner" TIMEOUT 60)
+    LABELS "T1;scheduling;imaging;scene-owner" TIMEOUT 60 RUN_SERIAL TRUE)
+# Canonical Collide playback cooks the 8000-density example (128 collide
+# iterations, cut-then-collide) several times, plus the test's own 5s
+# playback window. The workflow's 180s --timeout is only the backstop for
+# tests that forgot a TIMEOUT; this one needs its own, and it needs the
+# machine. Parallel with the rest of T0/T1 it is killed at 180s every run.
 set_tests_properties(testUsdGenNativeTimePublication PROPERTIES
-    LABELS "T1;scheduling;imaging;operators")
+    LABELS "T1;scheduling;imaging;operators" TIMEOUT 600 RUN_SERIAL TRUE)
 target_compile_definitions(testUsdGenNativeTimePublication PRIVATE
     USDGEN_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 set_tests_properties(testUsdGenDormantGroom PROPERTIES
@@ -3227,9 +3235,13 @@ set_tests_properties(testUsdGenToolsApi PROPERTIES
 add_executable(testUsdGenPomadeIndex tests/testUsdGenPomadeIndex.cpp)
 target_link_libraries(testUsdGenPomadeIndex PRIVATE usdGenPomade hd)
 add_test(NAME testUsdGenPomadeIndex COMMAND testUsdGenPomadeIndex)
+# G6 times a 17.6 MB retained-array copy against an 8 ms move budget.
+# On the 4-vCPU ctest job that copy lands while other tests are in flight
+# and reports ~17 ms; alone it is a memcpy. Serialize this case only
+# (the --no-test-tube twin returns before G6).
 set_tests_properties(testUsdGenPomadeIndex PROPERTIES
     ENVIRONMENT "USDGENPOMADE_TEST_TUBE=1"
-    LABELS "T1;pomade" TIMEOUT 120)
+    LABELS "T1;pomade" TIMEOUT 120 RUN_SERIAL TRUE)
 # The opt-out the gate record_usd.ps1 relies on: with USDGENPOMADE_TEST_TUBE=0
 # (and by default — the binary clears the ambient variable first, so this
 # pins the default itself) the index constructs empty (no scaffolding in
@@ -3254,9 +3266,12 @@ set_tests_properties(testUsdGenPomadeApi PROPERTIES
 add_executable(testUsdGenPomadeCommit tests/testUsdGenPomadeCommit.cpp)
 target_link_libraries(testUsdGenPomadeCommit PRIVATE usdGenPomade usdGenImaging usd usdGeom sdf)
 add_test(NAME testUsdGenPomadeCommit COMMAND testUsdGenPomadeCommit)
+# TN-4 bounds each idle TransferContent slot at 8 ms. The first attempt on
+# the parallel 4-vCPU job misses that (about 11 ms) and the retry passes.
+# Same serialization as the hierarchy fan-out budget below.
 set_tests_properties(testUsdGenPomadeCommit PROPERTIES
     ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}"
-    LABELS "T1;pomade;gate:TN-4" TIMEOUT 300
+    LABELS "T1;pomade;gate:TN-4" TIMEOUT 300 RUN_SERIAL TRUE
     SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 
 # Sparse Output: cage guides and a PTex ownership map feed runtime
@@ -3336,8 +3351,11 @@ if(USDGEN_ENABLE_CUDA)
     target_link_libraries(testUsdGenPomadeHierarchy PRIVATE CUDA::cudart)
 endif()
 add_test(NAME testUsdGenPomadeHierarchy COMMAND testUsdGenPomadeHierarchy)
+# TN-1 bounds one hierarchy move at 4 ms over the reference fan-out.
+# Under parallel ctest the same move reports ~6 ms and fails; the retry,
+# once the machine has drained, passes in a few hundred milliseconds.
 set_tests_properties(testUsdGenPomadeHierarchy PROPERTIES
-    LABELS "T0;pomade" TIMEOUT 300)
+    LABELS "T0;pomade" TIMEOUT 300 RUN_SERIAL TRUE)
 
 # T1: the versioned .ptx through the real ptex() expression (per-strand
 # equality with the live primvar), the bake worker, the swap, and the

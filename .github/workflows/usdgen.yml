@@ -207,10 +207,27 @@ jobs:
       - name: Validate software Vulkan execution
         env:
           USDGEN_VULKAN_ALLOW_SOFTWARE: "1"
-          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
           VK_INSTANCE_LAYERS: VK_LAYER_KHRONOS_validation
           VK_LAYER_ENABLES: VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
         run: |
+          # Mesa 25 (ubuntu-24.04) ships lavapipe as lvp_icd.json. The older
+          # lvp_icd.x86_64.json name makes vkCreateInstance return
+          # VK_ERROR_INCOMPATIBLE_DRIVER (-9), so every software test either
+          # skips or fails before it can run.
+          icd=""
+          for candidate in \
+              /usr/share/vulkan/icd.d/lvp_icd.json \
+              /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          do
+            if [ -f "$candidate" ]; then icd="$candidate"; break; fi
+          done
+          if [ -z "$icd" ]; then
+            echo "lavapipe ICD not found under /usr/share/vulkan/icd.d" >&2
+            ls -la /usr/share/vulkan/icd.d >&2 || true
+            exit 1
+          fi
+          export VK_ICD_FILENAMES="$icd"
+          echo "Using Vulkan ICD $VK_ICD_FILENAMES"
           export USD="${GITHUB_WORKSPACE}/usd-install"
           export GENBUILD="${GITHUB_WORKSPACE}/build-vulkan"
           source bin/_env.sh
